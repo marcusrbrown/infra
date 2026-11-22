@@ -20,9 +20,25 @@ export interface SshControlOptions {
   persist: string
 }
 
-/** Options for `ssh()` only; `scp()` and `waitForSsh` never multiplex. */
+/** Options for `ssh()` and `scp()`; `waitForSsh` never multiplexes. */
 export interface SshExecOptions extends SshCommandOptions {
   control?: SshControlOptions | undefined
+}
+
+/** How long a shared master outlives its last client. Same value as the traces provisioner and deploy. */
+export const SSH_CONTROL_PERSIST = '120s'
+
+/**
+ * The droplet image ships `ufw limit 22/tcp`: the sixth new connection from one source within 30 seconds is refused.
+ * A key scan opens several connections, so a run waits this long before each scan and again after the last one.
+ */
+export const SSH_SCAN_PAUSE_MS = 35_000
+
+// Options that make a call share (or become) the master connection at `control.path`.
+function controlFlags(control: SshControlOptions | undefined): string[] {
+  return control
+    ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${control.path}`, '-o', `ControlPersist=${control.persist}`]
+    : []
 }
 
 // When an identity file is provided, pin it and stop SSH from offering agent keys
@@ -47,9 +63,7 @@ export function ssh(host: string, command: string, user: string, opts?: SshExecO
     'StrictHostKeyChecking=accept-new',
     '-o',
     'ConnectTimeout=10',
-    ...(control
-      ? ['-o', 'ControlMaster=auto', '-o', `ControlPath=${control.path}`, '-o', `ControlPersist=${control.persist}`]
-      : []),
+    ...controlFlags(control),
     `${user}@${host}`,
     command,
   ]
@@ -58,8 +72,9 @@ export function ssh(host: string, command: string, user: string, opts?: SshExecO
 /**
  * Builds an SCP command array with standard BatchMode/StrictHostKeyChecking/ConnectTimeout flags.
  * When opts.identityFile is set, prepends `-i <path>` and `-o IdentitiesOnly=yes`.
+ * When opts.control is set, adds the same multiplexing options as `ssh()`, so a copy rides the shared connection.
  */
-export function scp(host: string, source: string, target: string, user: string, opts?: SshCommandOptions): string[] {
+export function scp(host: string, source: string, target: string, user: string, opts?: SshExecOptions): string[] {
   return [
     'scp',
     ...identityFlags(opts),
@@ -69,9 +84,50 @@ export function scp(host: string, source: string, target: string, user: string, 
     'StrictHostKeyChecking=accept-new',
     '-o',
     'ConnectTimeout=10',
+    ...controlFlags(opts?.control),
     source,
     `${user}@${host}:${target}`,
   ]
+}
+
+/**
+ * `ssh -O exit` on the socket: asks the master to leave. It makes no connection, so it needs neither the identity
+ * nor the host keys; the host only names the master to ssh. A missing master is an error the caller tolerates.
+ */
+export function closeMasterArgv(host: string, user: string, controlPath: string): string[] {
+  return ['ssh', '-o', 'BatchMode=yes', '-o', `ControlPath=${controlPath}`, '-O', 'exit', `${user}@${host}`]
+}
+
+/**
+ * Runs `body` with one SSH master that every call carrying `control` shares, so the whole body is one connection.
+ * The socket lives in a private (0700) directory directly under /tmp: the macOS temp directory is too long for a
+ * unix socket path (about 104 bytes). The master is closed (`ssh -O exit`) and the directory removed when `body`
+ * ends, by returning or by throwing. Nothing in `body` may end the process: `process.exit` skips that clean-up.
+ */
+export async function withSshControl<T>(
+  host: string,
+  user: string,
+  body: (control: SshControlOptions) => Promise<T>,
+): Promise<T> {
+  const directory = mkdtempSync('/tmp/infra-cm-')
+  chmodSync(directory, 0o700)
+  const path = join(directory, 'cm')
+  try {
+    return await body({path, persist: SSH_CONTROL_PERSIST})
+  } finally {
+    try {
+      // Finds no master when no call got as far as connecting; that opens no connection either.
+      const proc = Bun.spawn(closeMasterArgv(host, user, path), {
+        stdout: 'pipe',
+        stderr: 'pipe',
+        signal: AbortSignal.timeout(5000),
+      })
+      await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+    } catch {
+      // The master also exits on its own after ControlPersist.
+    }
+    rmSync(directory, {recursive: true, force: true})
+  }
 }
 
 /** A materialized private-key file plus a best-effort cleanup callback. */

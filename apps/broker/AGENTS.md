@@ -78,6 +78,8 @@ The script will:
 9. Verify Docker is installed
 10. Start the compose stack
 
+Steps 7-10 share one SSH connection (`withSshControl`, ControlMaster socket in a private `/tmp` directory, closed in a `finally`), and a 35 s pause follows the key scans, because the droplet's UFW rate-limits new SSH connections (6 per 30 s); never add an ssh/scp call to the provisioner outside that session.
+
 After provisioning: commit the updated `.github/known_hosts` before the first CI deploy.
 
 ### Bootstrap ordering

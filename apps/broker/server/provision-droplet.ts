@@ -7,13 +7,19 @@ import {
   dropletExists,
   getDropletIpWithWait,
   getSshFingerprint,
+  hostKeysPinned,
   materializeIdentityFile,
   pinHostKeys,
   run,
   scp,
+  sleep,
   ssh,
+  SSH_SCAN_PAUSE_MS,
   validateDoctl,
   waitForSsh,
+  withSshControl,
+  type SshControlOptions,
+  type SshExecOptions,
 } from '@marcusrbrown/infra-shared/server/droplet-helpers'
 
 import {validateBrokerHost} from '../src/host'
@@ -56,6 +62,11 @@ export function resolveProvisionIdentity(privateKey: string | undefined): Provis
 // Internal helper functions
 // ---------------------------------------------------------------------------
 
+/** Options for one remote call: the identity (if any) and the run's shared control socket (if any). */
+function sshOptions(identityFile: string | undefined, control: SshControlOptions | undefined): SshExecOptions {
+  return {...(identityFile ? {identityFile} : {}), ...(control ? {control} : {})}
+}
+
 async function createDropletIfMissing(): Promise<boolean> {
   const exists = await dropletExists(DROPLET_NAME)
   if (exists) {
@@ -87,11 +98,15 @@ async function createDropletIfMissing(): Promise<boolean> {
   return false
 }
 
-export async function copyComposeFiles(host: string, identityFile?: string): Promise<void> {
+export async function copyComposeFiles(
+  host: string,
+  identityFile?: string,
+  control?: SshControlOptions,
+): Promise<void> {
   const appRoot = resolve(import.meta.dir, '..')
   const compose = resolve(appRoot, 'docker-compose.yaml')
   const caddy = resolve(appRoot, 'config/Caddyfile')
-  const opts = identityFile ? {identityFile} : undefined
+  const opts = sshOptions(identityFile, control)
 
   await run('Creating remote directories', ssh(host, `mkdir -p ${REMOTE_DIR}/config`, REMOTE_USER, opts))
   await run('Uploading docker-compose.yaml', scp(host, compose, `${REMOTE_DIR}/docker-compose.yaml`, REMOTE_USER, opts))
@@ -116,10 +131,11 @@ export async function writeRemoteEnvFile(
   brokerHost: string,
   brokerAud: string,
   identityFile?: string,
+  control?: SshControlOptions,
 ): Promise<void> {
   const envFile = `${[`CLIPROXY_MANAGEMENT_KEY=${managementKey}`, `BROKER_HOST=${brokerHost}`, `BROKER_AUD=${brokerAud}`].join('\n')}\n`
 
-  const opts = identityFile ? {identityFile} : undefined
+  const opts = sshOptions(identityFile, control)
 
   // Pipe contents through stdin — never embed in the command string.
   const proc = Bun.spawn(ssh(host, `cat > ${REMOTE_DIR}/.env`, REMOTE_USER, opts), {
@@ -139,14 +155,14 @@ export async function writeRemoteEnvFile(
   console.log('\u001B[1;34m==>\u001B[0m Writing remote .env file')
 }
 
-export async function installDocker(host: string, identityFile?: string): Promise<void> {
-  const opts = identityFile ? {identityFile} : undefined
+export async function installDocker(host: string, identityFile?: string, control?: SshControlOptions): Promise<void> {
+  const opts = sshOptions(identityFile, control)
   // docker-20-04 image already has Docker; this is a no-op guard for other images.
   await run('Verifying Docker installation', ssh(host, 'docker --version', REMOTE_USER, opts))
 }
 
-export async function deployCompose(host: string, identityFile?: string): Promise<void> {
-  const opts = identityFile ? {identityFile} : undefined
+export async function deployCompose(host: string, identityFile?: string, control?: SshControlOptions): Promise<void> {
+  const opts = sshOptions(identityFile, control)
   await run('Starting Docker Compose stack', ssh(host, `cd ${REMOTE_DIR} && docker compose up -d`, REMOTE_USER, opts))
 }
 
@@ -157,6 +173,10 @@ export async function deployCompose(host: string, identityFile?: string): Promis
 export interface PerformProvisioningDeps {
   waitForSsh?: typeof waitForSsh
   pinHostKeys?: typeof pinHostKeys
+  hostKeysPinned?: typeof hostKeysPinned
+  sleep?: typeof sleep
+  /** Runs the body with one shared SSH master and closes it afterwards. */
+  withControl?: typeof withSshControl
   copyComposeFiles?: typeof copyComposeFiles
   writeRemoteEnvFile?: typeof writeRemoteEnvFile
   installDocker?: typeof installDocker
@@ -167,6 +187,10 @@ export interface PerformProvisioningDeps {
  * Performs the SSH-reliant provisioning steps after the droplet IP is known.
  * Materializes the SSH key (if provided) into a temp file, passes it through
  * all SSH/SCP helper calls, and cleans it up in a `finally` block.
+ *
+ * Every step after the key pin goes over one ControlMaster connection: the droplet runs
+ * `ufw limit 22/tcp` (six new connections per 30 seconds per source), and the steps used to be
+ * six separate connections. The master is closed when the steps end, by returning or by throwing.
  *
  * Injectable deps allow tests to assert identity file threading without live
  * SSH connections. Production callers omit deps and get the real implementations.
@@ -181,6 +205,9 @@ export async function performProvisioning(
 ): Promise<void> {
   const resolvedWaitForSsh = deps.waitForSsh ?? waitForSsh
   const resolvedPinHostKeys = deps.pinHostKeys ?? pinHostKeys
+  const resolvedHostKeysPinned = deps.hostKeysPinned ?? hostKeysPinned
+  const resolvedSleep = deps.sleep ?? sleep
+  const resolvedWithControl = deps.withControl ?? withSshControl
   const resolvedCopyComposeFiles = deps.copyComposeFiles ?? copyComposeFiles
   const resolvedWriteRemoteEnvFile = deps.writeRemoteEnvFile ?? writeRemoteEnvFile
   const resolvedInstallDocker = deps.installDocker ?? installDocker
@@ -191,13 +218,18 @@ export async function performProvisioning(
   try {
     await resolvedWaitForSsh(dropletIp, REMOTE_USER, {identityFile})
     const knownHostsPath = resolve(import.meta.dir, '..', '..', '..', '.github', 'known_hosts')
-    await resolvedPinHostKeys(BROKER_DOMAIN, dropletIp, knownHostsPath, {
-      marker: `# broker droplet (${dropletIp} / ${BROKER_DOMAIN})`,
+    const marker = `# broker droplet (${dropletIp} / ${BROKER_DOMAIN})`
+    const willScan = !resolvedHostKeysPinned(knownHostsPath, marker)
+    await resolvedPinHostKeys(BROKER_DOMAIN, dropletIp, knownHostsPath, {marker, pauseBeforeScanMs: SSH_SCAN_PAUSE_MS})
+    // The scans just spent the connection budget; the control master must not open in the same window.
+    if (willScan) await resolvedSleep(SSH_SCAN_PAUSE_MS)
+
+    await resolvedWithControl(dropletIp, REMOTE_USER, async control => {
+      await resolvedCopyComposeFiles(dropletIp, identityFile, control)
+      await resolvedWriteRemoteEnvFile(dropletIp, managementKey, brokerHost, brokerAud, identityFile, control)
+      await resolvedInstallDocker(dropletIp, identityFile, control)
+      await resolvedDeployCompose(dropletIp, identityFile, control)
     })
-    await resolvedCopyComposeFiles(dropletIp, identityFile)
-    await resolvedWriteRemoteEnvFile(dropletIp, managementKey, brokerHost, brokerAud, identityFile)
-    await resolvedInstallDocker(dropletIp, identityFile)
-    await resolvedDeployCompose(dropletIp, identityFile)
   } finally {
     cleanup()
   }

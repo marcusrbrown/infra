@@ -651,7 +651,7 @@ Move the file to a safe store (1Password, encrypted backup, etc.). The tar conta
 bunx @marcusrbrown/infra gateway restore --include-ca --input ./gateway-ca.tar
 ```
 
-The CLI validates the archive locally first — it must contain exactly the two expected files, otherwise it is rejected before any remote mutation. It then confirms the `fro-bot_mitmproxy-certs` volume exists on the host (restore never creates it), uploads to an unguessable remote path, extracts into the named volume, restarts mitmproxy + gateway, and byte-equal compares the restored cert + key against the input archive. Mismatch aborts with a clear error.
+The CLI validates the archive locally first — it must contain exactly the two expected files, otherwise it is rejected before any remote mutation. It then confirms the `fro-bot_mitmproxy-certs` volume exists on the host (restore never creates it), uploads to an unguessable remote path, extracts into the named volume, restarts mitmproxy + gateway, and byte-equal compares the restored cert + key against the input archive. Mismatch aborts with a clear error. All nine ssh/scp calls share one ControlMaster connection (socket in a private `/tmp` directory, master closed when the restore ends), because the droplet's UFW rate-limits new SSH connections (6 per 30 s); the pinned `UserKnownHostsFile` and `StrictHostKeyChecking=yes` apply to every call, the close included.
 
 **Restore — full disaster recovery (droplet destroyed):**
 

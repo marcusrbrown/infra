@@ -1,9 +1,10 @@
-import {mkdtempSync, readFileSync, statSync, writeFileSync} from 'node:fs'
+import {existsSync, mkdtempSync, readFileSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {
+  closeMasterArgv,
   dropletExists,
   getDropletIpWithWait,
   getSshFingerprint,
@@ -15,8 +16,11 @@ import {
   scp,
   sleep,
   ssh,
+  SSH_CONTROL_PERSIST,
+  SSH_SCAN_PAUSE_MS,
   validateDoctl,
   waitForSsh,
+  withSshControl,
 } from './droplet-helpers'
 
 // ---------------------------------------------------------------------------
@@ -93,6 +97,17 @@ function recorder() {
     events.push(`sleep:${ms}`)
   }
   return {events, scan, sleepFn}
+}
+
+// Replaces Bun.spawn with a recorder: nothing is spawned, every argv is kept, every call exits 0.
+function spawnRecorder(): string[][] {
+  const calls: string[][] = []
+  const spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((cmd: string[]) => {
+    calls.push([...cmd])
+    return makeSpawnResult('', 0)
+  }) as unknown as typeof Bun.spawn)
+  spies.push(spawnSpy)
+  return calls
 }
 
 describe('droplet-helpers', () => {
@@ -225,6 +240,142 @@ describe('droplet-helpers', () => {
 
     it('is byte-identical to the no-opts form when opts omits identityFile', () => {
       expect(scp('1.2.3.4', '/src', '/dst', 'root', {})).toEqual(scp('1.2.3.4', '/src', '/dst', 'root'))
+    })
+
+    it('adds the same multiplexing options as ssh when control is set, so a copy shares the connection', () => {
+      const control = {path: '/tmp/cm/s', persist: '120s'}
+      const result = scp('1.2.3.4', '/local/file', '/remote/path', 'root', {identityFile: '/tmp/x/key', control})
+      expect(result).toEqual([
+        'scp',
+        '-i',
+        '/tmp/x/key',
+        '-o',
+        'IdentitiesOnly=yes',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        'ConnectTimeout=10',
+        '-o',
+        'ControlMaster=auto',
+        '-o',
+        'ControlPath=/tmp/cm/s',
+        '-o',
+        'ControlPersist=120s',
+        '/local/file',
+        'root@1.2.3.4:/remote/path',
+      ])
+    })
+
+    it('is byte-identical to the no-opts form when opts carries no control', () => {
+      expect(scp('1.2.3.4', '/src', '/dst', 'root', {control: undefined})).toEqual(
+        scp('1.2.3.4', '/src', '/dst', 'root'),
+      )
+    })
+  })
+
+  // -------------------------------------------------------------------------
+  // Shared ControlMaster session
+  // -------------------------------------------------------------------------
+
+  describe('closeMasterArgv', () => {
+    it('asks the master at the socket to exit, and makes no connection of its own', () => {
+      expect(closeMasterArgv('1.2.3.4', 'root', '/tmp/cm/s')).toEqual([
+        'ssh',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        'ControlPath=/tmp/cm/s',
+        '-O',
+        'exit',
+        'root@1.2.3.4',
+      ])
+    })
+  })
+
+  describe('withSshControl', () => {
+    it('hands the body a socket inside a private directory, and removes the directory afterwards', async () => {
+      spawnRecorder()
+      let socket = ''
+      let directory = ''
+      let mode = 0
+
+      await withSshControl('1.2.3.4', 'root', async control => {
+        socket = control.path
+        directory = join(control.path, '..')
+        mode = statSync(directory).mode & 0o777
+        expect(existsSync(directory)).toBe(true)
+        expect(control.persist).toBe(SSH_CONTROL_PERSIST)
+      })
+
+      expect(mode).toBe(0o700)
+      expect(socket.startsWith('/tmp/')).toBe(true)
+      expect(existsSync(directory)).toBe(false)
+    })
+
+    it('returns the body value and closes the master once, over the same socket, after the body', async () => {
+      const calls = spawnRecorder()
+      let socket = ''
+
+      const value = await withSshControl('1.2.3.4', 'root', async control => {
+        socket = control.path
+        expect(calls).toEqual([])
+        return 42
+      })
+
+      expect(value).toBe(42)
+      expect(calls).toEqual([closeMasterArgv('1.2.3.4', 'root', socket)])
+    })
+
+    it('closes the master and removes the directory when the body throws, and rethrows the body error', async () => {
+      const calls = spawnRecorder()
+      let socket = ''
+      let directory = ''
+
+      await expect(
+        withSshControl('1.2.3.4', 'root', async control => {
+          socket = control.path
+          directory = join(control.path, '..')
+          throw new Error('step failed')
+        }),
+      ).rejects.toThrow('step failed')
+
+      expect(calls).toEqual([closeMasterArgv('1.2.3.4', 'root', socket)])
+      expect(existsSync(directory)).toBe(false)
+    })
+
+    it('does not let a failing close hide the result or leave the directory behind', async () => {
+      const spawnSpy = spyOn(Bun, 'spawn').mockImplementation((() => {
+        throw new Error('spawn failed')
+      }) as unknown as typeof Bun.spawn)
+      spies.push(spawnSpy)
+      let directory = ''
+
+      const value = await withSshControl('1.2.3.4', 'root', async control => {
+        directory = join(control.path, '..')
+        return 'ok'
+      })
+
+      expect(value).toBe('ok')
+      expect(existsSync(directory)).toBe(false)
+    })
+
+    it('uses a fresh directory for every session', async () => {
+      spawnRecorder()
+      const sockets: string[] = []
+      for (let index = 0; index < 2; index += 1) {
+        await withSshControl('1.2.3.4', 'root', async control => {
+          sockets.push(control.path)
+        })
+      }
+      expect(new Set(sockets).size).toBe(2)
+    })
+  })
+
+  describe('SSH_SCAN_PAUSE_MS', () => {
+    it('is longer than the 30 s window UFW `limit 22/tcp` counts new connections over', () => {
+      expect(SSH_SCAN_PAUSE_MS).toBeGreaterThan(30_000)
     })
   })
 

@@ -3,7 +3,7 @@ import {readdirSync} from 'node:fs'
 import {describe, expect, it} from 'bun:test'
 
 import {ENDPOINTS, PATHS, PORTS} from './src/health-report'
-import {TEMPO_USER_ID, TRACES_SENTINEL_PATH} from './src/host'
+import {GRAFANA_USER_ID, TEMPO_USER_ID, TRACES_SENTINEL_PATH} from './src/host'
 
 // Reads the real compose file and the service configs beside it. Image tags and digests are
 // Renovate-managed, so these tests assert their format and never copy a value.
@@ -404,6 +404,14 @@ describe('traces compose: secrets and telemetry', () => {
     expect(env.GF_SECURITY_SECRET_KEY__FILE).toMatch(/^\/run\/secrets\/grafana\//)
     expect(env.GF_SECURITY_ADMIN_PASSWORD).toBeUndefined()
     expect(env.GF_SECURITY_SECRET_KEY).toBeUndefined()
+  })
+
+  // The image's default user is 472 with group 0. Deploy makes the secret directory `root:472`, mode 0750, so a
+  // process whose group is 0 cannot enter it: Grafana logs "Permission denied" for both files and starts on its
+  // built-in admin password (`admin`) and secret key. Pinning the group to 472 is what lets it read them.
+  it('Grafana runs as 472:472, so its group matches the group of the secret directory', () => {
+    expect(GRAFANA_USER_ID).toBe(472)
+    expect(String(service('grafana').user)).toBe(`${GRAFANA_USER_ID}:${GRAFANA_USER_ID}`)
   })
 })
 

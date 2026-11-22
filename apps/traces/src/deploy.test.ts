@@ -23,15 +23,19 @@ import {
   diskScript,
   driftScript,
   evaluateGates,
+  failedOperatorGates,
   failedSafetyGates,
   GATED_SERVICES,
   generateDeployId,
   generateVoidTokenLine,
+  grafanaSignInScript,
   hygieneScript,
   langfuseBasicValue,
   mayOpen,
+  OperatorSurfaceError,
   ownershipPrelude,
   parseDrift,
+  parseGrafanaProbe,
   parseHostState,
   parseIngestProbe,
   parseReporterDetail,
@@ -73,6 +77,7 @@ import {
 } from './deploy.fixture'
 import {PATHS} from './health-report'
 import {
+  GRAFANA_USER_ID,
   SENDER_GROUPS,
   TEMPO_USER_ID,
   TRACES_APP_DIR,
@@ -465,6 +470,7 @@ describe('remote scripts', () => {
     digest: runningDigestScript('collector'),
     bootstrap: bootstrapProbeScript(),
     hygiene: hygieneScript(),
+    grafana: grafanaSignInScript(),
     ...Object.fromEntries(SENDER_GROUPS.map(group => [`token-${group}`, tokenFileScript(group, ID_A)])),
   }
 
@@ -577,6 +583,29 @@ describe('remote scripts', () => {
     expect(script).toContain('grep -c')
     expect(script).not.toMatch(/\becho "\$\{?(pk|sk|key)/)
     expect(script).toContain('docker inspect')
+  })
+
+  it("makes the Grafana secret directory root:472, 0750: the group Grafana's compose user carries", () => {
+    expect(scripts.prepareDirs).toContain(
+      `install -d -o root -g ${GRAFANA_USER_ID} -m 0750 ${TRACES_APP_DIR}/secrets/grafana`,
+    )
+  })
+
+  it('check Grafana sign-in on its loopback port with the password read from the file on the host', () => {
+    const script = scripts.grafana ?? ''
+    expect(script).toContain('http://127.0.0.1:3001/api/user')
+    expect(script).toContain('secrets/grafana/admin-password')
+    // The credential is built inside the host's shell from the file and handed to curl as a config on stdin.
+    expect(script).toContain('-K -')
+    expect(script).toContain(String.raw`printf 'user = "admin:%s"\n' "$(cat "$file")"`)
+    // The only credential in any curl argument is the public default one.
+    expect([...script.matchAll(/(?:-u|--user) (\S+)/g)].map(match => match[1])).toEqual(['admin:admin'])
+    expect(script).not.toMatch(/--header|-H |Authorization|--basic/)
+    // Only status codes are printed: the response body is captured and dropped, and curl's own errors are off.
+    expect(script).toContain('TRACES_GRAFANA_FILE_HTTP=')
+    expect(script).toContain('TRACES_GRAFANA_DEFAULT_HTTP=')
+    expect(script).not.toMatch(/curl [^\n]*-S/)
+    expect(script).not.toMatch(/\bset -x\b|\bxtrace\b/)
   })
 
   it('set the queue volume owner only under the Docker data root, and read it back', () => {
@@ -869,6 +898,7 @@ describe('gates', () => {
       detail: parseReporterDetail(ok(`${JSON.stringify(detail)}\nTRACES_DETAIL_END\n`)) as never,
     },
     bootstrap: {supplied: false, probe: 'dead', hygiene: {envFile: 0, running: 0}},
+    grafana: {file: '200', defaults: '401'},
   })
 
   it('passes every gate and may open when nothing is missing', () => {
@@ -945,6 +975,78 @@ describe('gates', () => {
 
   it('never opens on an empty gate list', () => {
     expect(mayOpen([])).toBe(false)
+  })
+
+  describe('grafana-signin', () => {
+    const gateFor = (file: string, defaults: string): ReturnType<typeof evaluateGates>[number] | undefined =>
+      evaluateGates({...passing(), grafana: {file, defaults}}).find(gate => gate.id === 'grafana-signin')
+
+    it('passes when the password file signs in (200) and admin:admin is refused (401)', () => {
+      expect(gateFor('200', '401')).toMatchObject({status: 'pass', kind: 'operator'})
+    })
+
+    it.each([
+      ['the password file is refused', '401', '401'],
+      ['the password file is refused and the default is accepted', '401', '200'],
+      ['the default is accepted', '200', '200'],
+      ['Grafana does not answer', '000', '000'],
+      ['Grafana answers 5xx', '502', '502'],
+      ['the file is accepted and the default gets 403', '200', '403'],
+      ['the file gets 403 and the default is refused', '403', '401'],
+    ])('fails when %s (file %s, default %s)', (_name, file, defaults) => {
+      expect(gateFor(file, defaults)).toMatchObject({status: 'fail', kind: 'operator'})
+    })
+
+    it('names which half failed, with the HTTP codes, and prints no password', () => {
+      const refused = gateFor('401', '200')?.detail ?? ''
+      expect(refused).toContain('the admin password file was not accepted (HTTP 401, expected 200)')
+      expect(refused).toContain('admin:admin is accepted (HTTP 200, expected 401)')
+      const onlyDefault = gateFor('200', '200')?.detail ?? ''
+      expect(onlyDefault).not.toContain('password file was not accepted')
+      expect(onlyDefault).toContain('admin:admin is accepted (HTTP 200, expected 401)')
+      expect(gateFor('000', '000')?.detail).toContain('did not answer')
+    })
+
+    it('never decides the route: it fails the run, and mayOpen and the safety gates ignore it', () => {
+      for (const [file, defaults] of [
+        ['401', '200'],
+        ['200', '200'],
+        ['000', '000'],
+      ] as const) {
+        const gates = evaluateGates({...passing(), grafana: {file, defaults}})
+        expect(mayOpen(gates)).toBe(true)
+        expect(failedSafetyGates(gates)).toEqual([])
+        expect(failedOperatorGates(gates).map(gate => gate.id)).toEqual(['grafana-signin'])
+      }
+      expect(failedOperatorGates(evaluateGates(passing()))).toEqual([])
+    })
+
+    it('is evaluated without a key pair too, and still does not decide the route', () => {
+      const gates = evaluateGates({
+        ...passing(),
+        keyPairSet: false,
+        verdict: {state: 'skipped'},
+        grafana: {file: '401', defaults: '200'},
+      })
+      expect(gates.find(gate => gate.id === 'grafana-signin')).toMatchObject({status: 'fail', kind: 'operator'})
+      expect(failedSafetyGates(gates)).toEqual([])
+    })
+
+    it('does not make a route that is not openable openable', () => {
+      expect(mayOpen(evaluateGates({...passing(), ingestVariableTrue: false}))).toBe(false)
+      expect(mayOpen(evaluateGates({...passing(), bootstrap: {...passing().bootstrap, probe: 'live'}}))).toBe(false)
+    })
+  })
+
+  describe('parseGrafanaProbe', () => {
+    it('reads both codes from a complete answer only', () => {
+      const complete = 'TRACES_GRAFANA_FILE_HTTP=200\nTRACES_GRAFANA_DEFAULT_HTTP=401\nTRACES_GRAFANA_PROBED\n'
+      expect(parseGrafanaProbe(complete)).toEqual({file: '200', defaults: '401'})
+      expect(parseGrafanaProbe(complete.replace('TRACES_GRAFANA_PROBED\n', ''))).toBeUndefined()
+      expect(parseGrafanaProbe(complete.replace('TRACES_GRAFANA_FILE_HTTP=200\n', ''))).toBeUndefined()
+      expect(parseGrafanaProbe(complete.replace('=401', '=4x1'))).toBeUndefined()
+      expect(parseGrafanaProbe('')).toBeUndefined()
+    })
   })
 })
 
@@ -1043,6 +1145,7 @@ describe('first deploy', () => {
       'token-dirs',
       'raw:reporter-detail',
       'bootstrap-hygiene',
+      'grafana-signin',
       'raw:set-state:open',
       'remove:.deploy-in-progress',
     ]
@@ -1194,6 +1297,263 @@ describe('gates keep the route closed', () => {
     expect(error).toBeInstanceOf(AppliedButUnverifiedError)
     expect(error.message).toContain('bootstrap-key')
     expect(host.setStates()).toEqual([])
+  })
+})
+
+describe('the Grafana sign-in check', () => {
+  const GRAFANA_PASSWORD = baseEnv().TRACES_GRAFANA_ADMIN_PASSWORD ?? ''
+  const newImage = {TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}
+
+  it('passes on 200 with the password file and 401 with admin:admin, after the stack is up and before the route is set', async () => {
+    const host = new FakeHost()
+    const {result, logs} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(result.unmet).toEqual([])
+    expect(result.gates.find(gate => gate.id === 'grafana-signin')).toMatchObject({status: 'pass', kind: 'operator'})
+    expect(logs.join('\n')).toContain('✓ grafana-signin')
+    expect(host.count('grafana-signin')).toBe(1)
+    expect(host.indexOf('grafana-signin')).toBeGreaterThan(host.indexOf('up-caddy'))
+    expect(host.indexOf('grafana-signin')).toBeLessThan(host.indexOf('raw:set-state:open'))
+  })
+
+  it('runs with no key pair too: Grafana does not depend on the Langfuse key', async () => {
+    const host = new FakeHost()
+    const {result} = await run(host, baseEnv(withoutKey))
+    expect(result.ingest).toBe('off')
+    expect(host.count('grafana-signin')).toBe(1)
+  })
+
+  it.each([
+    [
+      'the password file is refused (401) and the default is accepted (200): Grafana started on its defaults',
+      {file: '401', defaults: '200'},
+      ['HTTP 401, expected 200', 'HTTP 200, expected 401'],
+    ],
+    [
+      'the default password is accepted while the file works',
+      {file: '200', defaults: '200'},
+      ['admin:admin is accepted (HTTP 200, expected 401)'],
+    ],
+    ['the file is refused and the default is too', {file: '401', defaults: '401'}, ['HTTP 401, expected 200']],
+    ['Grafana answers something else', {file: '502', defaults: '502'}, ['HTTP 502, expected 200']],
+  ])('fails the deploy when %s, naming the half that failed', async (_name, codes, expected) => {
+    const host = new FakeHost({grafana: codes})
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(error.message).toContain('grafana-signin')
+    for (const text of expected) expect(error.message).toContain(text)
+  })
+
+  it('fails the deploy when Grafana never answers, after a bounded number of attempts', async () => {
+    const host = new FakeHost({grafana: {file: '000', defaults: '000'}})
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(error.message).toContain('did not answer')
+    expect(host.count('grafana-signin')).toBe(3)
+  })
+
+  it('waits for a Grafana that is still starting, and passes once it answers correctly', async () => {
+    const host = new FakeHost({
+      grafana: attempt => (attempt < 3 ? {file: '000', defaults: '000'} : {file: '200', defaults: '401'}),
+    })
+    const {result} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(host.count('grafana-signin')).toBe(3)
+  })
+
+  it('does not retry an answer that is settled: a 401 or a 200 is Grafana speaking, not starting', async () => {
+    const host = new FakeHost({grafana: {file: '401', defaults: '200'}})
+    await failure(host)
+    expect(host.count('grafana-signin')).toBe(1)
+  })
+
+  it('sleeps between attempts and not after the last one', async () => {
+    const host = new FakeHost({grafana: {file: '000', defaults: '000'}})
+    const sleeps: number[] = []
+    await failure(host, baseEnv(), {
+      sleep: async ms => {
+        sleeps.push(ms)
+      },
+      limits: {
+        proofAttempts: 2,
+        proofIntervalMs: 0,
+        retentionAttempts: 2,
+        retentionIntervalMs: 0,
+        verdictAttempts: 2,
+        verdictIntervalMs: 0,
+        grafanaAttempts: 3,
+        grafanaIntervalMs: 7,
+      },
+    })
+    expect(sleeps).toEqual([7, 7])
+  })
+
+  it('treats a failed or unreadable answer from the host as no answer', async () => {
+    const host = new FakeHost({
+      override: step => (step === 'grafana-signin' ? {exitCode: 255, stdout: '', stderr: 'ssh: dropped'} : undefined),
+    })
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(error.message).toContain('did not answer')
+    expect(host.count('grafana-signin')).toBe(3)
+  })
+
+  describe('does not decide the route', () => {
+    it('leaves an open route open when only this check fails: no hold, no re-open, no probe of a held route', async () => {
+      const host = await openStack()
+      host.options.grafana = {file: '401', defaults: '200'}
+      const before = host.calls.length
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect((error as OperatorSurfaceError).ingest).toBe('open')
+      expect(error.message).toContain('Ingest is open')
+      expect(host.served).toBe('open')
+      expect(host.envState).toBe('open')
+      // The route was already open and nothing gated changed: this deploy never touched it.
+      expect(host.setStates()).toEqual(['open'])
+      expect(host.calls.slice(before).filter(call => call.step.startsWith('raw:set-state'))).toEqual([])
+    })
+
+    it('reopens a route held for an update, then fails the run', async () => {
+      const host = await openStack()
+      host.options.grafana = {file: '401', defaults: '200'}
+      const error = await failure(host, baseEnv(newImage))
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect((error as OperatorSurfaceError).ingest).toBe('open')
+      expect(host.setStates()).toEqual(['open', 'held', 'open'])
+      expect(host.served).toBe('open')
+    })
+
+    it('opens a closed route when every other gate passes, then fails the run', async () => {
+      const host = new FakeHost({grafana: {file: '401', defaults: '200'}})
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect((error as OperatorSurfaceError).ingest).toBe('open')
+      expect(host.setStates()).toEqual(['open'])
+      expect(host.served).toBe('open')
+    })
+
+    it('leaves an off route off with the same message the other gates give, and still fails the run', async () => {
+      const host = new FakeHost({grafana: {file: '401', defaults: '200'}})
+      const error = await failure(host, baseEnv({TRACES_INGEST_OPEN: undefined}))
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect((error as OperatorSurfaceError).ingest).toBe('off')
+      expect(error.message).toContain('Ingest is off')
+      expect(host.setStates()).toEqual([])
+      expect(host.served).toBe('off')
+    })
+
+    it('is not the error of a failed safety gate: that one still closes the route, and the check does not hide it', async () => {
+      const host = await openStack()
+      host.options.grafana = {file: '401', defaults: '200'}
+      host.options.checkStatus = {'canary-langfuse': 'fail'}
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(AppliedButUnverifiedError)
+      expect(host.served).toBe('held')
+    })
+
+    it('removes the deploy marker: the host is left finished, not half done', async () => {
+      const host = new FakeHost({grafana: {file: '401', defaults: '200'}})
+      await failure(host)
+      expect(host.marker).toBeUndefined()
+      expect(host.indexOf('remove:.deploy-in-progress')).toBeGreaterThan(host.indexOf('grafana-signin'))
+    })
+
+    it('a later deploy with a working Grafana succeeds again', async () => {
+      const host = new FakeHost({grafana: {file: '401', defaults: '200'}})
+      await failure(host)
+      host.options.grafana = {file: '200', defaults: '401'}
+      const {result} = await run(host)
+      expect(result.ingest).toBe('open')
+    })
+  })
+
+  describe('keeps the password out of everything the deploy records', () => {
+    it('sends no secret in the command text, argv or stdin of the check, and none reaches a log line or an error', async () => {
+      const env = baseEnv()
+      const host = new FakeHost({grafana: {file: '401', defaults: '200'}})
+      const t = testDeps(host)
+      const error = await deploy({env, deps: t.deps}).then(
+        () => undefined,
+        (error_: unknown) => error_ as Error,
+      )
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      const calls = host.calls.filter(call => call.step === 'grafana-signin')
+      expect(calls.length).toBeGreaterThan(0)
+      for (const call of calls) {
+        expect(call.stdin).toBeUndefined()
+        expect(call.command).not.toContain(GRAFANA_PASSWORD)
+        expect(call.argv.join('\u0000')).not.toContain(GRAFANA_PASSWORD)
+        expect(call.command).toContain('secrets/grafana/admin-password')
+      }
+      expectNoSecretOutsideStdin(env, host, t.logs)
+      expect(error?.message).not.toContain(GRAFANA_PASSWORD)
+    })
+
+    it('builds the credential on the host: run for real, the password reaches curl on stdin only and no output carries it', () => {
+      const {root, shim, cleanup} = scratchHost()
+      try {
+        const password = 'scratch-grafana-password-0001'
+        mkdirSync(join(root, 'secrets/grafana'), {recursive: true})
+        writeFileSync(join(root, 'secrets/grafana/admin-password'), password)
+        // A curl that records its argv and stdin, then answers by the user it was given.
+        writeFileSync(
+          join(shim, 'curl'),
+          String.raw`#!/bin/bash
+printf '%s\n' "$@" >> "${shim}/curl-argv"
+user=""
+prev=""
+for a in "$@"; do
+  if [ "$prev" = -u ]; then user="$a"; fi
+  if [ "$a" = -K ]; then user=$(cat); printf '%s\n' "$user" >> "${shim}/curl-stdin"; fi
+  prev="$a"
+done
+case "$user" in
+  *admin:${password}*) code=200 ;;
+  admin:admin) code=401 ;;
+  *) code=000 ;;
+esac
+printf '{"login":"admin"}\nTRACES_HTTP=%s' "$code"
+`,
+        )
+        chmodSync(join(shim, 'curl'), 0o755)
+
+        const result = runLocally(grafanaSignInScript(), root, shim)
+        expect(result.code).toBe(0)
+        expect(parseGrafanaProbe(result.out)).toEqual({file: '200', defaults: '401'})
+        expect(result.out).not.toContain(password)
+        expect(result.out).not.toContain('login')
+        expect(readFileSync(join(shim, 'curl-argv'), 'utf8')).not.toContain(password)
+        expect(readFileSync(join(shim, 'curl-stdin'), 'utf8')).toContain(`user = "admin:${password}"`)
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('run for real: a wrong or missing password file gives the codes curl reports, never an error and never a printed password', () => {
+      const {root, shim, cleanup} = scratchHost()
+      try {
+        writeFileSync(
+          join(shim, 'curl'),
+          `#!/bin/bash
+printf 'TRACES_HTTP=%s' 401
+`,
+        )
+        chmodSync(join(shim, 'curl'), 0o755)
+        // No password file at all: the file half is not asked and reads as no answer, the default half is.
+        const missing = runLocally(grafanaSignInScript(), root, shim)
+        expect(missing.code).toBe(0)
+        expect(parseGrafanaProbe(missing.out)).toEqual({file: '000', defaults: '401'})
+
+        mkdirSync(join(root, 'secrets/grafana'), {recursive: true})
+        writeFileSync(join(root, 'secrets/grafana/admin-password'), 'scratch-wrong-password-0002')
+        const wrong = runLocally(grafanaSignInScript(), root, shim)
+        expect(parseGrafanaProbe(wrong.out)).toEqual({file: '401', defaults: '401'})
+        expect(wrong.out).not.toContain('scratch-wrong-password-0002')
+      } finally {
+        cleanup()
+      }
+    })
   })
 })
 
@@ -3106,6 +3466,7 @@ const READ_ONLY_SCRIPTS: readonly string[] = [
   'runningDigestScript',
   'bootstrapProbeScript',
   'hygieneScript',
+  'grafanaSignInScript',
   'readTtlScript',
   'readLifecycleScript',
 ]
@@ -3533,6 +3894,7 @@ describe('the step lock in the script text', () => {
     runningDigestScript: runningDigestScript('collector'),
     bootstrapProbeScript: bootstrapProbeScript(),
     hygieneScript: hygieneScript(),
+    grafanaSignInScript: grafanaSignInScript(),
     readTtlScript: retentionModule.readTtlScript(),
     readLifecycleScript: retentionModule.readLifecycleScript(),
   }

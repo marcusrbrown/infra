@@ -108,6 +108,15 @@ export function tracesTokenDir(group: SenderGroup): string {
  */
 export const TEMPO_USER_ID = 10_001
 
+/**
+ * The uid and gid Grafana runs as. The image's own user is 472 with group 0, and the compose file gives Grafana
+ * `user: "472:472"` so that its group is 472. Deploy makes `secrets/grafana` owned `root:472` with mode 0750, so
+ * the directory can be entered by group 472 only: a process whose group is 0 gets "Permission denied" on both
+ * secret files, and Grafana starts on its defaults (admin password `admin`, the built-in secret key). Deploy owns
+ * `secrets/grafana/*` by this id too. `docker-compose.test.ts` pins Grafana's `user` to it.
+ */
+export const GRAFANA_USER_ID = 472
+
 // ─── Deploy state and locks ───────────────────────────────────────────────────
 //
 // These paths are a contract between the deploy, the sender-token commands and the ingest command. The CLI

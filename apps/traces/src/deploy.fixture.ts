@@ -50,6 +50,7 @@ const READ_ONLY_STEPS: readonly RegExp[] = [
   /^digest:/,
   /^bootstrap-probe$/,
   /^bootstrap-hygiene$/,
+  /^grafana-signin$/,
   /^probe-ingest$/,
   /^retention-read-/,
   /^raw:reporter-detail$/,
@@ -108,6 +109,11 @@ export interface FakeOptions {
   tables?: Record<string, string | undefined>
   /** ALTER answers success but changes nothing. */
   alterIgnored?: boolean
+  /**
+   * What Grafana answers the sign-in check: the HTTP code for the password file's password and for `admin:admin`
+   * (`000` is no answer), or a function of the attempt (1 for the first). Default: 200 and 401.
+   */
+  grafana?: {file: string; defaults: string} | ((attempt: number) => {file: string; defaults: string})
 }
 
 export class FakeHost {
@@ -458,6 +464,14 @@ export class FakeHost {
           `TRACES_HYGIENE env_file=${inEnv} running=${this.runningHasBootstrap ? 2 : 0}\nTRACES_HYGIENE_CHECKED\n`,
         )
       }
+      case step === 'grafana-signin': {
+        const attempt = this.count('grafana-signin')
+        const configured = this.options.grafana ?? {file: '200', defaults: '401'}
+        const codes = typeof configured === 'function' ? configured(attempt) : configured
+        return ok(
+          `TRACES_GRAFANA_FILE_HTTP=${codes.file}\nTRACES_GRAFANA_DEFAULT_HTTP=${codes.defaults}\nTRACES_GRAFANA_PROBED\n`,
+        )
+      }
       case step === 'probe-ingest': {
         const codes = this.options.probeOverride?.(this.served) ?? this.probeCodes()
         const lines = SENDER_GROUPS.map(
@@ -742,6 +756,8 @@ export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): T
       retentionIntervalMs: 0,
       verdictAttempts: 2,
       verdictIntervalMs: 0,
+      grafanaAttempts: 3,
+      grafanaIntervalMs: 0,
     },
     ...overrides,
   }

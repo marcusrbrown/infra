@@ -5,7 +5,7 @@ description: What the self-hosted trace collection stack receives, where it keep
 
 This page describes what happens to data that agent runs send to the self-hosted trace collection stack.
 
-**No traces yet.** The stack is deployed. No sender token has been issued and no trace has been collected. This page is published before any token is issued, and it will be updated if anything below changes.
+**Ingest not yet open.** The stack is deployed and its public ingest route is closed. No sender token has been issued, so no agent run has sent a trace. The only traces stored are synthetic test traces the stack sends to check itself. This page is published before any token is issued, and it will be updated if anything below changes.
 
 This is a single-operator deployment. The person who runs the stack and the person who reads the traces are the same party. There are no end users, no third-party recipients, no analytics and no advertising.
 

@@ -1,7 +1,7 @@
 ---
 title: Off-droplet Docker image build for a single-droplet deploy (CI build → GHCR push → droplet pull)
 date: 2026-06-04
-last_updated: 2026-10-24
+last_updated: 2026-11-22
 category: docs/solutions/best-practices
 module: apps/gateway
 problem_type: best_practice
@@ -221,6 +221,16 @@ WORKSPACE_IMAGE_DIGEST="sha256:..." \
 bunx @marcusrbrown/infra gateway deploy --local
 ```
 
+## Reproducible inputs are not enough: the provenance attestation changes the digest
+
+The collector build sets `provenance: false` in `.github/workflows/deploy-traces.yaml:108-110`; `packages/cli/src/conventions.test.ts:6725-6726` pins it.
+
+**Evidence:** Before the change, two builds had the same platform manifest but different top-level digests. Afterwards, three builds of one commit (runs 44930220360, 44930538941, 44935906683) pushed the same digest and deploy verification passed.
+
+**Tradeoff:** No build-provenance attestation is published. Digest verification proves the running image matches the pushed image, not how it was built. Do not generalize this choice to builds that need provenance or do not use the digest as a disruptive restart trigger.
+
+**Gateway unchecked:** Its build steps (`.github/workflows/deploy-gateway.yaml:145` and `.github/workflows/deploy-gateway.yaml:159`) do not explicitly set `provenance`. Compare two builds of one commit before changing them.
+
 ## Recognizing a host build or swap thrash
 
 If someone reintroduces a host build (or an image pin silently drops), the failure has a
@@ -315,3 +325,4 @@ outputs), and `.github/workflows/deploy.yaml` (the `deploy-gateway` caller permi
 - `docs/solutions/best-practices/major-version-upstream-upgrade-playbook-2026-05-29.md` — complementary image-swap discipline: probe the pinned image, verify the real contract, keep cutover rollback-safe.
 - `docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md` — earlier gateway deploy-pipeline cascade (different failure class).
 - `../integration-issues/docker-network-stale-subnet-cleanup-2026-06-18.md` — deploy-sequencing companion: pull images before any disruptive cleanup; stale Docker network IPAM state requires a live-state migration step between pull and compose up.
+- `docs/solutions/workflow-issues/traces-first-deploy-cascade-2026-11-22.md` — the traces rollout where the provenance attestation changed the pinned digest on every build.

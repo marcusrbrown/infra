@@ -7,7 +7,7 @@ resolution_type: code_fix
 severity: critical
 date: 2026-05-20
 last_refreshed: 2026-05-31
-last_updated: 2026-10-31
+last_updated: 2026-11-22
 tags: [gateway, docker-compose, digitalocean, deploy, ssh, ufw, controlmaster, secrets, ndjson]
 module: apps/gateway
 related_issues: []
@@ -17,6 +17,7 @@ related_docs:
   - docs/solutions/workflow-issues/broker-first-deploy-cascade-2026-06-30.md
   - docs/solutions/integration-issues/cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md
   - docs/solutions/workflow-issues/bun-deploy-user-permissions-ci-2026-04-02.md
+  - docs/solutions/workflow-issues/traces-first-deploy-cascade-2026-11-22.md
 ---
 
 # Gateway First Deploy: 5-Wave Cascade
@@ -199,6 +200,10 @@ The Wave 4 failure came back on a different app because a deploy gained one step
 - **Verified.** Router run 41204701071: deploy job OK, 1 accepted SSH session, 0 `UFW LIMIT BLOCK`.
 - Cliproxy's contract is also in `apps/cliproxy/AGENTS.md:23`. Disk-pressure context for the prune step: [cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md](../integration-issues/cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md).
 
+## Recurrence: traces provisioning and CLI (2026-11-20)
+
+The same SSH rate limit hit traces provisioning and multi-call CLI commands ([PR #2012](https://github.com/marcusrbrown/infra/pull/2012)), despite the deploy already using multiplexing. Key scans also consume connections. See the [traces checklist](./traces-first-deploy-cascade-2026-11-22.md) for the fixes and the remaining cross-app test gap.
+
 ## Related Issues
 
 - [cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md](../integration-issues/cliproxy-unpruned-image-store-disk-full-truncated-oauth-2026-10-31.md) — the prune step that tipped cliproxy over the limit (recurrence section above)
@@ -209,3 +214,4 @@ The Wave 4 failure came back on a different app because a deploy gained one step
 - PRs: [#273](https://github.com/marcusrbrown/infra/pull/273), [#276](https://github.com/marcusrbrown/infra/pull/276), [#277](https://github.com/marcusrbrown/infra/pull/277), [#278](https://github.com/marcusrbrown/infra/pull/278)
 - Release: [`@marcusrbrown/infra@0.4.11`](https://www.npmjs.com/package/@marcusrbrown/infra/v/0.4.11) ships the Wave 5 fix
 - [../integration-issues/docker-network-stale-subnet-cleanup-2026-06-18.md](../integration-issues/docker-network-stale-subnet-cleanup-2026-06-18.md) — same deploy path; stale Docker network IPAM state blocks compose up after an explicit-subnet topology change, requiring a pull-before-cleanup migration step.
+- [traces-first-deploy-cascade-2026-11-22.md](./traces-first-deploy-cascade-2026-11-22.md) — the traces rollout: the same UFW limit hit provisioning and the CLI (recurrence section above), plus the other host-only defects

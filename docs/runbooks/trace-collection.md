@@ -491,13 +491,15 @@ DigitalOcean's listing lags a completed action, so a change that succeeded but w
 **Stage 7: during the Tempo block scan.** Message: `Tempo block check did not finish`.
 
 - Known: the restore volume is attached, mounted and its sentinel verified. The previous volume is detached and kept. Docker is stopped and ports are closed. Blocks already moved are renames and stay moved.
-- **Do not run the restore again.** List blocks whose metadata is empty or not a JSON object, the same test the provisioning scan uses (the first and last non-space characters must be `{` and `}`):
+- **Do not run the restore again.** List blocks whose metadata is empty or not a JSON object, the same test the provisioning scan uses (the first and last non-space characters must be `{` and `}`). Like the provisioning scan, it looks only at real directories, never through a symlink, and only at block directories named as UUIDs:
 
   ```bash
-  traces_ssh 'cd /mnt/traces/docker/volumes/traces_tempo_data/_data/blocks && n=0; for f in */*/meta.json */*/meta.compacted.json; do [ -e "$f" ] || continue; n=$((n+1)); c=$(tr -d "[:space:]" < "$f"); case "$c" in "{"*"}") ;; *) echo "torn: $f";; esac; done; echo "checked $n"'
+  traces_ssh 'B=/mnt/traces/docker/volumes/traces_tempo_data/_data/blocks; [ ! -L "$B" ] || exit 1; cd "$B" || exit 1; [ -r . ] && [ -x . ] || exit 1; n=0; for t in */; do t=${t%/}; [ -e "$t" ] || continue; if [ -L "$t" ]; then echo "skipped symlink: $t"; continue; fi; [ -r "$t" ] && [ -x "$t" ] || exit 1; for b in "$t"/*/; do b=${b%/}; [ -e "$b" ] || continue; if [ -L "$b" ]; then echo "skipped symlink: $b"; continue; fi; case "${b#*/}" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;; *) continue;; esac; [ -r "$b" ] && [ -x "$b" ] || exit 1; for f in "$b/meta.json" "$b/meta.compacted.json"; do [ -e "$f" ] || continue; if [ -L "$f" ]; then echo "skipped symlink: $f"; continue; fi; n=$((n+1)); c=$(tr -d "[:space:]" < "$f") || exit 1; case "$c" in "{"*"}") ;; *) echo "torn: $f";; esac; done; done; done; echo "checked $n"'
   ```
 
-  It ends with `checked <n>`. If it does not, stop: do not start Docker until the metadata can be checked. Move each block directory it names (`<tenant>/<block-uuid>`) to `/mnt/traces/tempo-quarantine/<YYYYMMDD-HHMM>/<tenant>/` with `mv`, never `cp` or `rm`. Then continue at step 4 of the restore.
+  The scan exits at once, before it prints `checked <n>`, when the blocks directory is missing or is a symlink, or when it cannot read the blocks directory, a directory or a metadata file. It ends with `checked <n>` only when every directory and file was read. If the output does not end with `checked <n>`, stop: do not start Docker until the metadata can be checked. A `skipped symlink:` line names a tenant, block or metadata file that is a symlink; Tempo does not create those, so look at it by hand and move nothing through it.
+
+  Move each block directory named on a `torn:` line (`<tenant>/<block-uuid>`) to `/mnt/traces/tempo-quarantine/<YYYYMMDD-HHMM>/<tenant>/` with `mv`, never `cp` or `rm`. Then continue at step 4 of the restore.
 
 Delete nothing at any stage. A leftover restore volume and the previous volume are deleted only after a restore is proven (restore step 10). While nothing is attached, the backup job fails with `volume-not-found` and opens `traces-backup-failure`. It closes after the next successful run.
 

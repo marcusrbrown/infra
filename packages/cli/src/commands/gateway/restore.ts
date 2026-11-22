@@ -1,5 +1,8 @@
 import type {goke} from 'goke'
 
+import {mkdtempSync, rmSync} from 'node:fs'
+import {join} from 'node:path'
+
 import {z} from 'zod'
 
 import {buildKnownHostsArgs} from '../../lib/known-hosts'
@@ -18,9 +21,17 @@ const EXPECTED_ARCHIVE_FILES = new Set([CA_CERT_FILE, CA_KEY_FILE])
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export interface RestoreSpawnOptions {
+  env: Record<string, string>
+  stdout: 'pipe'
+  stderr: 'pipe'
+  /** Aborting kills the child. Only the close carries one: it is the one call the restore stops waiting for. */
+  signal?: AbortSignal
+}
+
 export type RestoreSpawnFn = (
   cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
+  opts: RestoreSpawnOptions,
 ) => {
   stdout: ReadableStream<Uint8Array>
   stderr: ReadableStream<Uint8Array>
@@ -37,26 +48,50 @@ export type RestoreResult = {ok: true; confirmed: true} | {ok: false; error: str
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Returns the argv array for an SSH command to the given host. */
-function sshCommand(host: string, remote: string): string[] {
-  return [
-    'ssh',
-    '-o',
-    'BatchMode=yes',
-    '-o',
-    'StrictHostKeyChecking=yes',
-    ...buildKnownHostsArgs(),
-    `root@${host}`,
-    remote,
-  ]
+/**
+ * How long the master outlives the last call that used it. The master is closed explicitly when the restore ends,
+ * so this only matters when the process is killed first. A running step (the compose restart) holds the connection
+ * open; this only bridges the local gap between two calls.
+ */
+const CONTROL_PERSIST = '30s'
+
+/** The most the `ssh -O exit` may take before the restore stops waiting for it. */
+export const CLOSE_TIMEOUT_MS = 5000
+
+/** Short and under `/tmp`: a unix socket path is limited to about 104 bytes on macOS, and `os.tmpdir()` is long there. */
+const CONTROL_ROOT = '/tmp'
+
+/** Host-key options every ssh and scp call carries, the close included. Pinned keys only, never weakened. */
+function hostKeyArgs(): string[] {
+  return ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', ...buildKnownHostsArgs()]
+}
+
+/**
+ * The droplet runs `ufw limit 22/tcp`: the sixth new connection from one source within 30 seconds is refused. A
+ * restore makes eight ssh calls and one scp, so every call shares the master at `controlPath` (`ControlMaster=auto`:
+ * the first call opens it, the rest ride it) and the restore is one connection.
+ */
+function controlArgs(controlPath: string): string[] {
+  return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', `ControlPersist=${CONTROL_PERSIST}`]
+}
+
+/** Returns the argv array for an SSH command to the given host, over the shared master. */
+function sshCommand(host: string, remote: string, controlPath: string): string[] {
+  return ['ssh', ...hostKeyArgs(), ...controlArgs(controlPath), `root@${host}`, remote]
+}
+
+/** `ssh -O exit` on the socket: asks the master to leave. It makes no connection of its own. */
+function closeCommand(host: string, controlPath: string): string[] {
+  return ['ssh', ...hostKeyArgs(), '-o', `ControlPath=${controlPath}`, '-O', 'exit', `root@${host}`]
 }
 
 async function spawnText(
   spawn: RestoreSpawnFn,
   cmd: string[],
   env: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<{stdout: string; stderr: string; exitCode: number}> {
-  const child = spawn(cmd, {env, stdout: 'pipe', stderr: 'pipe'})
+  const child = spawn(cmd, {env, stdout: 'pipe', stderr: 'pipe', ...(signal === undefined ? {} : {signal})})
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
@@ -98,16 +133,19 @@ export function validateBackupArchive(
 
 // ─── Core logic ───────────────────────────────────────────────────────────────
 
-function defaultSpawn(
-  cmd: string[],
-  opts: {env: Record<string, string>; stdout: 'pipe'; stderr: 'pipe'},
-): ReturnType<RestoreSpawnFn> {
+function defaultSpawn(cmd: string[], opts: RestoreSpawnOptions): ReturnType<RestoreSpawnFn> {
   return Bun.spawn(cmd, opts) as ReturnType<RestoreSpawnFn>
+}
+
+export interface RestoreRuntimeOptions {
+  /** How long the restore waits for the master to close before it moves on. Defaults to `CLOSE_TIMEOUT_MS`. */
+  closeTimeoutMs?: number
 }
 
 export async function restoreGatewayCa(
   opts: RestoreOpts,
   spawn: RestoreSpawnFn = defaultSpawn,
+  runtime: RestoreRuntimeOptions = {},
 ): Promise<RestoreResult> {
   if (!opts.includeCa) {
     return {ok: false, error: 'Only CA restore is currently supported; --no-include-ca is not accepted'}
@@ -136,16 +174,72 @@ export async function restoreGatewayCa(
     return {ok: false, error: archiveError}
   }
 
+  // One connection for the whole restore: the socket lives in a private (0700) directory, and the master is
+  // closed and the directory removed when the restore ends, by returning or by throwing.
+  const directory = mkdtempSync(join(CONTROL_ROOT, 'gw-'))
+  const controlPath = join(directory, 'cm')
+  try {
+    return await restoreOverControl(opts, spawn, env, controlPath)
+  } finally {
+    await closeMaster(spawn, opts.host, controlPath, env, runtime.closeTimeoutMs ?? CLOSE_TIMEOUT_MS)
+    rmSync(directory, {recursive: true, force: true})
+  }
+}
+
+/**
+ * Ask the master to exit, for at most `timeoutMs`. A master that is already gone, a spawner that fails, or a master
+ * that stops answering is not an error: it also exits on its own, `ControlPersist` after the last call. The abort
+ * kills the `ssh -O exit`; the race stops the wait even for a child that ignores the abort, so the close can never
+ * hold back the restore's own result or error.
+ */
+async function closeMaster(
+  spawn: RestoreSpawnFn,
+  host: string,
+  controlPath: string,
+  env: Record<string, string>,
+  timeoutMs: number,
+): Promise<void> {
+  const controller = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const bound = new Promise<void>(resolve => {
+    timer = setTimeout(() => {
+      controller.abort()
+      resolve()
+    }, timeoutMs)
+  })
+  try {
+    await Promise.race([spawnText(spawn, closeCommand(host, controlPath), env, controller.signal), bound])
+  } catch {
+    // The master exits by itself, ControlPersist after the last call.
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function restoreOverControl(
+  opts: RestoreOpts,
+  spawn: RestoreSpawnFn,
+  env: Record<string, string>,
+  controlPath: string,
+): Promise<RestoreResult> {
   // Fail closed: `docker run -v <missing>` would create a stray empty volume and the real CA
   // would never be restored. Probe before anything is copied to the host.
-  const probeResult = await spawnText(spawn, sshCommand(opts.host, volumeProbeCommand(MITMPROXY_CERTS_VOLUME)), env)
+  const probeResult = await spawnText(
+    spawn,
+    sshCommand(opts.host, volumeProbeCommand(MITMPROXY_CERTS_VOLUME), controlPath),
+    env,
+  )
   const probeError = checkVolumeProbeResult(MITMPROXY_CERTS_VOLUME, probeResult)
   if (probeError !== undefined) {
     return {ok: false, error: probeError}
   }
 
   // SEC2: Generate an unguessable remote tmp path via mktemp on the droplet
-  const mktempResult = await spawnText(spawn, sshCommand(opts.host, 'mktemp -t gateway-ca-restore-XXXXXX.tar'), env)
+  const mktempResult = await spawnText(
+    spawn,
+    sshCommand(opts.host, 'mktemp -t gateway-ca-restore-XXXXXX.tar', controlPath),
+    env,
+  )
   if (mktempResult.exitCode !== 0) {
     return {
       ok: false,
@@ -155,16 +249,7 @@ export async function restoreGatewayCa(
   const tmpRemote = mktempResult.stdout.trim()
 
   // SCP the tarball to the unguessable remote path
-  const scpCmd = [
-    'scp',
-    '-o',
-    'BatchMode=yes',
-    '-o',
-    'StrictHostKeyChecking=yes',
-    ...buildKnownHostsArgs(),
-    opts.input,
-    `root@${opts.host}:${tmpRemote}`,
-  ]
+  const scpCmd = ['scp', ...hostKeyArgs(), ...controlArgs(controlPath), opts.input, `root@${opts.host}:${tmpRemote}`]
 
   let primaryError: RestoreResult | undefined
 
@@ -179,7 +264,7 @@ export async function restoreGatewayCa(
     }
 
     // Defense-in-depth: chmod 600 the SCP'd file on the remote before docker run
-    const chmodResult = await spawnText(spawn, sshCommand(opts.host, `chmod 600 ${tmpRemote}`), env)
+    const chmodResult = await spawnText(spawn, sshCommand(opts.host, `chmod 600 ${tmpRemote}`, controlPath), env)
     if (chmodResult.exitCode !== 0) {
       primaryError = {
         ok: false,
@@ -194,6 +279,7 @@ export async function restoreGatewayCa(
       sshCommand(
         opts.host,
         `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/dst -v ${tmpRemote}:/src.tar:ro alpine sh -c 'tar -xf /src.tar -C /dst'`,
+        controlPath,
       ),
       env,
     )
@@ -208,7 +294,11 @@ export async function restoreGatewayCa(
     // Restart mitmproxy and gateway services
     const restartResult = await spawnText(
       spawn,
-      sshCommand(opts.host, `docker compose --project-directory ${COMPOSE_PROJECT_DIR} restart mitmproxy gateway`),
+      sshCommand(
+        opts.host,
+        `docker compose --project-directory ${COMPOSE_PROJECT_DIR} restart mitmproxy gateway`,
+        controlPath,
+      ),
       env,
     )
     if (restartResult.exitCode !== 0) {
@@ -223,12 +313,20 @@ export async function restoreGatewayCa(
     const [certResult, keyResult] = await Promise.all([
       spawnText(
         spawn,
-        sshCommand(opts.host, `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/src:ro alpine cat /src/${CA_CERT_FILE}`),
+        sshCommand(
+          opts.host,
+          `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/src:ro alpine cat /src/${CA_CERT_FILE}`,
+          controlPath,
+        ),
         env,
       ),
       spawnText(
         spawn,
-        sshCommand(opts.host, `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/src:ro alpine cat /src/${CA_KEY_FILE}`),
+        sshCommand(
+          opts.host,
+          `docker run --rm -v ${MITMPROXY_CERTS_VOLUME}:/src:ro alpine cat /src/${CA_KEY_FILE}`,
+          controlPath,
+        ),
         env,
       ),
     ])
@@ -260,7 +358,7 @@ export async function restoreGatewayCa(
   } finally {
     // Always clean up the tmp file from the droplet; never let cleanup mask the primary failure
     try {
-      await spawnText(spawn, sshCommand(opts.host, `rm -f ${tmpRemote}`), env)
+      await spawnText(spawn, sshCommand(opts.host, `rm -f ${tmpRemote}`, controlPath), env)
     } catch (error) {
       console.error(`Cleanup also failed: ${error instanceof Error ? error.message : String(error)}`)
     }

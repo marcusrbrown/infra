@@ -8,13 +8,19 @@ import {
   dropletExists,
   getDropletIpWithWait,
   getSshFingerprint,
+  hostKeysPinned,
   materializeIdentityFile,
   pinHostKeys,
   run,
   scp,
+  sleep,
   ssh,
+  SSH_SCAN_PAUSE_MS,
   validateDoctl,
   waitForSsh,
+  withSshControl,
+  type SshControlOptions,
+  type SshExecOptions,
 } from '@marcusrbrown/infra-shared/server/droplet-helpers'
 
 const DROPLET_NAME = 'cliproxy'
@@ -68,8 +74,13 @@ export function resolveProvisionIdentity(privateKey: string | undefined): Provis
 }
 
 // ---------------------------------------------------------------------------
-// Internal helper functions — each accepts an optional identityFile
+// Internal helper functions — each accepts an optional identityFile and control socket
 // ---------------------------------------------------------------------------
+
+/** Options for one remote call: the identity (if any) and the run's shared control socket (if any). */
+function sshOptions(identityFile: string | undefined, control: SshControlOptions | undefined): SshExecOptions {
+  return {...(identityFile ? {identityFile} : {}), ...(control ? {control} : {})}
+}
 
 async function createDropletIfMissing(): Promise<boolean> {
   const exists = await dropletExists(DROPLET_NAME)
@@ -125,9 +136,13 @@ function resolveLocalFiles(): {compose: string; config: string; caddy: string} {
   }
 }
 
-export async function copyComposeFiles(host: string, identityFile?: string): Promise<void> {
+export async function copyComposeFiles(
+  host: string,
+  identityFile?: string,
+  control?: SshControlOptions,
+): Promise<void> {
   const files = resolveLocalFiles()
-  const opts = identityFile ? {identityFile} : undefined
+  const opts = sshOptions(identityFile, control)
 
   await run('Creating remote directories', ssh(host, `mkdir -p ${REMOTE_DIR}/config`, REMOTE_USER, opts))
   await run(
@@ -141,10 +156,14 @@ export async function copyComposeFiles(host: string, identityFile?: string): Pro
   await run('Uploading config/Caddyfile', scp(host, files.caddy, `${REMOTE_DIR}/config/Caddyfile`, REMOTE_USER, opts))
 }
 
-export async function writeRemoteEnvFile(host: string, identityFile?: string): Promise<string> {
+export async function writeRemoteEnvFile(
+  host: string,
+  identityFile?: string,
+  control?: SshControlOptions,
+): Promise<string> {
   const managementPassword = randomBytes(32).toString('hex')
   const envFile = `CLIPROXY_DOMAIN=${CLIPROXY_DOMAIN}\nMANAGEMENT_PASSWORD=${managementPassword}\n`
-  const opts = identityFile ? {identityFile} : undefined
+  const opts = sshOptions(identityFile, control)
 
   // Pipe contents through stdin — never embed in the command string.
   // This prevents heredoc-termination injection if any env var contains newlines.
@@ -167,8 +186,8 @@ export async function writeRemoteEnvFile(host: string, identityFile?: string): P
   return managementPassword
 }
 
-export async function deployCompose(host: string, identityFile?: string): Promise<void> {
-  const opts = identityFile ? {identityFile} : undefined
+export async function deployCompose(host: string, identityFile?: string, control?: SshControlOptions): Promise<void> {
+  const opts = sshOptions(identityFile, control)
   await run('Starting Docker Compose stack', ssh(host, `cd ${REMOTE_DIR} && docker compose up -d`, REMOTE_USER, opts))
 }
 
@@ -191,9 +210,10 @@ export async function seedRemoteSecretKey(
   host: string,
   managementPassword: string,
   identityFile?: string,
+  control?: SshControlOptions,
 ): Promise<void> {
   const configPath = `${REMOTE_DIR}/config/config.yaml`
-  const opts = identityFile ? {identityFile} : undefined
+  const opts = sshOptions(identityFile, control)
 
   // python3 -c: script body is in argv (not secret); config path is argv (not
   // secret); password is read from stdin inside the interpreter — never an argv
@@ -240,6 +260,11 @@ export async function seedRemoteSecretKey(
 export interface PerformProvisioningDeps {
   waitForSsh?: typeof waitForSsh
   pinHostKeys?: typeof pinHostKeys
+  hostKeysPinned?: typeof hostKeysPinned
+  sleep?: typeof sleep
+  validateDns?: typeof validateDns
+  /** Runs the body with one shared SSH master and closes it afterwards. */
+  withControl?: typeof withSshControl
   copyComposeFiles?: typeof copyComposeFiles
   writeRemoteEnvFile?: typeof writeRemoteEnvFile
   seedRemoteSecretKey?: typeof seedRemoteSecretKey
@@ -251,6 +276,10 @@ export interface PerformProvisioningDeps {
  * Materializes the SSH key (if provided) into a temp file, passes it through
  * all SSH/SCP helper calls, and cleans it up in a `finally` block.
  *
+ * Every step after the key pin goes over one ControlMaster connection: the droplet runs
+ * `ufw limit 22/tcp` (six new connections per 30 seconds per source), and the steps used to be
+ * seven separate connections. The master is closed when the steps end, by returning or by throwing.
+ *
  * Injectable deps allow tests to assert identity file threading without live
  * SSH connections. Production callers omit deps and get the real implementations.
  */
@@ -261,6 +290,11 @@ export async function performProvisioning(
 ): Promise<string> {
   const resolvedWaitForSsh = deps.waitForSsh ?? waitForSsh
   const resolvedPinHostKeys = deps.pinHostKeys ?? pinHostKeys
+  const resolvedHostKeysPinned = deps.hostKeysPinned ?? hostKeysPinned
+  const resolvedSleep = deps.sleep ?? sleep
+  const resolvedValidateDns = deps.validateDns ?? validateDns
+  const resolvedWithControl: typeof withSshControl =
+    deps.withControl ?? ((host, user, body) => withSshControl(host, user, body))
   const resolvedCopyComposeFiles = deps.copyComposeFiles ?? copyComposeFiles
   const resolvedWriteRemoteEnvFile = deps.writeRemoteEnvFile ?? writeRemoteEnvFile
   const resolvedSeedRemoteSecretKey = deps.seedRemoteSecretKey ?? seedRemoteSecretKey
@@ -271,15 +305,23 @@ export async function performProvisioning(
   try {
     await resolvedWaitForSsh(dropletIp, REMOTE_USER, {identityFile})
     const knownHostsPath = resolve(import.meta.dir, '..', '..', '..', '.github', 'known_hosts')
+    const marker = `# cliproxy droplet (${dropletIp} / ${CLIPROXY_DOMAIN})`
+    const willScan = !resolvedHostKeysPinned(knownHostsPath, marker)
     await resolvedPinHostKeys(CLIPROXY_DOMAIN, dropletIp, knownHostsPath, {
-      marker: `# cliproxy droplet (${dropletIp} / ${CLIPROXY_DOMAIN})`,
+      marker,
+      pauseBeforeScanMs: SSH_SCAN_PAUSE_MS,
     })
-    await validateDns(dropletIp)
-    await resolvedCopyComposeFiles(dropletIp, identityFile)
-    const managementPassword = await resolvedWriteRemoteEnvFile(dropletIp, identityFile)
-    await resolvedSeedRemoteSecretKey(dropletIp, managementPassword, identityFile)
-    await resolvedDeployCompose(dropletIp, identityFile)
-    return managementPassword
+    // The scans just spent the connection budget; the control master must not open in the same window.
+    if (willScan) await resolvedSleep(SSH_SCAN_PAUSE_MS)
+    await resolvedValidateDns(dropletIp)
+
+    return await resolvedWithControl(dropletIp, REMOTE_USER, async control => {
+      await resolvedCopyComposeFiles(dropletIp, identityFile, control)
+      const managementPassword = await resolvedWriteRemoteEnvFile(dropletIp, identityFile, control)
+      await resolvedSeedRemoteSecretKey(dropletIp, managementPassword, identityFile, control)
+      await resolvedDeployCompose(dropletIp, identityFile, control)
+      return managementPassword
+    })
   } finally {
     cleanup()
   }

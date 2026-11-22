@@ -6,7 +6,7 @@ Each app deploy waits at a required-reviewer GitHub Environment gate. Every `dep
 
 ## What posts and when
 
-- **One message per gated run**, posted by the `notify` job of `deploy-keeweb`, `deploy-cliproxy`, `deploy-gateway`, `deploy-umami`, `deploy-vpn`, `deploy-dashboard`, and `deploy-broker`. It runs before the gated deploy job pauses for approval.
+- **One message per gated run**, posted by the `notify` job of `deploy-keeweb`, `deploy-cliproxy`, `deploy-gateway`, `deploy-umami`, `deploy-vpn`, `deploy-dashboard`, `deploy-broker`, and `deploy-traces`. It runs before the gated deploy job pauses for approval.
 - **Content:** app, trigger, the change waiting to deploy, and the run link.
   - Push: commit subject and short SHA.
   - Dashboard dispatch with a version: version and short digest.

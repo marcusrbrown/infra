@@ -195,9 +195,9 @@ So a hold lasts only if no deploy can reach its final step. In an emergency, in 
    gh run list --workflow deploy.yaml --repo marcusrbrown/infra --limit 5
    ```
 
-   A run that is `queued`, `waiting` (at the `traces` gate) or `in_progress` is live. Reject a waiting run at its gate in the Actions UI, or cancel it: `gh run cancel <run-id> --repo marcusrbrown/infra`. Cancelling a run that is past its gate stops it mid-step and may leave services half-updated; its deploy marker stays, so `ingest open` refuses and the next deploy holds an open route first, until a deploy completes. If a run is past its gate and cannot be stopped, go to step 4.
+   A run that is `queued`, `waiting` (at the `traces` gate) or `in_progress` is live. Reject a waiting run at its gate in the Actions UI, or cancel it: `gh run cancel <run-id> --repo marcusrbrown/infra`. If any traces deploy is already past its gate, go to step 4 first and close the ports before cancelling it: until it reaches a terminal state it can still write `open`. Cancelling a run that is past its gate stops it mid-step and may leave services half-updated; its deploy marker stays, so `ingest open` refuses and the next deploy holds an open route first, until a deploy completes.
 
-4. Close ports 80 and 443 at the cloud firewall until the deploy ends. Find the firewall (`traces-fw`), remove the two web rules, and read the rules back. Only the SSH rule (port 22) may remain:
+4. If a deploy is past its gate, close ports 80 and 443 at the cloud firewall until it ends. Find the firewall (`traces-fw`), remove the two web rules, and read the rules back. Only the SSH rule (port 22) may remain:
 
    ```bash
    doctl compute firewall list --format ID,Name
@@ -205,9 +205,9 @@ So a hold lasts only if no deploy can reach its final step. In an emergency, in 
    doctl compute firewall get <firewall-id> --format InboundRules
    ```
 
-   Wait for the deploy to end (`gh run watch <run-id> --repo marcusrbrown/infra`), then hold again: `bunx @marcusrbrown/infra traces ingest hold`. With the firewall closed it prints `Ingest hold NOT confirmed`, because the public check cannot reach the host. The state is still written on the host.
+   Cancel the run or let it finish, and wait until it is in a terminal state (`gh run watch <run-id> --repo marcusrbrown/infra`), then hold again: `bunx @marcusrbrown/infra traces ingest hold`. With the firewall closed it prints `Ingest hold NOT confirmed`, because the public check cannot reach the host. The state is still written on the host.
 
-5. Verify before lifting any firewall block:
+5. Verify, whether or not the ports were closed. Without a firewall block, run only check 3 below, after every traces deploy found in step 3 is in a terminal state. With a block, do all three before lifting it:
 
    1. `bunx @marcusrbrown/infra traces ingest status` prints `Configured on the host: held`. While the block is in place it also prints `unreachable` for each path under `Seen from outside` and exits 1; that is expected.
    2. Restore the rules:
@@ -217,7 +217,7 @@ So a hold lasts only if no deploy can reach its final step. In an emergency, in 
       doctl compute firewall get <firewall-id> --format InboundRules
       ```
 
-   3. `bunx @marcusrbrown/infra traces ingest status` prints `Seen from outside: held (marcusrbrown 503, fro-bot 503, workstation 503)`. Any other answer: remove the rules again and hold again.
+   3. `bunx @marcusrbrown/infra traces ingest status` prints `Seen from outside: held (marcusrbrown 503, fro-bot 503, workstation 503)`. Any other answer: close the ports (step 4) and hold again.
 
 A firewall block also takes `/healthz` down, so the probe fails with a no-answer reason and the monitor opens `traces-unhealthy` after two runs. It closes itself on the first healthy run after step 5. To reopen ingest afterwards, set `TRACES_INGEST_OPEN` back to `true` and deploy, or run `traces ingest open` as described below.
 
@@ -367,11 +367,11 @@ Design and the exact checks are in [Restore](../../apps/traces/AGENTS.md#restore
    ```bash
    traces_ssh "docker compose --project-directory /mnt/traces/app exec -T clickhouse sh -c 'exec clickhouse-client --user clickhouse --password \"\$CLICKHOUSE_PASSWORD\" --readonly=1 --multiquery'" <<'SQL'
    SELECT trace_id, max(start_time) AS last_span FROM default.events_full WHERE start_time < toDateTime('<snapshot-time-utc>', 'UTC') - INTERVAL 1 HOUR GROUP BY trace_id ORDER BY last_span DESC LIMIT 5 FORMAT TSV;
-   SELECT count() AS spans, max(start_time) AS newest FROM default.events_core FORMAT TSV;
+   SELECT count() AS spans, max(start_time) AS newest FROM default.events_core WHERE start_time <= toDateTime('<snapshot-time-utc>', 'UTC') FORMAT TSV;
    SQL
    ```
 
-   Write down the five trace IDs (each started at least an hour before the snapshot, which keeps them clear of Tempo's compaction gap) and the `newest` time. Trace IDs are not secret, but do not paste trace content anywhere. If the live stack cannot answer, there is no reference: continue only if the restore cannot wait, and keep the replaced volume at step 10.
+   Write down the five trace IDs (each started at least an hour before the snapshot, which keeps them clear of Tempo's compaction gap) and the `spans` and `newest` values. Both are limited to spans that started by the snapshot time, so spans that arrive later do not change them. Trace IDs are not secret, but do not paste trace content anywhere. If the live stack cannot answer, there is no reference: continue only if the restore cannot wait, and keep the replaced volume at step 10.
 
 3. Run the restore from a checkout whose `bun install` is current. A stale install fails with a missing workspace module. The root `.env` needs `DIGITALOCEAN_ACCESS_TOKEN` and `TRACES_HOST`, and `doctl` must be logged in:
 
@@ -414,11 +414,11 @@ Design and the exact checks are in [Restore](../../apps/traces/AGENTS.md#restore
 9. Prove the restore. Every part must pass:
 
    1. `traces status` reads `Status: OK`; `traces ingest status` shows the configured and seen states `open`; a dispatched backup succeeds ([Dispatch a backup by hand](#dispatch-a-backup-by-hand)); the monitor issue has closed.
-   2. Langfuse holds the history. Run the same ClickHouse command as step 2 with this SQL, listing the five recorded IDs. Every recorded ID must come back, and `newest` must be close to the snapshot's creation time and not after it. A `newest` far older than the snapshot means data is missing:
+   2. Langfuse holds the history. Run the same ClickHouse command as step 2 with this SQL, listing the five recorded IDs and the same snapshot time. Every recorded ID must come back. `spans` and `newest` must match the values recorded at step 2, or fall slightly short if spans that started just before the snapshot reached the stack after it was taken. Values far below the recorded ones mean data is missing. New spans from reissued senders and the health reporter's canaries are excluded by the time limit:
 
       ```sql
       SELECT trace_id FROM default.events_full WHERE trace_id IN ('<id-1>', '<id-2>', '<id-3>', '<id-4>', '<id-5>') GROUP BY trace_id FORMAT TSV;
-      SELECT count() AS spans, max(start_time) AS newest FROM default.events_core FORMAT TSV;
+      SELECT count() AS spans, max(start_time) AS newest FROM default.events_core WHERE start_time <= toDateTime('<snapshot-time-utc>', 'UTC') FORMAT TSV;
       ```
 
    3. Tempo serves traces from before the snapshot. For each recorded ID, query Tempo from inside the `health-reporter` container:
@@ -491,13 +491,13 @@ DigitalOcean's listing lags a completed action, so a change that succeeded but w
 **Stage 7: during the Tempo block scan.** Message: `Tempo block check did not finish`.
 
 - Known: the restore volume is attached, mounted and its sentinel verified. The previous volume is detached and kept. Docker is stopped and ports are closed. Blocks already moved are renames and stay moved.
-- **Do not run the restore again.** List blocks with empty metadata:
+- **Do not run the restore again.** List blocks whose metadata is empty or not a JSON object, the same test the provisioning scan uses (the first and last non-space characters must be `{` and `}`):
 
   ```bash
-  traces_ssh 'find /mnt/traces/docker/volumes/traces_tempo_data/_data/blocks \( -name meta.json -o -name meta.compacted.json \) -size 0'
+  traces_ssh 'cd /mnt/traces/docker/volumes/traces_tempo_data/_data/blocks && n=0; for f in */*/meta.json */*/meta.compacted.json; do [ -e "$f" ] || continue; n=$((n+1)); c=$(tr -d "[:space:]" < "$f"); case "$c" in "{"*"}") ;; *) echo "torn: $f";; esac; done; echo "checked $n"'
   ```
 
-  Move each block directory the listing names (`blocks/<tenant>/<block-uuid>`) to `/mnt/traces/tempo-quarantine/<YYYYMMDD-HHMM>/<tenant>/` with `mv`, never `cp` or `rm`. The listing finds empty files only; the provisioning scan also treats a metadata file that is not a JSON object as torn. Then continue at step 4 of the restore.
+  It ends with `checked <n>`. If it does not, stop: do not start Docker until the metadata can be checked. Move each block directory it names (`<tenant>/<block-uuid>`) to `/mnt/traces/tempo-quarantine/<YYYYMMDD-HHMM>/<tenant>/` with `mv`, never `cp` or `rm`. Then continue at step 4 of the restore.
 
 Delete nothing at any stage. A leftover restore volume and the previous volume are deleted only after a restore is proven (restore step 10). While nothing is attached, the backup job fails with `volume-not-found` and opens `traces-backup-failure`. It closes after the next successful run.
 

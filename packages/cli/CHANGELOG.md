@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.29.3
+
+### Patch Changes
+
+- `gateway restore` now uses one SSH connection for its nine remote calls instead of one each, so the host's limit on new SSH connections no longer locks the operator out partway through a CA restore. Host-key pinning is unchanged. ([#2032](https://github.com/marcusrbrown/infra/pull/2032))
+
 ## 0.29.2
 
 ### Patch Changes

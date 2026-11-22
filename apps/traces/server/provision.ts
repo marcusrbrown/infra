@@ -401,55 +401,53 @@ async function waitForListedVolume(run: Runner, deps: ProvisionDeps, name: strin
 }
 
 /**
- * The attach or detach call succeeded, but the listing did not show the result within the poll bound. The change
- * may have happened, so the caller must not tell the operator it failed. A call that exits non-zero throws an
- * ordinary `Error` instead: that one is a failure.
+ * Any failure of an attach or detach: after the call was made, nothing proves whether the change happened.
+ * `doctl ... --wait` submits the action and then polls, so a non-zero exit can follow a change DigitalOcean
+ * accepted; a listing that fails, is not JSON, or never shows the result proves nothing either. The message tells
+ * the operator to look before doing anything, and not to run provisioning or the restore again.
  */
-export class VolumeChangeUnconfirmedError extends Error {
-  override readonly name = 'VolumeChangeUnconfirmedError'
-}
-
-/**
- * Attaches a volume and proves it from the listing. A successful attach call is not enough: provisioning must not
- * reach any Docker change on a volume that is not attached. The listing can lag the completed action, so it is read
- * again (same budget as a created volume) before the attach is called unconfirmed. A failed call throws the doctl
- * error; a call that succeeded but was never shown throws `VolumeChangeUnconfirmedError`.
- */
-async function attachVolume(
-  run: Runner,
-  deps: Pick<ProvisionDeps, 'sleep'>,
-  volume: VolumeRow,
-  dropletId: string,
-): Promise<void> {
-  await doctl(run, ['compute', 'volume-action', 'attach', volume.id, dropletId, '--wait'])
-  const attached = (rows: VolumeRow[]): boolean =>
-    rows.find(row => row.id === volume.id)?.dropletIds.includes(dropletId) === true
-  if (!attached(await pollVolumeListing(run, deps, attached))) {
-    throw new VolumeChangeUnconfirmedError(
-      `Volume "${volume.name}" was not shown attached to droplet ${dropletId} after the attach call succeeded, so it may be attached`,
+export class VolumeStateUnknownError extends Error {
+  override readonly name = 'VolumeStateUnknownError'
+  constructor(volume: VolumeRow, change: 'attach' | 'detach', dropletId: string, cause: unknown) {
+    super(
+      `Could not confirm the ${change} of volume "${volume.name}" on droplet ${dropletId} (${causeOf(cause)}). Its state is unknown: the change may or may not have taken effect. Check doctl compute volume list and the droplet's attached volumes before doing anything else, and do not run provisioning or the restore again until you know. See ${RESTORE_RUNBOOK}, "Interrupted restore".`,
+      {cause},
     )
   }
 }
 
 /**
- * Detaches a volume and proves it from the listing, read again while it still shows the droplet. Failure modes as
- * for `attachVolume`.
+ * Attaches or detaches a volume and proves it from the listing. A successful call is not enough: provisioning must
+ * not reach any Docker change on a volume that is not attached. The listing can lag the completed action, so it is
+ * read again (same budget as a created volume) before the change is called unconfirmed. Every failure from the call
+ * onward throws `VolumeStateUnknownError`, and no branch claims the volume did or did not change.
  */
-async function detachVolume(
+async function changeVolumeAttachment(
   run: Runner,
   deps: Pick<ProvisionDeps, 'sleep'>,
   volume: VolumeRow,
   dropletId: string,
+  change: 'attach' | 'detach',
 ): Promise<void> {
-  await doctl(run, ['compute', 'volume-action', 'detach', volume.id, dropletId, '--wait'])
-  const stillAttached = (rows: VolumeRow[]): boolean =>
-    rows.find(row => row.id === volume.id)?.dropletIds.includes(dropletId) === true
-  if (stillAttached(await pollVolumeListing(run, deps, rows => !stillAttached(rows)))) {
-    throw new VolumeChangeUnconfirmedError(
-      `Volume "${volume.name}" was still shown attached to droplet ${dropletId} after the detach call succeeded, so it may be detached`,
-    )
+  const settled = (rows: VolumeRow[]): boolean =>
+    (rows.find(row => row.id === volume.id)?.dropletIds.includes(dropletId) === true) === (change === 'attach')
+  try {
+    await doctl(run, ['compute', 'volume-action', change, volume.id, dropletId, '--wait'])
+    if (!settled(await pollVolumeListing(run, deps, settled))) {
+      throw new Error(
+        `the listing did not show it ${change === 'attach' ? 'attached' : 'detached'} after ${VOLUME_LIST_ATTEMPTS} reads`,
+      )
+    }
+  } catch (error) {
+    throw new VolumeStateUnknownError(volume, change, dropletId, error)
   }
 }
+
+const attachVolume = (run: Runner, deps: Pick<ProvisionDeps, 'sleep'>, volume: VolumeRow, dropletId: string) =>
+  changeVolumeAttachment(run, deps, volume, dropletId, 'attach')
+
+const detachVolume = (run: Runner, deps: Pick<ProvisionDeps, 'sleep'>, volume: VolumeRow, dropletId: string) =>
+  changeVolumeAttachment(run, deps, volume, dropletId, 'detach')
 
 // ---------------------------------------------------------------------------
 // Cloud firewall
@@ -1648,8 +1646,12 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
 
   // The one hand step after a swap stops part-way: get the previous volume attached to the droplet, then start over.
   const handStep = `doctl compute volume-action attach ${previous.id} ${dropletId} --wait`
-  const swapFailure = (error: unknown, state: string): Error =>
-    new Error(`${causeOf(error)}. Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${state}`)
+  // A detach or attach that did not confirm leaves the volume's state unknown, so the restore stops here. The error
+  // itself carries the check-first, do-not-rerun instruction; this adds where the swap had got to.
+  const swapStopped = (error: unknown, state: string): Error =>
+    new Error(
+      `Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${state} ${causeOf(error)} Only if no ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId} once you know, attach ${previous.name} by hand with ${handStep}.`,
+    )
 
   let quarantined: string[] = []
   const dropletIp = await getDropletIp(run, deps)
@@ -1657,28 +1659,15 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     await deps.waitForSsh(dropletIp, input.remoteUser, {identityFile})
     await runStep(exec, 'stop Docker and unmount the volume', quiesceScript(), QUIESCE_SENTINELS)
 
-    // Where the swap stopped decides what the operator may do. A call that failed changed nothing. A call that
-    // succeeded but was not shown in time may have changed the volume, and a rerun would create another volume.
-    const checkFirst = `Check doctl compute volume list and the droplet's attached volumes before doing anything, and do not run the restore again until you know: a rerun can create another restore volume. See ${RESTORE_RUNBOOK}, "Interrupted restore".`
     try {
       await detachVolume(run, deps, previous, dropletId)
     } catch (error) {
-      throw swapFailure(
-        error,
-        error instanceof VolumeChangeUnconfirmedError
-          ? `the detach call for ${previous.name} succeeded but the listing did not show it, so ${previous.name} may be detached, and ${newName} was created and is not attached. ${checkFirst} Only if no ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId}, attach ${previous.name} by hand with ${handStep}.`
-          : `The detach of ${previous.name} failed, so it is still attached, and ${newName} was created and is not attached. Once exactly one ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId} (if ${previous.name} is not, attach it by hand with ${handStep}), run the same restore command again from the start.`,
-      )
+      throw swapStopped(error, `${newName} was created and this run did not attach it.`)
     }
     try {
       await attachVolume(run, deps, newVolume, dropletId)
     } catch (error) {
-      throw swapFailure(
-        error,
-        error instanceof VolumeChangeUnconfirmedError
-          ? `${previous.name} is detached and kept. The attach call for ${newName} succeeded but the listing did not show it, so ${newName} may be attached. ${checkFirst} Only if no ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId}, attach ${previous.name} by hand with ${handStep}.`
-          : `${previous.name} is detached and kept. The attach of ${newName} failed, so it is not attached. If no ${TRACES_VOLUME_NAME}* volume is attached to droplet ${dropletId}, attach ${previous.name} by hand with ${handStep}. Then run the same restore command again from the start.`,
-      )
+      throw swapStopped(error, `${previous.name} was detached and kept.`)
     }
 
     const device = volumeDevicePath(newName)

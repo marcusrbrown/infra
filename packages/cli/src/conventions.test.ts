@@ -1096,18 +1096,18 @@ describe('per-app invariants', () => {
   })
 })
 
-// ─── SSH multiplexing ────────────────────────────────────────────────────────
+// ─── SSH multiplexing: file-level check ───────────────────────────────────────
 //
 // Droplets run UFW `limit 22/tcp`: a source that opens 6 new connections in 30 s is blocked. Gateway (PR #277),
 // cliproxy (PR #1733) and traces (PR #2012) were each locked out by an ssh/scp path that opened one connection per
-// call. Only per-app tests enforced multiplexing, so a new path inherited nothing. This test makes the rule
-// repo-wide: a source file that builds ssh/scp argv either multiplexes through one ControlMaster socket or is
-// listed below with the reason it may not.
+// call. Only per-app tests enforced multiplexing, so a new path inherited nothing.
 //
-// What it can and cannot see. It counts spawn sites in the source text, not connections at run time: a builder
-// with one site called ten times is one site. That is why a file that does not multiplex must be on the allowlist
-// even with a single site, and why each entry caps its site count. Whether every site of a multiplexing file
-// really uses the socket stays with the per-app tests (for example `apps/traces/server/provision.test.ts`).
+// What this proves, and only this: every source file that spawns ssh or scp either contains a ControlMaster
+// setting (`ControlMaster=` in its argv, or the shared helper's `control:` option, which sets it) or is listed
+// below with the reason it may not. It reads the file's text. It does not check that each call uses the setting,
+// and it does not count connections at run time: a builder with one site called ten times is one site. Per-call
+// use stays with the per-app tests (for example `apps/traces/server/provision.test.ts`). That is also why a file
+// without the setting must be on the allowlist even with a single site, and why each entry caps its site count.
 
 const SSH_SCAN_GLOBS = ['apps/*/src/deploy.ts', 'apps/*/server/*.ts', 'packages/cli/src/commands/**/*.ts'] as const
 
@@ -1118,7 +1118,7 @@ interface SshUnmultiplexedEntry {
   reason: string
 }
 
-/** Entries starting `KNOWN GAP` are real multi-connection paths that are not multiplexed yet; remove them when fixed. */
+/** Entries starting `KNOWN GAP` are real multi-connection paths that are not hasControlMaster yet; remove them when fixed. */
 const SSH_UNMULTIPLEXED_ALLOWLIST: readonly SshUnmultiplexedEntry[] = [
   // Provisioning and one-time setup scripts.
   {
@@ -1225,14 +1225,14 @@ function stripFullLineComments(text: string): string {
 
 /**
  * A spawn site is an `'ssh'`/`'scp'` string literal (an argv head) or a call to a helper named `ssh(`/`scp(`
- * (the shared `droplet-helpers` builders). A multiplexing file passes `ControlMaster=` in its argv, or passes
+ * (the shared `droplet-helpers` builders). A file has the ControlMaster setting when it passes `ControlMaster=` in its argv, or passes
  * the shared helper a `control: {…}` option.
  */
-export function scanSshSource(text: string): {sites: number; multiplexed: boolean} {
+export function scanSshSource(text: string): {sites: number; hasControlMaster: boolean} {
   const code = stripFullLineComments(text)
   const literals = code.match(/(['"])s(?:sh|cp)\1/g) ?? []
   const calls = code.match(/(?<![\w.$])(?<!function )s(?:sh|cp)\(/g) ?? []
-  return {sites: literals.length + calls.length, multiplexed: /ControlMaster=|\bcontrol:\s*\{/.test(code)}
+  return {sites: literals.length + calls.length, hasControlMaster: /ControlMaster=|\bcontrol:\s*\{/.test(code)}
 }
 
 export function findSshMultiplexingViolations(
@@ -1242,14 +1242,15 @@ export function findSshMultiplexingViolations(
   const violations: string[] = []
   const scanned = new Map(Object.entries(sources).map(([file, text]) => [file, scanSshSource(text)]))
 
-  for (const [file, {sites, multiplexed}] of scanned) {
+  for (const [file, {sites, hasControlMaster}] of scanned) {
     if (sites === 0) continue
     const entry = allowlist.find(candidate => candidate.file === file)
-    if (multiplexed) {
-      if (entry !== undefined) violations.push(`${file}: multiplexes now; remove its allowlist entry`)
+    if (hasControlMaster) {
+      if (entry !== undefined)
+        violations.push(`${file}: now contains a ControlMaster setting; remove its allowlist entry`)
     } else if (entry === undefined) {
       violations.push(
-        `${file}: ${sites} ssh/scp spawn site(s) and no ControlMaster/ControlPath. Multiplex through one socket, or ` +
+        `${file}: ${sites} ssh/scp spawn site(s) and no ControlMaster setting. Share one ControlMaster socket, or ` +
           'add an allowlist entry with the reason it opens a single connection',
       )
     } else if (sites > entry.maxSites) {
@@ -1276,8 +1277,8 @@ function readSshScanSources(): Record<string, string> {
   return sources
 }
 
-describe('ssh multiplexing: every file that builds ssh/scp argv multiplexes or is allowlisted', () => {
-  it('has no unclassified, over-cap or stale file in the live tree', () => {
+describe('ssh multiplexing (file-level): a file that spawns ssh/scp contains a ControlMaster setting or is allowlisted', () => {
+  it('has no file that spawns ssh/scp without a ControlMaster setting and without an allowlist entry, over its cap, or stale', () => {
     expect(findSshMultiplexingViolations(readSshScanSources(), SSH_UNMULTIPLEXED_ALLOWLIST)).toEqual([])
   })
 
@@ -1289,7 +1290,7 @@ describe('ssh multiplexing: every file that builds ssh/scp argv multiplexes or i
       'packages/cli/src/commands/traces/remote.ts',
     ]) {
       expect(Object.keys(sources)).toContain(expected)
-      expect(scanSshSource(sources[expected] ?? '')).toMatchObject({multiplexed: true})
+      expect(scanSshSource(sources[expected] ?? '')).toMatchObject({hasControlMaster: true})
     }
   })
 
@@ -1301,15 +1302,15 @@ describe('ssh multiplexing: every file that builds ssh/scp argv multiplexes or i
   })
 
   describe('rule behaviour against synthetic sources', () => {
-    const multiplexed = `const o = ['-o', 'ControlMaster=auto', '-o', \`ControlPath=\${p}\`]\nrun(['ssh', ...o, 'a'])\nrun(['ssh', ...o, 'b'])`
+    const hasControlMaster = `const o = ['-o', 'ControlMaster=auto', '-o', \`ControlPath=\${p}\`]\nrun(['ssh', ...o, 'a'])\nrun(['ssh', ...o, 'b'])`
     const twoPlain = "run(['ssh', 'host', 'a'])\nrun(['scp', 'f', 'host:f'])"
     const onePlain = "run(['ssh', 'host', 'a'])"
 
-    it('passes a multiplexing file and a file with no ssh at all', () => {
-      expect(findSshMultiplexingViolations({'a.ts': multiplexed, 'b.ts': 'export const x = 1'}, [])).toEqual([])
+    it('passes a file that contains a ControlMaster setting and a file with no ssh at all', () => {
+      expect(findSshMultiplexingViolations({'a.ts': hasControlMaster, 'b.ts': 'export const x = 1'}, [])).toEqual([])
     })
 
-    it('fails a file that spawns ssh more than once without ControlMaster', () => {
+    it('fails a file that spawns ssh more than once and has no ControlMaster setting', () => {
       const violations = findSshMultiplexingViolations({'a.ts': twoPlain}, [])
       expect(violations).toHaveLength(1)
       expect(violations[0]).toContain('a.ts: 2 ssh/scp spawn site(s)')
@@ -1326,28 +1327,34 @@ describe('ssh multiplexing: every file that builds ssh/scp argv multiplexes or i
       expect(violations).toEqual([expect.stringContaining('2 spawn sites, allowlist caps it at 1')])
     })
 
-    it('fails a multiplexing file whose ControlMaster was removed', () => {
-      const stripped = multiplexed.replace('ControlMaster=auto', 'BatchMode=yes')
+    it('fails a file once its ControlMaster setting is removed', () => {
+      const stripped = hasControlMaster.replace('ControlMaster=auto', 'BatchMode=yes')
       expect(findSshMultiplexingViolations({'a.ts': stripped}, [])).toHaveLength(1)
     })
 
     it('counts calls to the shared ssh()/scp() helpers and sees its control option', () => {
-      expect(scanSshSource('ssh(host, cmd, user, opts)\nscp(host, a, b, user)')).toEqual({sites: 2, multiplexed: false})
-      expect(scanSshSource('ssh(host, cmd, user, {control: {path, persist}})')).toEqual({sites: 1, multiplexed: true})
+      expect(scanSshSource('ssh(host, cmd, user, opts)\nscp(host, a, b, user)')).toEqual({
+        sites: 2,
+        hasControlMaster: false,
+      })
+      expect(scanSshSource('ssh(host, cmd, user, {control: {path, persist}})')).toEqual({
+        sites: 1,
+        hasControlMaster: true,
+      })
     })
 
     it('ignores a function definition and full-line comments', () => {
       expect(scanSshSource("function ssh(command: string) {}\n// run(['ssh'])\n * ControlMaster=auto")).toEqual({
         sites: 0,
-        multiplexed: false,
+        hasControlMaster: false,
       })
     })
 
     it('fails an allowlist entry that is stale or whose file now multiplexes', () => {
       const allow = [{file: 'a.ts', maxSites: 2, reason: 'was single'}]
       expect(findSshMultiplexingViolations({}, allow)).toHaveLength(1)
-      expect(findSshMultiplexingViolations({'a.ts': multiplexed}, allow)).toEqual([
-        expect.stringContaining('multiplexes now'),
+      expect(findSshMultiplexingViolations({'a.ts': hasControlMaster}, allow)).toEqual([
+        expect.stringContaining('now contains a ControlMaster setting'),
       ])
     })
   })

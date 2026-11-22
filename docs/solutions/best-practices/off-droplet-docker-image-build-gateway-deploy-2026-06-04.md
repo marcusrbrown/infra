@@ -223,13 +223,13 @@ bunx @marcusrbrown/infra gateway deploy --local
 
 ## Reproducible inputs are not enough: the provenance attestation changes the digest
 
-The collector build sets `provenance: false` in `.github/workflows/deploy-traces.yaml:108-110`; `packages/cli/src/conventions.test.ts:6725-6726` pins it.
+The collector build sets `provenance: false` in `.github/workflows/deploy-traces.yaml:108-110`; `packages/cli/src/conventions.test.ts:7017-7018` pins it.
 
 **Evidence:** Before the change, two builds had the same platform manifest but different top-level digests. Afterwards, three builds of one commit (runs 44930220360, 44930538941, 44935906683) pushed the same digest and deploy verification passed.
 
 **Tradeoff:** No build-provenance attestation is published. Digest verification proves the running image matches the pushed image, not how it was built. Do not generalize this choice to builds that need provenance or do not use the digest as a disruptive restart trigger.
 
-**Gateway unchecked:** Its build steps (`.github/workflows/deploy-gateway.yaml:145` and `.github/workflows/deploy-gateway.yaml:159`) do not explicitly set `provenance`. Compare two builds of one commit before changing them.
+**Gateway checked:** The `infra-gateway` platform manifest (amd64, `sha256:5b08a5b36c8c…`) was identical across three upstream v0.146.0 builds on different infra commits (tags `v0.146.0-1138f54…`, `v0.146.0-0978567…`, `v0.146.0-3ad2bee…`). Each index also held an `attestation-manifest` entry, and only that entry made the pushed index digests differ. The gateway build now sets `provenance: false` (`.github/workflows/deploy-gateway.yaml:153-155`), pinned by `packages/cli/src/conventions.test.ts:2335`. The workspace image is different: its amd64 platform manifest differs per build (`59fe81ba5375`, `6579805a15e5`, `40541f3f1dd5`), so its digest changes regardless of provenance, and its build step (`.github/workflows/deploy-gateway.yaml:160`) is left as it was.
 
 ## Recognizing a host build or swap thrash
 

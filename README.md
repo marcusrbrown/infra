@@ -12,7 +12,7 @@ Personal infrastructure management — deploy automation, operational CLI, and t
 
 ## Overview
 
-Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a Fro Bot monitoring dashboard, self-hosted Umami analytics, an OIDC credential broker for CI runs, a self-hosted trace collection stack for agent runs (planned, not yet deployed), a WireGuard VPN egress box on AWS Lightsail, an operator-run AWS provisioner for `fro-bot/agent` durable storage, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
+Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy automation, the CLIProxyAPI proxy that routes Fro Bot agents to Claude via the Claude Code OAuth subscription, the Fro Bot gateway Discord client and workspace runner, a Fro Bot monitoring dashboard, self-hosted Umami analytics, an OIDC credential broker for CI runs, a self-hosted trace collection stack for agent runs (deployed; ingest not yet open, no sender token issued), a WireGuard VPN egress box on AWS Lightsail, an operator-run AWS provisioner for `fro-bot/agent` durable storage, and a CLI for operational health checks, deploy triggers, and MCP tool exposure.
 
 | Package | Description |
 | --- | --- |
@@ -23,7 +23,7 @@ Bun workspace monorepo for managing personal infrastructure. Hosts KeeWeb deploy
 | `apps/dashboard` | Fro Bot monitoring dashboard Docker Compose stack (`dashboard.fro.bot`) |
 | `apps/vpn` | WireGuard egress box on AWS Lightsail `eu-west-1` — native `wg-quick@wg0`, no Docker |
 | `apps/broker` | OIDC credential broker Docker Compose stack (`broker.fro.bot`) |
-| `apps/traces` | Trace collection Docker Compose stack for agent runs (planned host `traces.fro.bot`, not yet deployed) |
+| `apps/traces` | Trace collection Docker Compose stack for agent runs (host `traces.fro.bot`; deployed, ingest not yet open) |
 | `apps/agent` | Operator-run AWS provisioner for `fro-bot/agent` S3 durable storage — not deployable |
 | `packages/cli` | [`@marcusrbrown/infra`](https://www.npmjs.com/package/@marcusrbrown/infra) CLI — health checks, deploy triggers, onboarding wizard, MCP bridge |
 
@@ -52,7 +52,7 @@ Each app is a self-contained deploy unit, except `apps/agent` — an operator-ru
 - **[Dashboard](apps/dashboard/README.md)** (`apps/dashboard`) — Fro Bot monitoring dashboard at [dashboard.fro.bot](https://dashboard.fro.bot); Docker Compose (dashboard + Caddy) on DigitalOcean; image built from `fro-bot/dashboard` (digest-pinned in `apps/dashboard/docker-compose.yaml`) and pushed to GHCR by CI before deploy. See [`apps/dashboard/AGENTS.md`](apps/dashboard/AGENTS.md) for the operator runbook.
 - **[VPN](apps/vpn/README.md)** (`apps/vpn`) — WireGuard egress box on AWS Lightsail (`eu-west-1`, Ireland); native `wg-quick@wg0` + systemd, no Docker; provisioned via `@aws-sdk/client-lightsail`, deployed over SSH.
 - **[Broker](apps/broker/README.md)** (`apps/broker`) — OIDC-authenticated credential broker at [broker.fro.bot](https://broker.fro.bot); exchanges a GitHub Actions OIDC token for a short-lived cliproxy API key so the durable provider key never lands on a CI runner; Docker Compose (Caddy + Bun) on DigitalOcean.
-- **[Traces](apps/traces/README.md)** (`apps/traces`) — self-hosted collection of agent-run traces at the planned host `traces.fro.bot` (not yet deployed); an OpenTelemetry collector with per-group bearer tokens in front of Langfuse and Tempo, on a dedicated DigitalOcean droplet with its data on an encrypted volume. Langfuse and Grafana are reached over an SSH tunnel and have no public hostname. The [privacy page](apps/docs/src/content/docs/trace-privacy.md) describes what is stored.
+- **[Traces](apps/traces/README.md)** (`apps/traces`) — self-hosted collection of agent-run traces at `traces.fro.bot` (deployed; ingest not yet open, no sender token issued); an OpenTelemetry collector with per-group bearer tokens in front of Langfuse and Tempo, on a dedicated DigitalOcean droplet with its data on an encrypted volume. Langfuse and Grafana are reached over an SSH tunnel and have no public hostname. The [privacy page](apps/docs/src/content/docs/trace-privacy.md) describes what is stored.
 - **[Agent](apps/agent/README.md)** (`apps/agent`) — operator-run AWS provisioner for `fro-bot/agent` S3 durable session storage: an account-level GitHub OIDC provider, a dedicated S3 bucket, and one least-privilege IAM role per consumer repository. Not deployable — no `src/deploy.ts`, `src/host.ts`, Docker Compose stack, deploy workflow, or GitHub Environment. Entry point: `bun run provision:agent`. See [`docs/runbooks/agent-s3-durable-storage.md`](docs/runbooks/agent-s3-durable-storage.md).
 
 ## CLI
@@ -210,7 +210,7 @@ AWS provisioning credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) are 
 
 See [`apps/broker/README.md`](apps/broker/README.md) and [`apps/broker/AGENTS.md`](apps/broker/AGENTS.md).
 
-**`traces` environment** (not yet created; the stack is not deployed):
+**`traces` environment**:
 
 | Name | Kind | Required | Description |
 | --- | --- | --- | --- |

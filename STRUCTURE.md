@@ -13,7 +13,7 @@ Where things live and where to put new code. For system shape, data flow, and in
 │   ├── dashboard/              Fro Bot monitoring dashboard (DigitalOcean + Docker Compose)
 │   ├── vpn/                    WireGuard egress box (AWS Lightsail eu-west-1, native wg-quick@wg0)
 │   ├── broker/                 OIDC credential broker (DigitalOcean + Docker Compose)
-│   ├── traces/                 Trace collection stack, not yet deployed (DigitalOcean + Docker Compose, encrypted data volume)
+│   ├── traces/                 Trace collection stack, deployed; ingest not yet open (DigitalOcean + Docker Compose, encrypted data volume)
 │   └── agent/                  Operator-run AWS provisioner for fro-bot/agent S3 durable storage (no deploy step)
 ├── packages/                   Reusable libraries (never import from apps/)
 │   ├── cli/                    @marcusrbrown/infra goke CLI + MCP bridge + VPN peer model + repo-local workflow scripts

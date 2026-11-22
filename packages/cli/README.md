@@ -110,7 +110,7 @@ bunx @marcusrbrown/infra broker logs --tail 100
 
 ### Traces
 
-Manage the trace collection stack (planned host `traces.fro.bot`, not yet deployed). The service logs, the tunnel and the sender tokens reach trace content or live credentials, so only `traces status` is exposed over MCP.
+Manage the trace collection stack (host `traces.fro.bot`; deployed, ingest not yet open, no sender token issued). The service logs, the tunnel and the sender tokens reach trace content or live credentials, so only `traces status` is exposed over MCP.
 
 | Subcommand | Description |
 | --- | --- |

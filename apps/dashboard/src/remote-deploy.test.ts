@@ -18,6 +18,8 @@ import {describe, expect, it} from 'bun:test'
 
 import {
   buildRemoteSshCommand,
+  DASHBOARD_RUNTIME_GID,
+  DASHBOARD_RUNTIME_UID,
   decodeRemotePayload,
   encodeRemotePayload,
   REMOTE_CALLER_WATCHDOG_SECONDS,
@@ -192,6 +194,11 @@ interface ShellHarnessOptions {
   runningDashboardImageDigest?: string
   runningDashboardHealth?: string
   convergedDashboardHealth?: string
+  /** What `id -u` / `id -g` print inside the recreated dashboard container. Default '1000'. */
+  dashboardRuntimeUid?: string
+  dashboardRuntimeGid?: string
+  /** Non-zero makes `docker compose exec` fail for both lookups. */
+  dashboardExecExitCode?: number
   pruneOutput?: string
   pruneExitCode?: number
   composeImages?: readonly string[]
@@ -262,6 +269,9 @@ const adaptProgramForUnprivilegedHarness = (
   const runningDashboardImageDigest = options.runningDashboardImageDigest ?? fixture.expectedDashboardDigest
   const runningDashboardHealth = options.runningDashboardHealth ?? 'unknown'
   const convergedDashboardHealth = options.convergedDashboardHealth ?? 'healthy'
+  const dashboardRuntimeUid = options.dashboardRuntimeUid ?? '1000'
+  const dashboardRuntimeGid = options.dashboardRuntimeGid ?? '1000'
+  const dashboardExecExitCode = options.dashboardExecExitCode ?? 0
   const composeDashboardIdsOutput = options.composeDashboardIdsOutput ?? 'abcdef123456'
   const pruneOutput = options.pruneOutput ?? 'Deleted Images:\nTotal reclaimed space: 0B\n'
   const composeImages = options.composeImages ?? [CADDY_IMAGE, DASHBOARD_IMAGE]
@@ -529,6 +539,14 @@ docker() {
   fi
   if [ "$1" = "compose" ]; then
     ${options.composeCommandLogPath ? String.raw`printf '%s\n' "$*" >> ${shellQuote(options.composeCommandLogPath)}` : ':'}
+    if [ "$2" = "exec" ]; then
+      if [ ${dashboardExecExitCode} -ne 0 ]; then return ${dashboardExecExitCode}; fi
+      case "$*" in
+        "compose exec -T dashboard id -u") printf '%s\n' ${shellQuote(dashboardRuntimeUid)}; return 0 ;;
+        "compose exec -T dashboard id -g") printf '%s\n' ${shellQuote(dashboardRuntimeGid)}; return 0 ;;
+      esac
+      return 1
+    fi
     if [[ "$*" == *" config --images"* ]]; then ${composeImagesScript}; return ${options.composeConfigExitCode ?? 0}; fi
     if [[ "$*" == *" pull"* ]]; then compose_pulled=1; return ${options.composePullExitCode ?? 0}; fi
     if [[ "$*" == *" up "* ]] && [ ${options.failComposeUpIfLegacyOverrideExists ? '1' : '0'} -eq 1 ] && { [ -e ${shellQuote(legacyOverridePath)} ] || [ -L ${shellQuote(legacyOverridePath)} ]; }; then return 1; fi
@@ -3298,5 +3316,143 @@ describe('dashboard is always force-recreated after the keys are published', () 
     } finally {
       rmSync(parent, {recursive: true, force: true})
     }
+  })
+})
+
+describe('dashboard runtime user matches the owner of its secrets', () => {
+  const runtimeUserFixture = async (options: ShellHarnessOptions = {}) => {
+    const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-runtime-user-'))
+    const root = realpathSync(parent)
+    const runtimeRoot = join(root, 'dashboard-deploy')
+    const dashboardRoot = `${runtimeRoot}-dashboard`
+    const dockerLogPath = join(root, 'docker.log')
+    seedDashboardDirectories(dashboardRoot)
+
+    try {
+      const result = await runShellProgram(
+        adaptProgramForUnprivilegedHarness(runtimeRoot, dashboardRoot, {
+          ...options,
+          dockerCommandLogPath: dockerLogPath,
+        }),
+        encodeRemotePayload(fixture),
+      )
+      const dockerLog = existsSync(dockerLogPath) ? readFileSync(dockerLogPath, 'utf8').split('\n') : []
+      return {...result, dockerLog}
+    } finally {
+      rmSync(parent, {recursive: true, force: true})
+    }
+  }
+
+  const expectedPair = `${DASHBOARD_RUNTIME_UID}:${DASHBOARD_RUNTIME_GID}`
+
+  it('passes when `id -u` and `id -g` inside the container are exactly the owner pair', async () => {
+    const result = await runtimeUserFixture()
+
+    expect(result.exitCode, result.stderr).toBe(0)
+    expect(result.dockerLog.filter(line => line.includes(' exec '))).toEqual([
+      'compose exec -T dashboard id -u',
+      'compose exec -T dashboard id -g',
+    ])
+    expect(result.stdout).toContain(`evidence=runtime-user:uid=${DASHBOARD_RUNTIME_UID};gid=${DASHBOARD_RUNTIME_GID}`)
+    expect(result.stdout).toContain('stage=complete')
+  })
+
+  it('checks after the dashboard is up and healthy, and before Caddy converges', () => {
+    const program = REMOTE_TRANSACTION_PROGRAM
+    const call = program.lastIndexOf('\nverify_dashboard_runtime_user\n')
+
+    expect(call).toBeGreaterThan(-1)
+    expect(call).toBeGreaterThan(program.indexOf('evidence=health:$running_health'))
+    expect(call).toBeLessThan(program.indexOf('--wait-timeout 120 caddy'))
+  })
+
+  it.each([
+    ['a different uid', {dashboardRuntimeUid: '1001'}, `1001:${DASHBOARD_RUNTIME_GID}`],
+    ['a different gid', {dashboardRuntimeGid: '1001'}, `${DASHBOARD_RUNTIME_UID}:1001`],
+    ['root', {dashboardRuntimeUid: '0', dashboardRuntimeGid: '0'}, '0:0'],
+    ['a swapped pair', {dashboardRuntimeUid: '1001', dashboardRuntimeGid: '1000'}, '1001:1000'],
+  ] as const)(
+    'fails closed and names the observed pair when the container runs as %s',
+    async (_name, options, seen) => {
+      const result = await runtimeUserFixture(options)
+
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).toContain('failure=convergence-failed')
+      expect(result.stdout).toContain(`detail=dashboard runtime user is ${seen}, expected ${expectedPair}`)
+      expect(result.stdout).not.toContain('stage=complete')
+      expect(result.dockerLog.some(line => line.includes('up -d') && line.endsWith(' caddy'))).toBe(false)
+    },
+  )
+
+  it('fails closed when the exec itself fails', async () => {
+    const result = await runtimeUserFixture({dashboardExecExitCode: 1})
+
+    expect(result.exitCode).not.toBe(0)
+    expect(result.stdout).toContain('failure=convergence-failed')
+    expect(result.stdout).toContain('detail=dashboard runtime uid lookup failed')
+    expect(result.stdout).not.toContain('stage=complete')
+  })
+
+  it.each([
+    ['a name', 'node'],
+    ['an empty answer', ''],
+    ['a leading zero', '01000'],
+    ['an embedded newline', '1000\n1000'],
+    ['a signed value', '-1'],
+  ] as const)('refuses %s as the uid and never echoes it', async (_name, value) => {
+    const result = await runtimeUserFixture({dashboardRuntimeUid: value})
+
+    expect(result.exitCode).not.toBe(0)
+    expect(result.stdout).toContain('failure=convergence-failed')
+    expect(result.stdout).toContain('detail=dashboard runtime user is malformed')
+    expect(result.stdout).not.toContain('stage=complete')
+    if (value.length > 0) expect(result.stdout).not.toContain(`detail=dashboard runtime user is ${value}`)
+  })
+
+  it('keeps every non-root owner the deploy writes equal to the pair the check expects', () => {
+    const program = REMOTE_TRANSACTION_PROGRAM
+    const pairs = [
+      ...[...program.matchAll(/-o (\d+) -g (\d+)/g)].map(match => `${match[1]}:${match[2]}`),
+      ...[...program.matchAll(/chown -R (\d+):(\d+)/g)].map(match => `${match[1]}:${match[2]}`),
+      ...[...program.matchAll(/\b(\d+):(\d+):(?:600:regular file|700:directory)/g)].map(
+        match => `${match[1]}:${match[2]}`,
+      ),
+    ].filter(pair => pair !== '0:0')
+
+    // data dir install + chown, two PEM installs, PEM and data dir stat expectations (twice for the data dir).
+    expect(pairs.length).toBeGreaterThanOrEqual(6)
+    expect(new Set(pairs)).toEqual(new Set([expectedPair]))
+  })
+
+  it('returns the runtime-user evidence record to the caller', async () => {
+    const text = new TextEncoder()
+    const result = await runRemoteTransaction({
+      host: 'dashboard.example',
+      payload: fixture,
+      env: localEnv,
+      spawn: () => ({
+        stdout: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              text.encode(
+                `evidence=runtime-user:uid=${DASHBOARD_RUNTIME_UID};gid=${DASHBOARD_RUNTIME_GID}\nevidence=runtime-user:uid=0;gid=0;leak=secret\nstage=complete\n`,
+              ),
+            )
+            controller.close()
+          },
+        }),
+        stderr: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.close()
+          },
+        }),
+        stdin: {write: (_data: Uint8Array) => {}, end: () => {}},
+        exited: Promise.resolve(0),
+        kill: (_signal: 'SIGTERM' | 'SIGKILL') => {},
+      }),
+    })
+
+    expect(result.evidence).toContain(`evidence=runtime-user:uid=${DASHBOARD_RUNTIME_UID};gid=${DASHBOARD_RUNTIME_GID}`)
+    expect(result.evidence).not.toContain('evidence=runtime-user:uid=0;gid=0;leak=secret')
   })
 })

@@ -143,7 +143,7 @@ tmpfs:
   mount are the writable surfaces. The App-key mount remains read-only.
 - **`cap_drop: [ALL]`** — drops all Linux capabilities; the Hono app needs none.
 - **`no-new-privileges: true`** — prevents privilege escalation via setuid/setgid binaries.
-- **`user: node`** — runs as the non-root `node` user baked into the upstream image.
+- **`user: node`** — runs as the non-root `node` user baked into the upstream image. The deploy owns the data directory and both PEMs as `1000:1000`, so after `compose up` it runs `docker compose exec -T dashboard id -u` and `id -g` and fails unless the pair is exactly `1000:1000` (`DASHBOARD_RUNTIME_UID`/`DASHBOARD_RUNTIME_GID` in `src/remote-deploy.ts`); a new upstream `node` uid stops the deploy instead of leaving the keys unreadable.
 - **`tmpfs: /tmp`** — provides a writable scratch space without touching the host filesystem.
 
 **Persistent listener storage:**

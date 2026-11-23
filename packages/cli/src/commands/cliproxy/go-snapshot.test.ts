@@ -1,10 +1,14 @@
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {
+  fetchCurrentGoSettings,
   fetchCurrentGoSnapshot,
+  GO_SETTINGS_MAX_BYTES,
+  GO_SETTINGS_URL,
   GO_SNAPSHOT_MAX_BYTES,
   GO_SNAPSHOT_TIMEOUT_MS,
   GO_SNAPSHOT_URL,
+  type GoSettingsFailureReason,
   type GoSnapshotFailureReason,
 } from './go-snapshot'
 
@@ -47,6 +51,15 @@ function recordingFetch(reply: () => Response | Promise<Response>): {
 
 async function failureOf(fetchFn: (input: string, init?: RequestInit) => Promise<Response>, timeoutMs?: number) {
   const result = await fetchCurrentGoSnapshot(fetchFn, timeoutMs)
+  if (result.ok) throw new Error('expected a failed fetch')
+  return result.reason
+}
+
+async function settingsFailureOf(
+  fetchFn: (input: string, init?: RequestInit) => Promise<Response>,
+  timeoutMs?: number,
+): Promise<GoSettingsFailureReason> {
+  const result = await fetchCurrentGoSettings(fetchFn, timeoutMs)
   if (result.ok) throw new Error('expected a failed fetch')
   return result.reason
 }
@@ -260,6 +273,152 @@ describe('fetchCurrentGoSnapshot', () => {
       expect(JSON.stringify(result)).not.toContain('SECRET-BODY-TEXT')
 
       const thrown = await fetchCurrentGoSnapshot(() => {
+        throw new TypeError('connect ECONNREFUSED 10.0.0.1:443 SECRET-ERROR-TEXT')
+      })
+      expect(JSON.stringify(thrown)).not.toContain('SECRET-ERROR-TEXT')
+    })
+  })
+})
+
+describe('fetchCurrentGoSettings', () => {
+  const savedEnv: Record<string, string | undefined> = {}
+
+  beforeEach(() => {
+    for (const name of ['GITHUB_TOKEN', 'GH_TOKEN']) savedEnv[name] = process.env[name]
+    process.env.GITHUB_TOKEN = 'ghs_must_never_be_sent'
+    process.env.GH_TOKEN = 'gho_must_never_be_sent'
+  })
+
+  afterEach(() => {
+    for (const [name, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  })
+
+  it('reads the fixed raw URL for main and returns the parsed settings', async () => {
+    const {fetchFn, seen} = recordingFetch(() => Response.json({enabled: false, defaultProbeModel: 'kimi-k3'}))
+
+    const result = await fetchCurrentGoSettings(fetchFn)
+
+    expect(GO_SETTINGS_URL).toBe(
+      'https://raw.githubusercontent.com/marcusrbrown/infra/main/packages/shared/opencode-go/settings.json',
+    )
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.url).toBe(GO_SETTINGS_URL)
+    expect(result).toEqual({ok: true, settings: {enabled: false, defaultProbeModel: 'kimi-k3'}})
+  })
+
+  it('accepts settings without a probe model', async () => {
+    const result = await fetchCurrentGoSettings(recordingFetch(() => Response.json({enabled: true})).fetchFn)
+
+    expect(result).toEqual({ok: true, settings: {enabled: true}})
+  })
+
+  it('sends no credential of any kind, bounds the request in time and refuses redirects', async () => {
+    const {fetchFn, seen} = recordingFetch(() => Response.json({enabled: true}))
+
+    await fetchCurrentGoSettings(fetchFn)
+
+    const init = seen[0]?.init
+    expect([...new Headers(init?.headers).keys()]).toEqual([])
+    expect(JSON.stringify(init)).not.toContain('must_never_be_sent')
+    expect(init?.method ?? 'GET').toBe('GET')
+    expect(init?.credentials ?? 'omit').not.toBe('include')
+    expect(init?.signal).toBeInstanceOf(AbortSignal)
+    expect(init?.redirect).toBe('error')
+  })
+
+  it('caps the body at 4 KiB', () => {
+    expect(GO_SETTINGS_MAX_BYTES).toBe(4 * 1024)
+  })
+
+  describe('failures are fetch failures, never settings', () => {
+    const cases: [string, () => Response | Promise<Response>, GoSettingsFailureReason][] = [
+      [
+        'a network error',
+        () => {
+          throw new TypeError('fetch failed')
+        },
+        'network',
+      ],
+      [
+        'a timeout error',
+        () => {
+          throw new DOMException('The operation timed out.', 'TimeoutError')
+        },
+        'timeout',
+      ],
+      ['HTTP 404', () => new Response('not found', {status: 404}), 'http-404'],
+      ['HTTP 503', () => new Response('unavailable', {status: 503}), 'http-503'],
+      [
+        'a declared length over the cap',
+        () =>
+          new Response(JSON.stringify({enabled: true}), {
+            headers: {'content-length': String(GO_SETTINGS_MAX_BYTES + 1)},
+          }),
+        'oversize',
+      ],
+      [
+        'a streamed body over the cap with no declared length',
+        () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                const chunk = new Uint8Array(GO_SETTINGS_MAX_BYTES / 2)
+                chunk.fill(0x20)
+                for (let i = 0; i < 3; i++) controller.enqueue(chunk)
+                controller.close()
+              },
+            }),
+          ),
+        'oversize',
+      ],
+      ['a body that is not JSON', () => new Response('<html>rate limited</html>'), 'not-json'],
+      ['JSON that is not an object', () => Response.json([true]), 'invalid-settings'],
+      ['a missing enabled flag', () => Response.json({defaultProbeModel: 'glm-5.3'}), 'invalid-settings'],
+      ['an enabled flag that is not a boolean', () => Response.json({enabled: 'yes'}), 'invalid-settings'],
+      ['an unknown field', () => Response.json({enabled: true, extra: 1}), 'invalid-settings'],
+    ]
+
+    for (const [name, reply, reason] of cases) {
+      it(`${name} → ${reason}`, async () => {
+        expect(await settingsFailureOf(recordingFetch(reply).fetchFn)).toBe(reason)
+      })
+    }
+
+    it('a request that never answers is aborted at the timeout', async () => {
+      const fetchFn = (_input: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason))
+        })
+
+      expect(await settingsFailureOf(fetchFn, 25)).toBe('timeout')
+    })
+
+    it('a body that starts and then stalls is aborted at the timeout, even when the fetch does not wire the signal into it', async () => {
+      const fetchFn = async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"enabled":'))
+              // never closes, never errors
+            },
+          }),
+        )
+
+      const started = performance.now()
+      expect(await settingsFailureOf(fetchFn, 50)).toBe('timeout')
+      expect(performance.now() - started).toBeLessThan(2000)
+    }, 3000)
+
+    it('never puts the response body or an error message into the failure', async () => {
+      const result = await fetchCurrentGoSettings(
+        recordingFetch(() => new Response('SECRET-BODY-TEXT', {status: 500})).fetchFn,
+      )
+      expect(JSON.stringify(result)).not.toContain('SECRET-BODY-TEXT')
+
+      const thrown = await fetchCurrentGoSettings(() => {
         throw new TypeError('connect ECONNREFUSED 10.0.0.1:443 SECRET-ERROR-TEXT')
       })
       expect(JSON.stringify(thrown)).not.toContain('SECRET-ERROR-TEXT')

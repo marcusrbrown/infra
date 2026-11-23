@@ -3,7 +3,14 @@ import type {ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligib
 import {afterEach, beforeEach, describe, expect, it, spyOn} from 'bun:test'
 
 import {createCapturedCtx, expectCapturedToInclude, MockProcessExit} from '../../lib/mcp-ctx-fixture'
-import {GO_SNAPSHOT_URL, type GoSnapshotFailureReason, type GoSnapshotFetch} from './go-snapshot'
+import {
+  GO_SETTINGS_URL,
+  GO_SNAPSHOT_URL,
+  type GoSettingsFailureReason,
+  type GoSettingsFetch,
+  type GoSnapshotFailureReason,
+  type GoSnapshotFetch,
+} from './go-snapshot'
 import {
   checkGoRoute,
   checkGoRouteState,
@@ -2677,13 +2684,339 @@ describe('cliproxyStatusAction — Go privacy policy source', () => {
     expect([...(request?.headers.keys() ?? [])]).toEqual([])
   })
 
-  it('makes no snapshot request without a provider key or when the tracked settings turn Go off', async () => {
+  it('makes no snapshot request without a provider key, and no proxy request when the tracked settings turn Go off', async () => {
     const noKey = install(['glm-5.3'], {kind: 'snapshot', value: goSnapshotOf({'glm-5.3': goEntry()})})
     await runStatus()
     expect(snapshotRequests(noKey)).toHaveLength(0)
 
+    // The snapshot read starts together with the settings read, so a disabled route can no longer promise it makes no
+    // snapshot request. It still never reaches the proxy.
     const disabled = install(['glm-5.3'], {kind: 'snapshot', value: goSnapshotOf({'glm-5.3': goEntry()})})
     await runStatus({apiKey: 'my-api-key', settings: {enabled: false}})
-    expect(snapshotRequests(disabled)).toHaveLength(0)
+    expect(disabled.some(request => request.url.endsWith('/v1/models'))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Where the Go settings come from: main at run time, with the bundled copy as the fallback.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const fetchedSettings =
+  (settings: {enabled: boolean; defaultProbeModel?: string}): (() => Promise<GoSettingsFetch>) =>
+  async () => ({ok: true, settings})
+const failedSettingsFetch =
+  (reason: GoSettingsFailureReason): (() => Promise<GoSettingsFetch>) =>
+  async () => ({ok: false, reason})
+
+describe('checkGoRoute — current settings with bundled fallback', () => {
+  const BASE = 'https://cliproxy.example.com'
+  const KEY = 'go-probe-secret-key'
+  const NOW = new Date('2026-11-04T12:00:00.000Z')
+  const goOk = () => Response.json({choices: [], usage: {opencode: {billing_source: 'go'}}})
+
+  let urls: string[]
+  let chatModels: string[]
+
+  function install(exposed: string[]): void {
+    urls = []
+    chatModels = []
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      urls.push(url)
+      if (url.endsWith('/v1/models')) return modelList(exposed)
+      if (url.endsWith('/v1/chat/completions')) {
+        chatModels.push((JSON.parse(String(init?.body)) as {model: string}).model)
+        return goOk()
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+  }
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  function run(
+    fetchCurrentSettings: (() => Promise<GoSettingsFetch>) | undefined,
+    extra: Record<string, unknown> = {},
+  ) {
+    return checkGoRoute(BASE, KEY, {
+      snapshot: GO_SNAPSHOT,
+      settings: GO_SETTINGS,
+      now: NOW,
+      fetchCurrentSettings,
+      ...extra,
+    })
+  }
+
+  const FAILURES: GoSettingsFailureReason[] = [
+    'network',
+    'timeout',
+    'http-404',
+    'http-503',
+    'oversize',
+    'not-json',
+    'invalid-settings',
+  ]
+
+  it('main says disabled while the bundle says enabled: not probed, not an error, labelled from main', async () => {
+    install(['glm-5.3'])
+
+    const human = await run(fetchedSettings({enabled: false}))
+
+    expect(human).toEqual({
+      title: 'OpenCode Go route',
+      level: 'ok',
+      summary: 'disabled by tracked settings (from main) — not probed',
+      details: ['Go settings: from main'],
+    })
+    expect(urls).toEqual([])
+  })
+
+  it('main says enabled while the bundle says disabled: probed, labelled from main', async () => {
+    install(['glm-5.3'])
+
+    const human = await run(fetchedSettings({enabled: true}), {settings: {enabled: false}})
+
+    expect(human.level).toBe('ok')
+    expect(human.summary).toBe('opencode-go route OK (glm-5.3)')
+    expect(human.details).toEqual(['Go settings: from main'])
+    expect(chatModels).toEqual(['glm-5.3'])
+  })
+
+  it('takes defaultProbeModel from main, not from the bundle', async () => {
+    install(['glm-5.3', 'kimi-k3'])
+
+    await run(fetchedSettings({enabled: true, defaultProbeModel: 'kimi-k3'}))
+
+    expect(chatModels).toEqual(['kimi-k3'])
+  })
+
+  it('falls back to the bundled settings, naming the reason, for each failure kind', async () => {
+    for (const reason of FAILURES) {
+      install(['glm-5.3', 'kimi-k3'])
+
+      const human = await run(failedSettingsFetch(reason))
+
+      // No new downgrade: a settings fallback changes the label, never the level.
+      expect(human.level).toBe('ok')
+      expect(human.summary).toBe('opencode-go route OK (glm-5.3)')
+      expect(human.details).toEqual([`Go settings: bundled (${reason})`])
+    }
+  })
+
+  it('a failed read uses the bundled defaultProbeModel', async () => {
+    install(['glm-5.3', 'kimi-k3'])
+
+    await run(failedSettingsFetch('network'), {settings: {enabled: true, defaultProbeModel: 'kimi-k3'}})
+
+    expect(chatModels).toEqual(['kimi-k3'])
+  })
+
+  it('a failed read with bundled settings that say disabled: not probed, labelled bundled', async () => {
+    for (const reason of FAILURES) {
+      install(['glm-5.3'])
+
+      const human = await run(failedSettingsFetch(reason), {settings: {enabled: false}})
+
+      expect(human).toEqual({
+        title: 'OpenCode Go route',
+        level: 'ok',
+        summary: 'disabled by tracked settings — not probed',
+        details: [`Go settings: bundled (${reason})`],
+      })
+      expect(urls).toEqual([])
+    }
+  })
+
+  it('keeps the privacy snapshot line first and adds the settings line after it', async () => {
+    install(['glm-5.3'])
+
+    const human = await run(fetchedSettings({enabled: true}), {
+      fetchCurrentSnapshot: fetchedSnapshot(goSnapshotOf({'glm-5.3': goEntry()})),
+    })
+
+    expect(human.details).toEqual(['Privacy snapshot: ccccccc (from main)', 'Go settings: from main'])
+  })
+
+  it('starts the settings read and the snapshot read together, not one after the other', async () => {
+    install(['glm-5.3'])
+    let snapshotStarted = (): void => undefined
+    const started = new Promise<void>(resolve => {
+      snapshotStarted = resolve
+    })
+    const fetchCurrentSnapshot = async (): Promise<GoSnapshotFetch> => {
+      snapshotStarted()
+      return {ok: true, snapshot: goSnapshotOf({'glm-5.3': goEntry()})}
+    }
+    // Resolves only once the snapshot read has been started; a sequential implementation would never get there.
+    const fetchCurrentSettings = async (): Promise<GoSettingsFetch> => {
+      await started
+      return {ok: true, settings: {enabled: true}}
+    }
+
+    const human = await run(fetchCurrentSettings, {fetchCurrentSnapshot})
+
+    expect(human.level).toBe('ok')
+    expect(human.details).toEqual(['Privacy snapshot: ccccccc (from main)', 'Go settings: from main'])
+  })
+
+  it('without a settings reader (the monitor path) it uses the injected settings and adds no settings line', async () => {
+    install(['glm-5.3'])
+
+    const human = await run(undefined)
+
+    expect(human.level).toBe('ok')
+    expect(human.details).toBeUndefined()
+  })
+})
+
+describe('cliproxyStatusAction — Go settings source', () => {
+  const BASE = 'https://cliproxy.example.com'
+  const goOk = () => Response.json({choices: [], usage: {opencode: {billing_source: 'go'}}})
+  const savedTokens: Record<string, string | undefined> = {}
+
+  type SettingsReply = {kind: 'settings'; value: unknown} | {kind: 'status'; value: number} | {kind: 'throw'}
+
+  interface Seen {
+    url: string
+    headers: Headers
+    redirect: RequestInit['redirect']
+  }
+
+  const currentSnapshot = goSnapshotOf({'glm-5.3': goEntry(), 'kimi-k3': goEntry()})
+
+  function install(exposed: string[], reply: SettingsReply): {seen: Seen[]; chatModels: string[]} {
+    const seen: Seen[] = []
+    const chatModels: string[] = []
+    globalThis.fetch = createFetchImplementation(async (url, init) => {
+      seen.push({url, headers: new Headers(init?.headers), redirect: init?.redirect})
+      if (url === GO_SETTINGS_URL) {
+        if (reply.kind === 'throw') throw new TypeError('connection refused')
+        if (reply.kind === 'status') return new Response('down', {status: reply.value})
+        return Response.json(reply.value)
+      }
+      if (url === GO_SNAPSHOT_URL) {
+        return Response.json({schemaVersion: 1, source: currentSnapshot.source, models: currentSnapshot.models})
+      }
+      if (url.includes('/healthz')) return new Response('ok', {status: 200})
+      if (url.endsWith('/v1/models')) return modelList(exposed)
+      if (url.includes('/v1/chat/completions')) {
+        // The provider-auth check also posts here; only the Go probe carries the session header.
+        if (new Headers(init?.headers).has('x-opencode-session')) {
+          chatModels.push((JSON.parse(String(init?.body)) as {model: string}).model)
+        }
+        return goOk()
+      }
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+    return {seen, chatModels}
+  }
+
+  async function runStatus(settings: {enabled: boolean; defaultProbeModel?: string}) {
+    const {ctx, captured} = createCapturedCtx()
+    await cliproxyStatusAction(
+      {url: BASE, apiKey: 'my-api-key'},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      settings,
+      GO_SNAPSHOT,
+    )
+    return {output: captured.stdout.join('\n'), stderr: captured.stderr.join(''), exit: captured.exit}
+  }
+
+  beforeEach(() => {
+    for (const name of ['GITHUB_TOKEN', 'GH_TOKEN']) savedTokens[name] = process.env[name]
+    process.env.GITHUB_TOKEN = 'ghs_must_never_be_sent'
+    process.env.GH_TOKEN = 'gho_must_never_be_sent'
+  })
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+    for (const [name, value] of Object.entries(savedTokens)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  })
+
+  it('main says disabled while the published bundle says enabled: informational line, no probe, exit 0', async () => {
+    const {chatModels} = install(['glm-5.3'], {kind: 'settings', value: {enabled: false}})
+
+    const {output, exit, stderr} = await runStatus(GO_SETTINGS)
+
+    expect(output).toContain(
+      '[OK] OpenCode Go route\n  disabled by tracked settings (from main) — not probed\n  - Go settings: from main',
+    )
+    expect(output).toContain('0 errors')
+    expect(exit).toBeNull()
+    expect(stderr).toBe('')
+    expect(chatModels).toEqual([])
+  })
+
+  it('main says enabled while the published bundle says disabled: the route is probed', async () => {
+    const {chatModels} = install(['glm-5.3'], {kind: 'settings', value: {enabled: true}})
+
+    const {output, exit} = await runStatus({enabled: false})
+
+    expect(output).toContain('[OK] OpenCode Go route\n  opencode-go route OK (glm-5.3)')
+    expect(output).toContain('- Go settings: from main')
+    expect(output).not.toContain('disabled by tracked settings')
+    expect(chatModels).toEqual(['glm-5.3'])
+    expect(exit).toBeNull()
+  })
+
+  it('probes with the defaultProbeModel from main', async () => {
+    const {chatModels} = install(['glm-5.3', 'kimi-k3'], {
+      kind: 'settings',
+      value: {enabled: true, defaultProbeModel: 'kimi-k3'},
+    })
+
+    await runStatus(GO_SETTINGS)
+
+    expect(chatModels).toEqual(['kimi-k3'])
+  })
+
+  const failures: [string, SettingsReply, string][] = [
+    ['a network error', {kind: 'throw'}, 'network'],
+    ['HTTP 503', {kind: 'status', value: 503}, 'http-503'],
+    ['settings that do not parse', {kind: 'settings', value: {enabled: 'yes'}}, 'invalid-settings'],
+  ]
+  for (const [name, reply, reason] of failures) {
+    it(`${name}: falls back to the bundled settings and says why (${reason})`, async () => {
+      const {chatModels} = install(['glm-5.3'], reply)
+
+      const {output, exit} = await runStatus(GO_SETTINGS)
+
+      expect(output).toContain(`- Go settings: bundled (${reason})`)
+      expect(output).toContain('[OK] OpenCode Go route')
+      expect(chatModels).toEqual(['glm-5.3'])
+      expect(exit).toBeNull()
+    })
+  }
+
+  it('reads the fixed URL once, with no Authorization header or any other credential, and refuses redirects', async () => {
+    const {seen} = install(['glm-5.3'], {kind: 'settings', value: {enabled: true}})
+
+    await runStatus(GO_SETTINGS)
+
+    const requests = seen.filter(request => request.url === GO_SETTINGS_URL)
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.headers.has('authorization')).toBe(false)
+    expect([...(requests[0]?.headers.keys() ?? [])]).toEqual([])
+    expect(requests[0]?.redirect).toBe('error')
+  })
+
+  it('makes no settings request without a provider key', async () => {
+    const {seen} = install(['glm-5.3'], {kind: 'settings', value: {enabled: true}})
+    const {ctx} = createCapturedCtx()
+
+    await cliproxyStatusAction(
+      {url: BASE},
+      ctx,
+      makeSpawnResult('eceasy/cli-proxy-api:v7.2.139\n'),
+      GO_SETTINGS,
+      GO_SNAPSHOT,
+    )
+
+    expect(seen.some(request => request.url === GO_SETTINGS_URL)).toBe(false)
   })
 })

@@ -1,16 +1,17 @@
-import type {ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
+import type {OpenCodeGoSettings, ParsedSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 
 import type {FetchLike} from '../../status/github-api'
 
-import {parseSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
+import {parseSettings, parseSnapshot} from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 
 import {GITHUB_REPOSITORY} from '../../status/github-api'
 
 /**
- * The current OpenCode Go privacy snapshot, read from the repository's `main` branch at run time.
+ * The current OpenCode Go privacy snapshot and tracked settings, read from the repository's `main` branch at run time.
  *
- * The published CLI inlines the snapshot as it was on release day, while the repository refreshes it by PR with no
- * release. `cliproxy status` therefore judges against this copy and uses the bundled one only when this read fails.
+ * The published CLI inlines both files as they were on release day, while the repository changes them by PR with no
+ * release (a privacy refresh, an emergency disable). `cliproxy status` therefore judges against these copies and uses
+ * the bundled ones only when a read fails.
  *
  * The read is deliberately narrow: one fixed URL built from constants (no input, no environment), GET only, no
  * credential of any kind (a raw-content host never sees a token), one attempt, bounded in time and size. Whatever
@@ -20,16 +21,24 @@ import {GITHUB_REPOSITORY} from '../../status/github-api'
 
 const GO_SNAPSHOT_REF = 'main'
 const GO_SNAPSHOT_FILE = 'packages/shared/opencode-go/privacy-snapshot.json'
+const GO_SETTINGS_FILE = 'packages/shared/opencode-go/settings.json'
 
 export const GO_SNAPSHOT_URL = `https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GO_SNAPSHOT_REF}/${GO_SNAPSHOT_FILE}`
+export const GO_SETTINGS_URL = `https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GO_SNAPSHOT_REF}/${GO_SETTINGS_FILE}`
+/** Shared by both reads; each read gets its own signal. */
 export const GO_SNAPSHOT_TIMEOUT_MS = 5000
 /** The committed snapshot is about 5 KB; this leaves room for growth without buffering anything absurd. */
 export const GO_SNAPSHOT_MAX_BYTES = 128 * 1024
+/** The committed settings are two short fields. */
+export const GO_SETTINGS_MAX_BYTES = 4 * 1024
 
-export type GoSnapshotFailureReason =
-  'network' | 'timeout' | 'oversize' | 'not-json' | 'invalid-snapshot' | `http-${number}`
+type GoReadFailureReason = 'network' | 'timeout' | 'oversize' | 'not-json' | `http-${number}`
+
+export type GoSnapshotFailureReason = GoReadFailureReason | 'invalid-snapshot'
+export type GoSettingsFailureReason = GoReadFailureReason | 'invalid-settings'
 
 export type GoSnapshotFetch = {ok: true; snapshot: ParsedSnapshot} | {ok: false; reason: GoSnapshotFailureReason}
+export type GoSettingsFetch = {ok: true; settings: OpenCodeGoSettings} | {ok: false; reason: GoSettingsFailureReason}
 
 /**
  * Settle with `promise`, or reject with the signal's reason once it aborts. A fetch implementation that does not wire
@@ -48,9 +57,9 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 /** The body as text, or `undefined` when it is larger than the cap (checked on the declared length and while reading). */
-async function readCappedText(response: Response, signal: AbortSignal): Promise<string | undefined> {
+async function readCappedText(response: Response, signal: AbortSignal, maxBytes: number): Promise<string | undefined> {
   const declared = Number(response.headers.get('content-length'))
-  if (Number.isFinite(declared) && declared > GO_SNAPSHOT_MAX_BYTES) {
+  if (Number.isFinite(declared) && declared > maxBytes) {
     response.body?.cancel().catch(() => undefined)
     return undefined
   }
@@ -65,7 +74,7 @@ async function readCappedText(response: Response, signal: AbortSignal): Promise<
       const {done, value} = await abortable(reader.read(), signal)
       if (done) break
       total += value.byteLength
-      if (total > GO_SNAPSHOT_MAX_BYTES) return undefined
+      if (total > maxBytes) return undefined
       chunks.push(value)
     }
     return await abortable(new Blob(chunks).text(), signal)
@@ -79,21 +88,27 @@ function isTimeout(error: unknown): boolean {
   return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
 }
 
-/** One attempt, no retry: the bundled copy is the fallback. Never throws. */
-export async function fetchCurrentGoSnapshot(
-  fetchFn: FetchLike = (input, init) => fetch(input, init),
-  timeoutMs: number = GO_SNAPSHOT_TIMEOUT_MS,
-): Promise<GoSnapshotFetch> {
+type GoFileRead<T, Invalid extends string> = {ok: true; value: T} | {ok: false; reason: GoReadFailureReason | Invalid}
+
+/** One attempt at one fixed URL, parsed by `parse`. Never throws; a parse failure is `invalid`, never a value. */
+async function readGoFile<T, Invalid extends string>(
+  url: string,
+  maxBytes: number,
+  fetchFn: FetchLike,
+  timeoutMs: number,
+  parse: (raw: unknown) => T,
+  invalid: Invalid,
+): Promise<GoFileRead<T, Invalid>> {
   try {
     const signal = AbortSignal.timeout(timeoutMs)
-    const response = await abortable(fetchFn(GO_SNAPSHOT_URL, {redirect: 'error', signal}), signal)
+    const response = await abortable(fetchFn(url, {redirect: 'error', signal}), signal)
     if (!response.ok) {
       // Not awaited: a stalled body must not hold the read past its timeout.
       response.body?.cancel().catch(() => undefined)
       return {ok: false, reason: `http-${response.status}`}
     }
 
-    const text = await readCappedText(response, signal)
+    const text = await readCappedText(response, signal, maxBytes)
     if (text === undefined) return {ok: false, reason: 'oversize'}
 
     let raw: unknown
@@ -104,11 +119,43 @@ export async function fetchCurrentGoSnapshot(
     }
 
     try {
-      return {ok: true, snapshot: parseSnapshot(raw)}
+      return {ok: true, value: parse(raw)}
     } catch {
-      return {ok: false, reason: 'invalid-snapshot'}
+      return {ok: false, reason: invalid}
     }
   } catch (error) {
     return {ok: false, reason: isTimeout(error) ? 'timeout' : 'network'}
   }
+}
+
+/** One attempt, no retry: the bundled copy is the fallback. Never throws. */
+export async function fetchCurrentGoSnapshot(
+  fetchFn: FetchLike = (input, init) => fetch(input, init),
+  timeoutMs: number = GO_SNAPSHOT_TIMEOUT_MS,
+): Promise<GoSnapshotFetch> {
+  const read = await readGoFile(
+    GO_SNAPSHOT_URL,
+    GO_SNAPSHOT_MAX_BYTES,
+    fetchFn,
+    timeoutMs,
+    parseSnapshot,
+    'invalid-snapshot',
+  )
+  return read.ok ? {ok: true, snapshot: read.value} : read
+}
+
+/** The settings counterpart of {@link fetchCurrentGoSnapshot}: same rules, the bundled settings are the fallback. */
+export async function fetchCurrentGoSettings(
+  fetchFn: FetchLike = (input, init) => fetch(input, init),
+  timeoutMs: number = GO_SNAPSHOT_TIMEOUT_MS,
+): Promise<GoSettingsFetch> {
+  const read = await readGoFile(
+    GO_SETTINGS_URL,
+    GO_SETTINGS_MAX_BYTES,
+    fetchFn,
+    timeoutMs,
+    parseSettings,
+    'invalid-settings',
+  )
+  return read.ok ? {ok: true, settings: read.value} : read
 }

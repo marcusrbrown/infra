@@ -23,7 +23,14 @@ import {buildIdentityArgs} from '../../lib/ssh-identity'
 import {observe} from '../../status/collect'
 import {declaredObservation} from '../../status/declared'
 import {httpGet} from '../../status/public-probes'
-import {fetchCurrentGoSnapshot, type GoSnapshotFailureReason, type GoSnapshotFetch} from './go-snapshot'
+import {
+  fetchCurrentGoSettings,
+  fetchCurrentGoSnapshot,
+  type GoSettingsFailureReason,
+  type GoSettingsFetch,
+  type GoSnapshotFailureReason,
+  type GoSnapshotFetch,
+} from './go-snapshot'
 import {validateCliproxyHost} from './host'
 
 /** Minimal ctx surface consumed by cliproxy status actions. Satisfied by both GokeExecutionContext and CapturedCtx. */
@@ -586,6 +593,12 @@ export interface GoRouteOptions {
    * `main` and must not gain a network dependency.
    */
   fetchCurrentSnapshot?: () => Promise<GoSnapshotFetch>
+  /**
+   * Reads the current settings from `main`. When set, the check uses them and falls back to `settings` when the read
+   * fails, saying so. It runs together with `fetchCurrentSnapshot`. Only `cliproxy status` sets it; the monitor
+   * never does, for the same reason as the snapshot.
+   */
+  fetchCurrentSettings?: () => Promise<GoSettingsFetch>
 }
 
 interface GoRouteProbeResult {
@@ -964,16 +977,51 @@ export function resolveGoSettings(settings?: OpenCodeGoSettings): OpenCodeGoSett
   return settings ?? parseSettings(openCodeGoSettingsJson)
 }
 
+/** Which settings the Go check used. `pinned`: the injected or committed copy, nothing fetched. */
+type GoSettingsUse = {kind: 'pinned'} | {kind: 'current'} | {kind: 'bundled'; failure: GoSettingsFailureReason}
+
+const settingsLine = (use: Exclude<GoSettingsUse, {kind: 'pinned'}>): string =>
+  use.kind === 'current' ? 'Go settings: from main' : `Go settings: bundled (${use.failure})`
+
 /**
  * The human Go route check. When the tracked settings turn the route off it is off on purpose: no request is
  * made and the line is informational (`ok`), so it can never affect the exit code.
+ *
+ * With `fetchCurrentSettings` the settings come from `main`, read together with the snapshot, so a published CLI
+ * follows an emergency disable or a re-enable merged there. A failed read uses the bundled settings and says so.
  */
 export async function checkGoRoute(baseUrl: string, apiKey: string, options?: GoRouteOptions): Promise<CheckResult> {
-  if (!resolveGoSettings(options?.settings).enabled) {
-    return {title: 'OpenCode Go route', level: 'ok', summary: 'disabled by tracked settings — not probed'}
+  const bundled = resolveGoSettings(options?.settings)
+  if (options?.fetchCurrentSettings === undefined) {
+    if (!bundled.enabled) {
+      return {title: 'OpenCode Go route', level: 'ok', summary: 'disabled by tracked settings — not probed'}
+    }
+    return (await runGoRouteProbe(baseUrl, apiKey, options)).human
   }
-  const probe = await runGoRouteProbe(baseUrl, apiKey, options)
-  return probe.human
+
+  // Both reads start now. The snapshot read is only awaited later, and only when the route is enabled.
+  const snapshotRead = options.fetchCurrentSnapshot?.()
+  const read = await options.fetchCurrentSettings()
+  const use: Exclude<GoSettingsUse, {kind: 'pinned'}> = read.ok
+    ? {kind: 'current'}
+    : {kind: 'bundled', failure: read.reason}
+  const settings = read.ok ? read.settings : bundled
+
+  if (!settings.enabled) {
+    return {
+      title: 'OpenCode Go route',
+      level: 'ok',
+      summary: `disabled by tracked settings${use.kind === 'current' ? ' (from main)' : ''} — not probed`,
+      details: [settingsLine(use)],
+    }
+  }
+
+  const probe = await runGoRouteProbe(baseUrl, apiKey, {
+    ...options,
+    settings,
+    fetchCurrentSnapshot: snapshotRead === undefined ? undefined : () => snapshotRead,
+  })
+  return {...probe.human, details: [...(probe.human.details ?? []), settingsLine(use)]}
 }
 
 export type ManagementAccess = 'ok' | 'no-key' | 'denied' | 'rate-limited' | 'unavailable'
@@ -1255,6 +1303,8 @@ export async function cliproxyStatusAction(
           snapshot: goSnapshot,
           // Operator status judges against the current snapshot on main; the bundled copy is only the fallback.
           fetchCurrentSnapshot: () => fetchCurrentGoSnapshot(),
+          // The settings follow main the same way: an emergency disable must not need a CLI release.
+          fetchCurrentSettings: () => fetchCurrentGoSettings(),
         }),
       )
     } else {

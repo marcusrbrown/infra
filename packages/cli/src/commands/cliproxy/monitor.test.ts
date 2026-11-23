@@ -6,7 +6,7 @@ import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 
 import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
-import {GO_SNAPSHOT_URL} from './go-snapshot'
+import {GO_SETTINGS_URL, GO_SNAPSHOT_URL} from './go-snapshot'
 import {
   cliproxyMonitorAction,
   createGhEnvironment,
@@ -1834,6 +1834,7 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
     await runMonitor({validation: 'live'}, ctx)
 
     expect(world.recorded.some(request => request.url === GO_SNAPSHOT_URL)).toBe(false)
+    expect(world.recorded.some(request => request.url === GO_SETTINGS_URL)).toBe(false)
     const snapshotHost = new URL(GO_SNAPSHOT_URL).hostname
     expect(world.recorded.some(request => new URL(request.url).hostname === snapshotHost)).toBe(false)
   })
@@ -1855,6 +1856,7 @@ describe('cliproxy monitor: two routes (Claude and OpenCode Go)', () => {
 
     expect(world.recorded.some(request => request.url.includes('/v1/models'))).toBe(true)
     expect(world.recorded.some(request => request.url === GO_SNAPSHOT_URL)).toBe(false)
+    expect(world.recorded.some(request => request.url === GO_SETTINGS_URL)).toBe(false)
   })
 
   it('prints both probe lines before reconciling, with one timestamp, and keeps the Claude lines as they were', async () => {

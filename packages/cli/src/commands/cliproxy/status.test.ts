@@ -2684,16 +2684,14 @@ describe('cliproxyStatusAction — Go privacy policy source', () => {
     expect([...(request?.headers.keys() ?? [])]).toEqual([])
   })
 
-  it('makes no snapshot request without a provider key, and no proxy request when the tracked settings turn Go off', async () => {
+  it('makes no snapshot request without a provider key or when the tracked settings turn Go off', async () => {
     const noKey = install(['glm-5.3'], {kind: 'snapshot', value: goSnapshotOf({'glm-5.3': goEntry()})})
     await runStatus()
     expect(snapshotRequests(noKey)).toHaveLength(0)
 
-    // The snapshot read starts together with the settings read, so a disabled route can no longer promise it makes no
-    // snapshot request. It still never reaches the proxy.
     const disabled = install(['glm-5.3'], {kind: 'snapshot', value: goSnapshotOf({'glm-5.3': goEntry()})})
     await runStatus({apiKey: 'my-api-key', settings: {enabled: false}})
-    expect(disabled.some(request => request.url.endsWith('/v1/models'))).toBe(false)
+    expect(snapshotRequests(disabled)).toHaveLength(0)
   })
 })
 
@@ -2838,26 +2836,50 @@ describe('checkGoRoute — current settings with bundled fallback', () => {
     expect(human.details).toEqual(['Privacy snapshot: ccccccc (from main)', 'Go settings: from main'])
   })
 
-  it('starts the settings read and the snapshot read together, not one after the other', async () => {
-    install(['glm-5.3'])
-    let snapshotStarted = (): void => undefined
-    const started = new Promise<void>(resolve => {
-      snapshotStarted = resolve
+  it('reads settings first, then lists live models, then reads the snapshot', async () => {
+    const events: string[] = []
+    globalThis.fetch = createFetchImplementation(async url => {
+      if (url.endsWith('/v1/models')) {
+        events.push('models')
+        return modelList(['glm-5.3'])
+      }
+      if (url.endsWith('/v1/chat/completions')) return goOk()
+      throw new Error(`Unexpected fetch: ${url}`)
     })
-    const fetchCurrentSnapshot = async (): Promise<GoSnapshotFetch> => {
-      snapshotStarted()
-      return {ok: true, snapshot: goSnapshotOf({'glm-5.3': goEntry()})}
-    }
-    // Resolves only once the snapshot read has been started; a sequential implementation would never get there.
-    const fetchCurrentSettings = async (): Promise<GoSettingsFetch> => {
-      await started
-      return {ok: true, settings: {enabled: true}}
-    }
 
-    const human = await run(fetchCurrentSettings, {fetchCurrentSnapshot})
+    const human = await run(
+      async () => {
+        events.push('settings')
+        return {ok: true, settings: {enabled: true}}
+      },
+      {
+        fetchCurrentSnapshot: async (): Promise<GoSnapshotFetch> => {
+          events.push('snapshot')
+          return {ok: true, snapshot: goSnapshotOf({'glm-5.3': goEntry()})}
+        },
+      },
+    )
 
+    // The snapshot must be no older than the model list it judges.
+    expect(events).toEqual(['settings', 'models', 'snapshot'])
     expect(human.level).toBe('ok')
     expect(human.details).toEqual(['Privacy snapshot: ccccccc (from main)', 'Go settings: from main'])
+  })
+
+  it('makes no snapshot request when main turns the route off', async () => {
+    install(['glm-5.3'])
+    let snapshotCalls = 0
+
+    const human = await run(fetchedSettings({enabled: false}), {
+      fetchCurrentSnapshot: async (): Promise<GoSnapshotFetch> => {
+        snapshotCalls += 1
+        return {ok: true, snapshot: goSnapshotOf({})}
+      },
+    })
+
+    expect(human.summary).toBe('disabled by tracked settings (from main) — not probed')
+    expect(snapshotCalls).toBe(0)
+    expect(urls).toEqual([])
   })
 
   it('without a settings reader (the monitor path) it uses the injected settings and adds no settings line', async () => {
@@ -2962,6 +2984,27 @@ describe('cliproxyStatusAction — Go settings source', () => {
     expect(output).not.toContain('disabled by tracked settings')
     expect(chatModels).toEqual(['glm-5.3'])
     expect(exit).toBeNull()
+  })
+
+  it('requests settings, then the live model list, then the snapshot', async () => {
+    const {seen} = install(['glm-5.3'], {kind: 'settings', value: {enabled: true}})
+
+    await runStatus(GO_SETTINGS)
+
+    const settingsAt = seen.findIndex(request => request.url === GO_SETTINGS_URL)
+    const modelsAt = seen.findIndex((request, index) => index > settingsAt && request.url.endsWith('/v1/models'))
+    const snapshotAt = seen.findIndex(request => request.url === GO_SNAPSHOT_URL)
+    expect(settingsAt).toBeGreaterThanOrEqual(0)
+    expect(modelsAt).toBeGreaterThan(settingsAt)
+    expect(snapshotAt).toBeGreaterThan(modelsAt)
+  })
+
+  it('makes no snapshot request when main turns the route off', async () => {
+    const {seen} = install(['glm-5.3'], {kind: 'settings', value: {enabled: false}})
+
+    await runStatus(GO_SETTINGS)
+
+    expect(seen.some(request => request.url === GO_SNAPSHOT_URL)).toBe(false)
   })
 
   it('probes with the defaultProbeModel from main', async () => {

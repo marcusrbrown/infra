@@ -595,7 +595,7 @@ export interface GoRouteOptions {
   fetchCurrentSnapshot?: () => Promise<GoSnapshotFetch>
   /**
    * Reads the current settings from `main`. When set, the check uses them and falls back to `settings` when the read
-   * fails, saying so. It runs together with `fetchCurrentSnapshot`. Only `cliproxy status` sets it; the monitor
+   * fails, saying so. It runs first; `fetchCurrentSnapshot` runs later, after the model list. Only `cliproxy status` sets it; the monitor
    * never does, for the same reason as the snapshot.
    */
   fetchCurrentSettings?: () => Promise<GoSettingsFetch>
@@ -987,7 +987,7 @@ const settingsLine = (use: Exclude<GoSettingsUse, {kind: 'pinned'}>): string =>
  * The human Go route check. When the tracked settings turn the route off it is off on purpose: no request is
  * made and the line is informational (`ok`), so it can never affect the exit code.
  *
- * With `fetchCurrentSettings` the settings come from `main`, read together with the snapshot, so a published CLI
+ * With `fetchCurrentSettings` the settings come from `main`, read before anything else, so a published CLI
  * follows an emergency disable or a re-enable merged there. A failed read uses the bundled settings and says so.
  */
 export async function checkGoRoute(baseUrl: string, apiKey: string, options?: GoRouteOptions): Promise<CheckResult> {
@@ -999,8 +999,8 @@ export async function checkGoRoute(baseUrl: string, apiKey: string, options?: Go
     return (await runGoRouteProbe(baseUrl, apiKey, options)).human
   }
 
-  // Both reads start now. The snapshot read is only awaited later, and only when the route is enabled.
-  const snapshotRead = options.fetchCurrentSnapshot?.()
+  // Settings first: a route that is off on main makes no other request. The snapshot reader stays lazy, so it starts
+  // after the probe has listed the live models and the snapshot is never older than that list.
   const read = await options.fetchCurrentSettings()
   const use: Exclude<GoSettingsUse, {kind: 'pinned'}> = read.ok
     ? {kind: 'current'}
@@ -1016,11 +1016,7 @@ export async function checkGoRoute(baseUrl: string, apiKey: string, options?: Go
     }
   }
 
-  const probe = await runGoRouteProbe(baseUrl, apiKey, {
-    ...options,
-    settings,
-    fetchCurrentSnapshot: snapshotRead === undefined ? undefined : () => snapshotRead,
-  })
+  const probe = await runGoRouteProbe(baseUrl, apiKey, {...options, settings})
   return {...probe.human, details: [...(probe.human.details ?? []), settingsLine(use)]}
 }
 

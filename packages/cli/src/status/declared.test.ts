@@ -52,6 +52,29 @@ describe('DECLARED_OBSERVATIONS', () => {
     })
   })
 
+  it('declares the VPN reachability as a probe-owned TCP measurement under the id the history already carries', () => {
+    expect(declaredObservation('vpn', 'public-reachability')).toEqual({
+      id: 'public-reachability',
+      kind: 'reachability',
+      source: 'tcp',
+      owner: 'probe',
+    })
+    // Still nothing to measure for the egress route.
+    expect(declaredObservation('vpn', 'egress-route')).toMatchObject({owner: 'not-applicable'})
+  })
+
+  it('reports a vpn probe that is missing or failed as unknown, tagged tcp', () => {
+    const missing = assembleAppStatus('vpn', {kind: 'none'}, {kind: 'none'}, NOW)
+    const failed = assembleAppStatus('vpn', {kind: 'failed'}, {kind: 'none'}, NOW)
+
+    expect(missing.observations[0]).toMatchObject({
+      source: 'tcp',
+      result: 'unknown',
+      detail: {reason: 'missing-result'},
+    })
+    expect(failed.observations[0]).toMatchObject({source: 'tcp', result: 'unknown', detail: {reason: 'check-failed'}})
+  })
+
   it('looks up a declaration and rejects an undeclared id', () => {
     expect(declaredObservation('gateway', 'workspace-memory')).toMatchObject({kind: 'resource', owner: 'collector'})
     expect(() => declaredObservation('keeweb', 'workspace-memory')).toThrow('keeweb does not declare')

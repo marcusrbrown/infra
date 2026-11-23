@@ -6,7 +6,7 @@ import {PUBLIC_REACHABILITY_ID} from './public-probes'
 
 /**
  * Who supplies a declared observation:
- * - `probe`: the shared public probe
+ * - `probe`: the shared public probe (HTTPS, or a TCP connect for the VPN box)
  * - `collector`: the app's SSH/API collector
  * - `github`: the GitHub Deployments reader or the auth monitor reader
  * - `not-applicable`: the app has nothing to measure; reported as not measured
@@ -27,6 +27,9 @@ const publicReachability: DeclaredObservation = {
   source: 'http',
   owner: 'probe',
 }
+
+/** The VPN box serves nothing over HTTPS: same observation id and kind as the others, measured by a TCP connect. */
+const vpnReachability: DeclaredObservation = {...publicReachability, source: 'tcp'}
 
 const deployState: DeclaredObservation = {
   id: 'deploy-state',
@@ -61,7 +64,7 @@ export const DECLARED_OBSERVATIONS: Record<AppId, readonly DeclaredObservation[]
   umami: [publicReachability, composeServices, deployState],
   dashboard: [publicReachability, composeServices, deployState],
   vpn: [
-    {id: PUBLIC_REACHABILITY_ID, kind: 'reachability', source: 'config', owner: 'not-applicable'},
+    vpnReachability,
     {id: 'wireguard-interface', kind: 'container-health', source: 'ssh', owner: 'collector'},
     deployState,
     {id: 'egress-route', kind: 'end-to-end', source: 'config', owner: 'not-applicable'},

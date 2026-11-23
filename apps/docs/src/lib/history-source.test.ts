@@ -68,7 +68,9 @@ describe('readHistoryDir', () => {
     const results = new Set(Object.values(history.apps).flatMap(samples => samples.flatMap(s => Object.values(s.r))))
 
     expect([...results].toSorted()).toEqual(['f', 'n', 'p', 'u'])
-    expect(history.apps.vpn.at(-1)?.d?.['deploy-state']?.reason).toBe('at_gate')
+    // The vpn fixture shows the issue 1992 shape: an unreachable SSH port, and a failed deploy behind a parked gate.
+    expect(history.apps.vpn.at(-1)?.d?.['deploy-state']?.reason).toBe('newer_at_gate')
+    expect(history.apps.vpn.at(-1)?.r['public-reachability']).toBe('f')
   })
 
   it('rejects an unsupported schemaVersion', () => {

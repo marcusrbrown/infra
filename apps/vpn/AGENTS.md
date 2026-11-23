@@ -101,7 +101,17 @@ Ed25519 key import: `ImportKeyPairCommand` is called with the Ed25519 public key
 | `VPN_HOST` | ✓ | Static IP of the Lightsail instance (printed by provisioning) |
 | `VPN_PEERS` | — | Peer roster JSON (`{"peers":[{"name":...,"publicKey":...,"tunnelIp":...}]}`). Auto-synced by `vpn client add/remove`. An empty roster is valid (first deploy before any peers). |
 
-All three secrets are scoped to the `vpn` GitHub Environment. AWS provisioning credentials (`VPN_AWS_ACCESS_KEY_ID`, `VPN_AWS_SECRET_ACCESS_KEY`, and optional `VPN_AWS_REGION`) are operator-local only — they are NOT in the `vpn` Environment and are never used by the deploy or status paths.
+All three secrets are scoped to the `vpn` GitHub Environment.
+
+`VPN_PROBE_HOST` is not one of them. It is a **repository-level** secret holding the same address as `VPN_HOST`, read only by the `Take snapshot` step of `.github/workflows/status-snapshot.yaml`, where `status snapshot` uses it for a plain TCP connect to port 22 (the box's reachability on the public status page). The `vpn` Environment cannot hold it: its required reviewer would make every half-hourly snapshot wait for approval. Set it from the operator's terminal, and again whenever the static IP changes:
+
+```bash
+gh secret set VPN_PROBE_HOST --repo marcusrbrown/infra
+```
+
+Unset, the probe reports "not measured" and the public page stays green-neutral; it is never a failure. The address is sensitive: the probe sends nothing and reads nothing, records only a result and one of the fixed reason codes `timeout`, `refused`, `unreachable`, `dns`, `error` or `invalid-config`, and never prints or stores the address or error text. On an operator workstation `infra status` runs the same probe against `VPN_PROBE_HOST` or, failing that, `VPN_HOST`. The SSH-based `wireguard-interface` check is separate and unchanged.
+
+AWS provisioning credentials (`VPN_AWS_ACCESS_KEY_ID`, `VPN_AWS_SECRET_ACCESS_KEY`, and optional `VPN_AWS_REGION`) are operator-local only — they are NOT in the `vpn` Environment and are never used by the deploy or status paths.
 
 ## CLI COMMANDS
 
@@ -167,6 +177,7 @@ The runbook in `docs/runbooks/vpn-egress-box.md` covers the full reprovision seq
 - **Never hardcode `blueprintId` or `bundleId`** — resolve live via `GetBlueprintsCommand`/`GetBundlesCommand`. Hardcoded IDs risk a non-existent-ID failure.
 - **Never omit SSH 22 from `PutInstancePublicPortsCommand`** — the command replaces the entire ruleset; omitting SSH 22 locks out the operator. The firewall ruleset always includes both SSH 22 (tcp) and UDP 51820.
 - **Never read a failed remote probe as an answer** — a non-zero exit is not proof of "no swap" or "no fstab line". Probes print a sentinel, and deploy requires exit 0 plus a recognised sentinel, or it throws. A failed probe read as "none" creates a second swap file or a duplicate fstab line.
+- **Never pass `VPN_PROBE_HOST` to any step but the snapshot step, and never echo it** — not at workflow or job level, not in a log line, an error message, a test fixture, a PR description or the public page. A conventions test pins this. Tests use `203.0.113.x` (TEST-NET-3).
 - **Never use Docker for the VPN runtime** — native `wg-quick@wg0` + systemd is the correct pattern for a single-box WireGuard setup.
 - **Never use AWS credentials in the deploy or status paths** — AWS creds are provisioning-only. Deploy and status reach the box over SSH; the MCP runtime needs no AWS credentials.
 

@@ -1,4 +1,8 @@
 import type {AppId, Observation, ObservationDetail} from './observation'
+import type {TcpConnect} from './tcp-probe'
+
+import {notMeasured} from './collect'
+import {netConnect, parseProbeHost, tcpReach} from './tcp-probe'
 
 /**
  * Public HTTPS probes: one per publicly reachable app, shared by `status` and the snapshot.
@@ -13,6 +17,8 @@ import type {AppId, Observation, ObservationDetail} from './observation'
  *   say it is down)
  *
  * Observations never carry response bodies, URLs or error text; see `observationDetailSchema`.
+ *
+ * The VPN box serves nothing over HTTPS, so its probe is a TCP connect (see `probeVpn`).
  */
 
 export const PUBLIC_PROBE_TIMEOUT_MS = 10_000
@@ -167,6 +173,13 @@ export interface ProbeOptions {
   baseUrl?: string
   timeoutMs?: number
   now?: () => Date
+  /**
+   * The VPN box address, for `probeVpn` only; no other probe reads it. It is sensitive: the caller reads it from
+   * the environment (see `vpnProbeHost`), and the probe never copies it into an observation.
+   */
+  host?: string
+  /** Replaces the TCP connector, so tests never open a socket. `probeVpn` only. */
+  connect?: TcpConnect
 }
 
 type BodyVerdict = {ok: true; detail?: Pick<ObservationDetail, 'contractVersion'>} | {ok: false}
@@ -326,7 +339,67 @@ export function probeGateway(options?: ProbeOptions): Promise<Observation> {
   )
 }
 
-/** The public probe for each app that has one. VPN has no public endpoint. */
+// ─── VPN: a TCP connect to the SSH port ───────────────────────────────────────
+
+/** The box serves nothing over HTTPS, so its probe is a TCP connect to the SSH port. */
+export const VPN_PROBE_PORT = 22
+export const VPN_PROBE_TIMEOUT_MS = 5000
+const VPN_PROBE_RETRIES = 1
+
+const VPN_REACHABILITY = {id: PUBLIC_REACHABILITY_ID, kind: 'reachability', source: 'tcp'} as const
+
+/**
+ * Where the VPN probe's address comes from. Only `VPN_PROBE_HOST` (a repository secret read by the snapshot step
+ * and nothing else) when `fallbackToVpnHost` is false. On an operator workstation `status` also accepts
+ * `VPN_HOST`, which the SSH check already reads there. The address goes to the probe and nowhere else.
+ */
+export function vpnProbeHost(
+  env: Record<string, string | undefined>,
+  options: {fallbackToVpnHost: boolean},
+): string | undefined {
+  const clean = (value: string | undefined): string | undefined => {
+    const trimmed = value?.trim() ?? ''
+    return trimmed === '' ? undefined : trimmed
+  }
+
+  return clean(env.VPN_PROBE_HOST) ?? (options.fallbackToVpnHost ? clean(env.VPN_HOST) : undefined)
+}
+
+/**
+ * VPN box: a TCP connect to port 22, accepted and closed at once. Nothing is sent or read.
+ * - no address configured → `not_measured` / `missing-config`, never a failure: the public page must not turn red
+ *   before the secret exists
+ * - an address outside the host allowlist → `unknown` / `invalid-config`; the value is never echoed
+ * - accepted → `pass`
+ * - timeout, refusal, ICMP unreachable → `fail` (the box, or the path to it, is down)
+ * - DNS failure, any other error → `unknown` (the check could not decide)
+ *
+ * The reason is one of a fixed set, so neither the address nor error text can reach an observation.
+ */
+export async function probeVpn(options: ProbeOptions = {}): Promise<Observation> {
+  const parsed = parseProbeHost(options.host)
+  if (parsed.kind === 'missing') return notMeasured(VPN_REACHABILITY, 'missing-config')
+
+  const make = (result: 'pass' | 'fail' | 'unknown', detail: ObservationDetail): Observation => ({
+    ...VPN_REACHABILITY,
+    result,
+    observedAt: (options.now?.() ?? new Date()).toISOString(),
+    detail,
+  })
+  if (parsed.kind === 'invalid') return make('unknown', {reason: 'invalid-config'})
+
+  const outcome = await tcpReach(parsed.host, VPN_PROBE_PORT, {
+    timeoutMs: options.timeoutMs ?? VPN_PROBE_TIMEOUT_MS,
+    retries: VPN_PROBE_RETRIES,
+    connect: options.connect ?? netConnect,
+  })
+  if (outcome.ok) return make('pass', {durationMs: outcome.durationMs})
+
+  const down = outcome.reason === 'timeout' || outcome.reason === 'refused' || outcome.reason === 'unreachable'
+  return make(down ? 'fail' : 'unknown', {reason: outcome.reason, durationMs: outcome.durationMs})
+}
+
+/** The public probe for each app that has one. */
 export const PUBLIC_PROBES = {
   keeweb: probeKeeweb,
   cliproxy: probeCliproxy,
@@ -335,4 +408,5 @@ export const PUBLIC_PROBES = {
   dashboard: probeDashboard,
   broker: probeBroker,
   traces: probeTraces,
+  vpn: probeVpn,
 } as const satisfies Partial<Record<AppId, (options?: ProbeOptions) => Promise<Observation>>>

@@ -37,7 +37,7 @@ describe('contract vocabulary', () => {
     expect(STATUS_SCHEMA_VERSION).toBe(1)
     expect(OBSERVATION_KINDS).toEqual(['reachability', 'container-health', 'deploy-state', 'end-to-end', 'resource'])
     expect(OBSERVATION_RESULTS).toEqual(['pass', 'fail', 'unknown', 'not_measured'])
-    expect(OBSERVATION_SOURCES).toEqual(['http', 'ssh', 'github-api', 'monitor', 'config'])
+    expect(OBSERVATION_SOURCES).toEqual(['http', 'tcp', 'ssh', 'github-api', 'monitor', 'config'])
     expect(APP_IDS).toEqual(['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker', 'traces'])
   })
 })

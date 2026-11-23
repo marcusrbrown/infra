@@ -124,6 +124,10 @@ If snapshots were off for more than 7 days, the history has expired; follow the 
 
 ---
 
+## The VPN reachability probe
+
+The VPN box serves nothing over HTTPS, so its `public-reachability` observation (same id and kind as the other apps, so the history stays continuous) is a TCP connect to port 22, shown on its page as "SSH port reachability". The `Take snapshot` step reads the address from the repository secret `VPN_PROBE_HOST`. Unset, the observation is "Not measured" and the page does not turn red; an invalid value is "Unknown" (`invalid-config`). The address is never printed or recorded: a sample holds a result and one of the fixed reason codes only, and the page renders only those. The meaning of each outcome, and what to do, is in the [VPN runbook](vpn-egress-box.md#reachability-probe).
+
 ## An app that is not yet deployed
 
 `APPS_NOT_YET_DEPLOYED` in `packages/shared/status/history-schema.ts` names apps whose host does not exist yet (empty today: every app is deployed). While an app is on it, `status snapshot` does not probe it, does not read its deployments, and writes no sample for it. The site ignores any sample the history already holds for it, so its service page and its `/status/` row say "Not yet deployed" and show no verdict. `infra status` is not public and still reports the app from its real observations.

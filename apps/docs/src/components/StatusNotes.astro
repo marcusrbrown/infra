@@ -18,8 +18,10 @@ const {fixture} = Astro.props
 
 <p class="proves">
   <strong>What this proves.</strong> Public history covers reachability, deploy state and the auth monitor's live model-route
-  probe for CLIProxyAPI; container, disk and memory health are checked privately, not here. It does not cover gateway model
-  calls and it is not an uptime SLA. Every figure is a count of samples the snapshot recorded; gaps are shown, not hidden.
+  probe for CLIProxyAPI; container, disk and memory health are checked privately, not here. The VPN box serves no web page,
+  so its reachability is only a TCP connect to its SSH port: it shows the box is up, not that the tunnel works. It does not
+  cover gateway model calls and it is not an uptime SLA. When a newer deployment waits at its approval gate, deploy state shows
+  the newest deployment that finished. Every figure is a count of samples the snapshot recorded; gaps are shown, not hidden.
 </p>
 
 <style>

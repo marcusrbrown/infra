@@ -9,6 +9,8 @@ import {
   DEPLOY_STATE_CALL_BUDGET,
   DEPLOY_STATE_CALLS_PER_APP,
   DEPLOY_STATE_ID,
+  DEPLOY_STATE_LOOKBACK,
+  DEPLOY_STATE_MAX_CALLS_PER_APP,
   mapDeploymentState,
   readDeployStates,
 } from './deploy-state'
@@ -130,6 +132,24 @@ async function readOne(app: AppId, route: Route) {
   return {observation: observations[app], observations, calls}
 }
 
+/** Deployments newest first, each with its own newest-first status history. */
+function stack(...entries: [state: string, createdAt: string][]): History {
+  const deployments = entries.map(([, createdAt], index) => ({
+    id: entries.length - index,
+    ref: 'main',
+    created_at: createdAt,
+  }))
+  return {
+    deployments,
+    statusesByDeployment: Object.fromEntries(
+      entries.map(([state, createdAt], index) => [
+        String(entries.length - index),
+        [{id: 100 + index, state, created_at: createdAt}],
+      ]),
+    ),
+  }
+}
+
 describe('mapDeploymentState', () => {
   it('maps every GitHub deployment state with the recorded rules', () => {
     expect(mapDeploymentState('success')).toEqual({result: 'pass'})
@@ -168,14 +188,14 @@ describe('readDeployStates', () => {
     })
   })
 
-  it('reads all eight apps in 2 calls each, within the stated budget', async () => {
+  it('reads all eight apps in 2 calls each when the newest deployment is settled, within the stated budget', async () => {
     const {fetchFn, calls} = fakeGitHubByApp({})
     const observations = await readDeployStates({token: TOKEN, fetch: fetchFn, now: NOW})
 
     expect(Object.keys(observations).toSorted()).toEqual([...APP_IDS].toSorted())
     expect(DEPLOY_STATE_CALLS_PER_APP).toBe(2)
-    expect(DEPLOY_STATE_CALL_BUDGET).toBe(16)
-    expect(calls).toHaveLength(16)
+    expect(calls).toHaveLength(APP_IDS.length * DEPLOY_STATE_CALLS_PER_APP)
+    expect(calls.length).toBeLessThanOrEqual(DEPLOY_STATE_CALL_BUDGET)
     for (const app of APP_IDS) {
       expect(observationSchema.safeParse(observations[app]).success).toBe(true)
       expect(observations[app].result).toBe('pass')
@@ -206,14 +226,14 @@ describe('readDeployStates', () => {
     expect(observations.vpn?.result).toBe('not_measured')
   })
 
-  it('asks for exactly the newest main deployment and the newest status', async () => {
+  it('asks for the newest main deployments in one list call and the newest status of the newest one', async () => {
     const {calls} = await readOne('gateway', fixture('broker-success'))
     const own = calls.filter(call => call.url.searchParams.get('environment') === 'gateway')
 
     expect(own).toHaveLength(1)
     expect(own[0]?.url.pathname).toBe('/repos/marcusrbrown/infra/deployments')
     expect(own[0]?.url.searchParams.get('ref')).toBe('main')
-    expect(own[0]?.url.searchParams.get('per_page')).toBe('1')
+    expect(own[0]?.url.searchParams.get('per_page')).toBe(String(DEPLOY_STATE_LOOKBACK))
     const statusCalls = calls.filter(call => call.url.pathname.endsWith('/statuses'))
     expect(statusCalls.every(call => call.url.searchParams.get('per_page') === '1')).toBe(true)
   })
@@ -263,10 +283,10 @@ describe('readDeployStates', () => {
       expect(calls.some(call => call.url.pathname.includes('/deployments/6927872427/'))).toBe(false)
     })
 
-    it('keeps the call budget with the ref filter', async () => {
+    it('keeps the typical call count with the ref filter', async () => {
       const {calls} = await readOne('keeweb', historyFixture('keeweb-branch-rejected'))
 
-      expect(calls).toHaveLength(DEPLOY_STATE_CALL_BUDGET)
+      expect(calls).toHaveLength(APP_IDS.length * DEPLOY_STATE_CALLS_PER_APP)
     })
 
     it.each([
@@ -295,6 +315,170 @@ describe('readDeployStates', () => {
     })
   })
 
+  describe('a deployment waiting at its gate in front of settled ones (issue 1992)', () => {
+    const GATE = 'newer_at_gate'
+
+    it('reports the failure behind a waiting deployment, and says a newer one waits (the recorded vpn outage)', async () => {
+      const {observation, calls} = await readOne(
+        'vpn',
+        stack(
+          ['waiting', '2026-11-17T01:07:00Z'],
+          ['failure', '2026-11-16T20:00:00Z'],
+          ['failure', '2026-11-15T20:00:00Z'],
+        ),
+      )
+
+      expect(observation).toEqual({
+        id: 'deploy-state',
+        kind: 'deploy-state',
+        source: 'github-api',
+        result: 'fail',
+        observedAt: NOW.toISOString(),
+        // `since` is when the settled deployment reached its state, not when the newer one began waiting.
+        detail: {reason: GATE, since: '2026-11-16T20:00:00Z'},
+      })
+      // One list, the waiting status, then the next deployment's status: it stops at the first settled one.
+      expect(
+        calls.filter(call => call.url.pathname.endsWith('/statuses') && call.url.pathname.includes('/deployments/1/')),
+      ).toHaveLength(0)
+      expect(observationSchema.safeParse(observation).success).toBe(true)
+    })
+
+    it('reports a success behind a waiting deployment as pass, with the same marker', async () => {
+      const {observation} = await readOne(
+        'vpn',
+        stack(['waiting', '2026-11-17T01:07:00Z'], ['success', '2026-11-16T20:00:00Z']),
+      )
+
+      expect(observation).toMatchObject({result: 'pass', detail: {reason: GATE, since: '2026-11-16T20:00:00Z'}})
+    })
+
+    it('treats a rejected gate (error) behind a waiting deployment as fail', async () => {
+      const {observation} = await readOne(
+        'vpn',
+        stack(['waiting', '2026-11-17T01:07:00Z'], ['error', '2026-11-16T20:00:00Z']),
+      )
+
+      expect(observation).toMatchObject({result: 'fail', detail: {reason: GATE}})
+    })
+
+    it('walks past several waiting deployments to the newest settled one', async () => {
+      const {observation} = await readOne(
+        'vpn',
+        stack(
+          ['waiting', '2026-11-18T01:00:00Z'],
+          ['waiting', '2026-11-17T01:00:00Z'],
+          ['failure', '2026-11-16T20:00:00Z'],
+        ),
+      )
+
+      expect(observation).toMatchObject({result: 'fail', detail: {reason: GATE, since: '2026-11-16T20:00:00Z'}})
+    })
+
+    it('skips a running or inactive deployment behind the gate', async () => {
+      const {observation} = await readOne(
+        'vpn',
+        stack(
+          ['waiting', '2026-11-18T01:00:00Z'],
+          ['in_progress', '2026-11-17T01:00:00Z'],
+          ['inactive', '2026-11-16T22:00:00Z'],
+          ['success', '2026-11-16T20:00:00Z'],
+        ),
+      )
+
+      expect(observation).toMatchObject({result: 'pass', detail: {reason: GATE, since: '2026-11-16T20:00:00Z'}})
+    })
+
+    it("keeps today's unknown / at_gate when nothing settled is found, with waiting-since", async () => {
+      const {observation} = await readOne('vpn', fixture('vpn-waiting'))
+
+      expect(observation).toMatchObject({result: 'unknown', detail: {reason: 'at_gate', since: '2026-11-01T22:56:44Z'}})
+    })
+
+    it('keeps unknown / at_gate when every deployment inside the look-back is waiting, and stays within the call ceiling', async () => {
+      const waiting = Array.from({length: DEPLOY_STATE_LOOKBACK + 2}, (_unused, index): [string, string] => [
+        'waiting',
+        `2026-11-${String(20 - index).padStart(2, '0')}T01:00:00Z`,
+      ])
+      const {fetchFn, calls} = fakeGitHubByApp({vpn: stack(...waiting)})
+      const observations = await readDeployStates({token: TOKEN, fetch: fetchFn, now: NOW, apps: ['vpn']})
+
+      expect(observations.vpn).toMatchObject({
+        result: 'unknown',
+        detail: {reason: 'at_gate', since: '2026-11-20T01:00:00Z'},
+      })
+      expect(calls).toHaveLength(DEPLOY_STATE_MAX_CALLS_PER_APP)
+      expect(DEPLOY_STATE_MAX_CALLS_PER_APP).toBe(1 + DEPLOY_STATE_LOOKBACK)
+      expect(DEPLOY_STATE_CALL_BUDGET).toBe(APP_IDS.length * DEPLOY_STATE_MAX_CALLS_PER_APP)
+    })
+
+    it('does not look behind a deployment that is not waiting: a running newest one stays running', async () => {
+      const {observation, calls} = await readOne(
+        'vpn',
+        stack(['in_progress', '2026-11-17T01:07:00Z'], ['failure', '2026-11-16T20:00:00Z']),
+      )
+
+      expect(observation).toMatchObject({result: 'unknown', detail: {reason: 'running'}})
+      expect(calls.filter(call => call.url.pathname.includes('/deployments/1/'))).toHaveLength(0)
+    })
+
+    it('does not look behind a settled newest deployment either', async () => {
+      const {observation, calls} = await readOne(
+        'vpn',
+        stack(['success', '2026-11-17T01:07:00Z'], ['failure', '2026-11-16T20:00:00Z']),
+      )
+
+      expect(observation).toMatchObject({result: 'pass', detail: {since: '2026-11-17T01:07:00Z'}})
+      expect(observation?.detail?.reason).toBeUndefined()
+      expect(calls.filter(call => call.url.pathname.includes('/deployments/1/'))).toHaveLength(0)
+    })
+
+    it('reports an API error while looking behind the gate as unknown / api-error, not as no settled result', async () => {
+      const route = stack(['waiting', '2026-11-17T01:07:00Z'], ['failure', '2026-11-16T20:00:00Z'])
+      const {fetchFn} = fakeGitHubByApp({vpn: route})
+      const failingBehind: typeof fetchFn = async (input, init) =>
+        input.includes('/deployments/1/statuses')
+          ? new Response('{"message":"x"}', {status: 502})
+          : fetchFn(input, init)
+
+      const observations = await readDeployStates({token: TOKEN, fetch: failingBehind, now: NOW, apps: ['vpn']})
+
+      expect(observations.vpn).toMatchObject({result: 'unknown', detail: {reason: 'api-error'}})
+    })
+
+    it('fails closed when a deployment behind the gate is not from main', async () => {
+      const route = stack(['waiting', '2026-11-17T01:07:00Z'], ['failure', '2026-11-16T20:00:00Z'])
+      const older = route.deployments[1]
+      if (older === undefined) throw new Error('fixture')
+      older.ref = 'feat/x'
+      const {fetchFn} = fakeGitHubByApp({
+        vpn: {deployments: route.deployments, statusesByDeployment: route.statusesByDeployment},
+      })
+      // The fake honours the ref filter, so serve the unfiltered list the way a misbehaving API could.
+      const unfiltered: typeof fetchFn = async (input, init) => {
+        if (new URL(input).pathname === '/repos/marcusrbrown/infra/deployments') {
+          await fetchFn(input, init)
+          return Response.json(route.deployments)
+        }
+        return fetchFn(input, init)
+      }
+
+      const observations = await readDeployStates({token: TOKEN, fetch: unfiltered, now: NOW, apps: ['vpn']})
+
+      expect(observations.vpn).toMatchObject({result: 'unknown', detail: {reason: 'api-error'}})
+    })
+
+    it('leaves other apps alone', async () => {
+      const {observations} = await readOne(
+        'vpn',
+        stack(['waiting', '2026-11-17T01:07:00Z'], ['failure', '2026-11-16T20:00:00Z']),
+      )
+
+      expect(observations.broker.result).toBe('pass')
+      expect(observations.broker.detail?.reason).toBeUndefined()
+    })
+  })
+
   describe('running', () => {
     it.each(['queued', 'in_progress', 'pending'])('reads %s as unknown / running', async state => {
       const {observation} = await readOne('dashboard', sequenceOf(state))
@@ -308,8 +492,8 @@ describe('readDeployStates', () => {
       const {observation, calls} = await readOne('cliproxy', fixture('cliproxy-inactive-superseded'))
 
       expect(observation).toMatchObject({result: 'unknown', detail: {reason: 'inactive'}})
-      // The rule needs no history read: still 2 calls per app, 14 in total.
-      expect(calls).toHaveLength(DEPLOY_STATE_CALL_BUDGET)
+      // The rule needs no history read: still 2 calls per app.
+      expect(calls).toHaveLength(APP_IDS.length * DEPLOY_STATE_CALLS_PER_APP)
     })
 
     it('reads a deployment whose only status is inactive the same way', async () => {

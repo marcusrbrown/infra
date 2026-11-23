@@ -56,6 +56,13 @@ export const sampleDetailSchema = z.strictObject({
 })
 export type SampleDetail = z.infer<typeof sampleDetailSchema>
 
+/**
+ * `reason` of a `deploy-state` sample whose result is the newest *settled* deployment, because a newer deployment is
+ * waiting at its approval gate. The sample's result and `since` belong to the settled deployment. The CLI writes it
+ * and the site reads it: no new detail key, so no schema change.
+ */
+export const DEPLOY_NEWER_AT_GATE_REASON = 'newer_at_gate'
+
 export const resultCodeSchema = z.enum(['p', 'f', 'u', 'n'])
 export type ResultCode = z.infer<typeof resultCodeSchema>
 

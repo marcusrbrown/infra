@@ -56,7 +56,8 @@ export const SERVICES: Record<AppId, ServiceInfo> = {
   },
   vpn: {
     title: 'WireGuard VPN',
-    summary: 'WireGuard egress box on an AWS Lightsail static IP. No external probe: deploy state only.',
+    summary:
+      'WireGuard egress box on an AWS Lightsail static IP. Probed with a TCP connect to its SSH port; the WireGuard tunnel itself is not measured.',
     runbooks: ['vpn-egress-box'],
     dashboard: false,
   },

@@ -5032,16 +5032,32 @@ describe('status-snapshot.yaml: contract', () => {
     }
   })
 
-  it('references no secret other than github.token', async () => {
+  it('references no secret other than github.token and the VPN probe address', async () => {
     const {text} = await load()
 
-    expect(text).not.toMatch(/secrets\./)
     expect(text).not.toContain('secrets: inherit')
+    // Exactly one secret reference: the repository-level VPN_PROBE_HOST, never the `vpn` Environment's VPN_HOST.
+    expect([...text.matchAll(/secrets\.[A-Z_]+/g)].map(match => match[0])).toEqual(['secrets.VPN_PROBE_HOST'])
+    expect(text).not.toMatch(/\bVPN_HOST\b/)
     const expressions = [...text.matchAll(/\$\{\{([^}]*)\}\}/g)].map(match => (match[1] ?? '').trim())
     const credentials = expressions.filter(expression => /token|secret|key|password/i.test(expression))
     expect(credentials.length).toBeGreaterThan(0)
     for (const expression of credentials) {
-      expect(expression).toBe('github.token')
+      expect(['github.token', 'secrets.VPN_PROBE_HOST']).toContain(expression)
+    }
+  })
+
+  it('hands VPN_PROBE_HOST to the Take snapshot step alone, never at workflow or job level', async () => {
+    const {parsed, steps} = await load()
+
+    // The probe address is sensitive: only the step that runs the probe may read it.
+    expect(parsed).not.toHaveProperty('env')
+    expect(parsed.jobs?.snapshot).not.toHaveProperty('env')
+    expect(step(steps, 'Take snapshot').env?.VPN_PROBE_HOST).toBe('$' + '{{ secrets.VPN_PROBE_HOST }}')
+    for (const other of steps.filter(candidate => candidate.name !== 'Take snapshot')) {
+      expect(JSON.stringify(other), `step '${other.name}' must not see the probe address`).not.toMatch(
+        /VPN_PROBE_HOST|secrets\./,
+      )
     }
   })
 

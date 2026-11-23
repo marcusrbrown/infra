@@ -8,6 +8,7 @@ import {readDeployStates} from '../status/deploy-state'
 import {readMonitorState} from '../status/monitor-state'
 import {STATUS_SCHEMA_VERSION, statusEnvelopeSchema} from '../status/observation'
 import {probeVpn} from '../status/public-probes'
+import * as tcpProbe from '../status/tcp-probe'
 import {
   deployObservation,
   EXPECTED_OBSERVATION_IDS,
@@ -1253,10 +1254,11 @@ describe('top-level status with the real default dependencies (production wiring
     )
   }
 
-  it('builds a valid envelope from mocked fetch and ssh output', async () => {
+  it('builds a valid envelope from mocked fetch, ssh, and TCP', async () => {
     globalThis.fetch = fakeFetch()
     spawnSpy = spyOn(Bun, 'spawn').mockImplementation(((cmd: string[]) =>
       proc(remoteStdout(cmd))) as unknown as typeof Bun.spawn)
+    const connectSpy = spyOn(tcpProbe, 'netConnect').mockResolvedValue(undefined)
     const {ctx, captured} = createCapturedCtx()
     const savedKey = process.env.CLIPROXY_MANAGEMENT_KEY
 
@@ -1266,6 +1268,7 @@ describe('top-level status with the real default dependencies (production wiring
         await unifiedStatusAction({json: true}, ctx)
       })
     } finally {
+      connectSpy.mockRestore()
       if (savedKey === undefined) delete process.env.CLIPROXY_MANAGEMENT_KEY
       else process.env.CLIPROXY_MANAGEMENT_KEY = savedKey
     }
@@ -1288,6 +1291,7 @@ describe('top-level status with the real default dependencies (production wiring
       detail: {statusCode: 200},
     })
     expect(observation(envelope, 'umami', 'public-reachability').result).toBe('pass')
+    expect(observation(envelope, 'vpn', 'public-reachability')).toMatchObject({result: 'pass', source: 'tcp'})
     expect(observation(envelope, 'vpn', 'wireguard-interface').result).toBe('pass')
     // No token in the test env, so the real GitHub readers make no request.
     expect(observation(envelope, 'gateway', 'deploy-state')).toMatchObject({

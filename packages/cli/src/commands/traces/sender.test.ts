@@ -1177,6 +1177,10 @@ describe('traces sender add', () => {
       ['a repository that is not OWNER/REPO', 'marcusrbrown', {repo: ['marcusrbrown']}],
       ['a repository starting with a hyphen', 'marcusrbrown', {repo: ['-oops/repo']}],
       ['a repository that has an extra segment', 'marcusrbrown', {repo: ['a/b/c']}],
+      ['a repository named .', 'marcusrbrown', {repo: ['marcusrbrown/.']}],
+      ['a repository named ..', 'marcusrbrown', {repo: ['marcusrbrown/..']}],
+      ['a selected repository named ..', 'fro-bot', {org: 'fro-bot', orgRepo: ['..']}],
+      ['a selected repository starting with a hyphen', 'fro-bot', {org: 'fro-bot', orgRepo: ['-x']}],
       ['an organisation with no selected repositories', 'fro-bot', {org: 'fro-bot'}],
       ['selected repositories with no organisation', 'fro-bot', {orgRepo: ['agent']}],
       ['an organisation name starting with a hyphen', 'fro-bot', {org: '-x', orgRepo: ['agent']}],
@@ -1229,6 +1233,30 @@ describe('traces sender add', () => {
         ],
       ])
       for (const call of world.ghCalls()) expect(call.stdin).toBe(NEXT_TOKEN)
+    })
+
+    it('accepts a repository name that starts with a dot, such as .github', async () => {
+      const world = createWorld()
+      const options: AddOptions = {repo: ['fro-bot/.github'], org: 'fro-bot', orgRepo: ['.github']}
+      const result = await run(world, ctx => tracesSenderAddAction('fro-bot', options, ctx, makeDeps(world)), {
+        secrets: [NEXT_TOKEN],
+      })
+      expect(result.exit).toBeNull()
+      expect(world.ghCalls().map(call => call.argv)).toEqual([
+        ['gh', 'secret', 'set', 'TRACES_INGEST_TOKEN', '--repo', 'fro-bot/.github'],
+        [
+          'gh',
+          'secret',
+          'set',
+          'TRACES_INGEST_TOKEN',
+          '--org',
+          'fro-bot',
+          '--visibility',
+          'selected',
+          '--repos',
+          '.github',
+        ],
+      ])
     })
 
     it('when gh fails after the host accepted the token: says so, names the fingerprint, exits non-zero, prints no token even on a terminal', async () => {

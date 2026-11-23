@@ -20,6 +20,7 @@ import {
   evaluateAge,
   evaluateCollectorMetrics,
   evaluateDisk,
+  evaluateIngestCounts,
   evaluateLangfuseRaw,
   evaluateLangfuseRow,
   evaluateQueues,
@@ -113,6 +114,19 @@ function collectorPage(extra = '', queues: Record<string, [number, number]> = {}
     )
   }
   return `${lines.join('\n')}\n${extra}\n`
+}
+
+/**
+ * One `http_server_request_duration_count` series on an authenticated receiver, as collector v0.165.0 exports it:
+ * no `http_route` and no `server_port`. A second address stands for another label combination.
+ */
+function authRequests(status: string, count: number | string, address = '10.0.0.4'): string {
+  return `http_server_request_duration_count{http_request_method="POST",http_response_status_code="${status}",network_protocol_name="http",network_protocol_version="1.1",server_address="${address}",url_scheme="http"} ${count}`
+}
+
+/** The same family on the canary receiver, whose series carries the route and the port. */
+function canaryRequests(status: string, count: number): string {
+  return `http_server_request_duration_count{http_request_method="POST",http_response_status_code="${status}",http_route="/canary/v1/traces",network_protocol_name="http",network_protocol_version="1.1",server_address="10.0.0.4",server_port="4414",url_scheme="http"} ${count}`
 }
 
 function tempoPage(extra = ''): string {
@@ -459,14 +473,77 @@ describe('evaluateCollectorMetrics', () => {
     }
   })
 
-  it('names the group whose spans were refused', () => {
-    const page = (n: number) =>
-      collectorPage(`otelcol_receiver_refused_spans{receiver="otlp/workstation",transport="http"} ${n}`)
+  const refusedOf = (out: {results: CheckResult[]}) => out.results.find(entry => entry.id === 'collector-refused')
+
+  it('does not fail on a 429: the byte limiter answering 429 is the limiter working', () => {
+    const page = (refused: number, tooMany: number) =>
+      collectorPage(
+        [
+          `otelcol_receiver_refused_spans{receiver="otlp/workstation",transport="http"} ${refused}`,
+          authRequests('200', 40),
+          authRequests('429', tooMany),
+        ].join('\n'),
+      )
+    const first = evaluateCollectorMetrics(page(0, 0), emptyCounterState(), NOW)
+    const second = evaluateCollectorMetrics(page(5000, 7), first.state, NOW + 1000)
+    expect(refusedOf(second)?.status).toBe('pass')
+    expect(refusedOf(second)?.detail).not.toContain('workstation')
+  })
+
+  it('fails on a 503 on the authenticated receivers', () => {
+    const first = evaluateCollectorMetrics(collectorPage(authRequests('503', 0)), emptyCounterState(), NOW)
+    const second = evaluateCollectorMetrics(collectorPage(authRequests('503', 2)), first.state, NOW + 1000)
+    expect(refusedOf(second)?.status).toBe('fail')
+    expect(refusedOf(second)?.detail).toContain('503')
+  })
+
+  it('latches a 503 for the window after the counter stops rising, then clears', () => {
+    const page = collectorPage(authRequests('503', 3))
+    const first = evaluateCollectorMetrics(collectorPage(authRequests('503', 0)), emptyCounterState(), NOW)
+    const risen = evaluateCollectorMetrics(page, first.state, NOW + 1000)
+    const latched = evaluateCollectorMetrics(page, risen.state, NOW + 1000 + THRESHOLDS.lossLatchMs - 1)
+    expect(refusedOf(latched)?.status).toBe('fail')
+    const cleared = evaluateCollectorMetrics(page, latched.state, NOW + 2000 + THRESHOLDS.lossLatchMs)
+    expect(refusedOf(cleared)?.status).toBe('pass')
+  })
+
+  it('ignores a 503 on the canary route', () => {
+    const page = (n: number) => collectorPage([authRequests('200', 5), canaryRequests('503', n)].join('\n'))
     const first = evaluateCollectorMetrics(page(0), emptyCounterState(), NOW)
-    const second = evaluateCollectorMetrics(page(5), first.state, NOW + 1000)
-    const refused = second.results.find(entry => entry.id === 'collector-refused')
-    expect(refused?.status).toBe('fail')
-    expect(refused?.detail).toContain('workstation')
+    const second = evaluateCollectorMetrics(page(9), first.state, NOW + 1000)
+    expect(refusedOf(second)?.status).toBe('pass')
+  })
+
+  it('sums every label combination of the 503 count', () => {
+    const page = (a: number, b: number) =>
+      collectorPage([authRequests('503', a, '10.0.0.4'), authRequests('503', b, '10.0.0.5')].join('\n'))
+    const first = evaluateCollectorMetrics(page(1, 1), emptyCounterState(), NOW)
+    const second = evaluateCollectorMetrics(page(1, 2), first.state, NOW + 1000)
+    expect(refusedOf(second)?.status).toBe('fail')
+  })
+
+  it('does not count a 503 total that was already above zero on the first reading', () => {
+    const out = evaluateCollectorMetrics(collectorPage(authRequests('503', 40)), emptyCounterState(), NOW)
+    expect(refusedOf(out)?.status).toBe('pass')
+  })
+
+  it('reads an absent 503 series as zero while other statuses show the request metric is exported', () => {
+    const out = evaluateCollectorMetrics(collectorPage(authRequests('200', 13)), emptyCounterState(), NOW)
+    expect(refusedOf(out)?.status).toBe('pass')
+  })
+
+  it('is unknown when spans were served but the request metric is not exported at all', () => {
+    const served = 'otelcol_receiver_accepted_spans{receiver="otlp/fro-bot",transport="http"} 12'
+    const out = evaluateCollectorMetrics(collectorPage(served), emptyCounterState(), NOW)
+    expect(refusedOf(out)?.status).toBe('unknown')
+    expect(refusedOf(out)?.detail).toContain('http_server_request_duration_count')
+    // The other collector checks are unaffected.
+    expect(out.results.find(entry => entry.id === 'collector-failures')?.status).toBe('pass')
+  })
+
+  it('treats a collector that has served nothing as having no 503s', () => {
+    const idle = 'otelcol_receiver_accepted_spans{receiver="otlp/fro-bot",transport="http"} 0'
+    expect(refusedOf(evaluateCollectorMetrics(collectorPage(idle), emptyCounterState(), NOW))?.status).toBe('pass')
   })
 
   it('keeps failing for the latch window after the counter stops rising, then clears', () => {
@@ -486,11 +563,77 @@ describe('evaluateCollectorMetrics', () => {
   it('is unknown for a counter that is not a number', () => {
     const out = evaluateCollectorMetrics(growth(-1), emptyCounterState(), NOW)
     expect(out.results.find(entry => entry.id === 'collector-failures')?.status).toBe('unknown')
-    const nan = collectorPage('otelcol_receiver_refused_spans{receiver="otlp/fro-bot"} abc')
-    expect(
-      evaluateCollectorMetrics(nan, emptyCounterState(), NOW).results.find(entry => entry.id === 'collector-refused')
-        ?.status,
-    ).toBe('unknown')
+    for (const bad of ['abc', '-1']) {
+      const page = collectorPage(authRequests('503', bad))
+      expect(refusedOf(evaluateCollectorMetrics(page, emptyCounterState(), NOW))?.status).toBe('unknown')
+    }
+  })
+})
+
+// ─── Ingest counts ──────────────────────────────────────────────────────────────
+
+/** The receiver counters of one group, in the shape collector v0.165.0 exports them. */
+function receiverCounters(group: string, accepted: number, refused: number): string {
+  return [
+    `otelcol_receiver_accepted_spans{receiver="otlp/${group}",transport="http"} ${accepted}`,
+    `otelcol_receiver_refused_spans{receiver="otlp/${group}",transport="http"} ${refused}`,
+  ].join('\n')
+}
+
+describe('evaluateIngestCounts', () => {
+  const page = [
+    receiverCounters('marcusrbrown', 10, 1),
+    receiverCounters('fro-bot', 200, 3),
+    receiverCounters('workstation', 0, 0),
+    receiverCounters('canary', 50, 0),
+    authRequests('401', 31),
+    authRequests('401', 4, '10.0.0.5'),
+    authRequests('200', 13),
+    authRequests('200', 2, '10.0.0.5'),
+    authRequests('415', 1),
+    authRequests('429', 6),
+    authRequests('503', 2),
+    canaryRequests('200', 72),
+    canaryRequests('503', 9),
+  ].join('\n')
+  const counts = () => evaluateIngestCounts(parsePrometheus(collectorPage(page)))
+
+  it('reads accepted and refused spans for each group, and leaves the canary receiver out', () => {
+    expect(counts()?.groups).toEqual({
+      marcusrbrown: {acceptedSpans: 10, refusedSpans: 1},
+      'fro-bot': {acceptedSpans: 200, refusedSpans: 3},
+      workstation: {acceptedSpans: 0, refusedSpans: 0},
+    })
+  })
+
+  it('sums the request counts per status across label combinations and leaves the canary route out', () => {
+    expect(counts()?.requests).toEqual({'200': 15, '401': 35, '415': 1, '429': 6, '503': 2})
+  })
+
+  it('carries a fixed note: counters since collector start, and the monitor probe inside the 401 total', () => {
+    const note = counts()?.note ?? ''
+    expect(note).toContain('since collector start')
+    expect(note).toContain('not rates')
+    expect(note).toContain('401')
+    expect(note).toContain('every 15 minutes')
+    expect(note).toContain('429')
+    expect(note).toContain('503')
+  })
+
+  it('reads a group with no series as zero, and no request series as an empty map', () => {
+    const out = evaluateIngestCounts(parsePrometheus(collectorPage(receiverCounters('fro-bot', 5, 0))))
+    expect(out?.groups.workstation).toEqual({acceptedSpans: 0, refusedSpans: 0})
+    expect(out?.requests).toEqual({})
+  })
+
+  it('is absent when a count is not a number, so garbage is never shown as a count', () => {
+    const bad = collectorPage([receiverCounters('fro-bot', 5, 0), authRequests('200', 'abc')].join('\n'))
+    expect(evaluateIngestCounts(parsePrometheus(bad))).toBeNull()
+  })
+
+  it('comes with the evaluation, and is null when the page is not the collector', () => {
+    expect(evaluateCollectorMetrics(collectorPage(page), emptyCounterState(), NOW).ingest?.requests['401']).toBe(35)
+    expect(evaluateCollectorMetrics('<html></html>', emptyCounterState(), NOW).ingest).toBeNull()
   })
 })
 
@@ -1401,6 +1544,17 @@ describe('a run has an overall deadline', () => {
 
 // ─── Counters across runs ─────────────────────────────────────────────────────
 
+/** A reporter whose collector metrics page is whatever `current()` returns. */
+function withMetrics(current: () => string) {
+  const world = harness()
+  const deps: ReporterDeps = {
+    ...world.deps,
+    fetch: async (url, init) =>
+      url === ENDPOINTS.collectorMetrics ? new Response(current(), {status: 200}) : world.deps.fetch(url, init),
+  }
+  return {world, reporter: createReporter(deps)}
+}
+
 describe('counters across runs', () => {
   it('a counter that rose between two runs fails the second verdict', async () => {
     let metrics = collectorPage('otelcol_exporter_enqueue_failed_spans{exporter="otlp_http/langfuse-fro-bot"} 0')
@@ -1419,6 +1573,40 @@ describe('counters across runs', () => {
     await reporter.runOnce()
     expect(check(reporter.detail(), 'collector-failures')).toMatchObject({status: 'fail'})
     expect(reporter.health().status).toBe(503)
+  })
+
+  it('a 429 increase between two runs leaves the verdict passing', async () => {
+    let tooMany = 0
+    const {world, reporter} = withMetrics(() =>
+      collectorPage(
+        [receiverCounters('workstation', 10, tooMany * 100), authRequests('200', 5), authRequests('429', tooMany)].join(
+          '\n',
+        ),
+      ),
+    )
+    await reporter.runOnce()
+    tooMany = 25
+    world.state.now += THRESHOLDS.intervalMs
+    await reporter.runOnce()
+    expect(check(reporter.detail(), 'collector-refused')).toMatchObject({status: 'pass'})
+    expect(reporter.health().status).toBe(200)
+  })
+
+  it('a 503 increase between two runs fails the verdict, and /healthz stays free of counts', async () => {
+    let unavailable = 0
+    const {world, reporter} = withMetrics(() =>
+      collectorPage([receiverCounters('workstation', 10, unavailable), authRequests('503', unavailable)].join('\n')),
+    )
+    await reporter.runOnce()
+    unavailable = 4
+    world.state.now += THRESHOLDS.intervalMs
+    await reporter.runOnce()
+    expect(check(reporter.detail(), 'collector-refused')).toMatchObject({status: 'fail'})
+    const answer = reporter.health()
+    expect(answer.status).toBe(503)
+    expect(Object.keys(record(JSON.parse(answer.body), 'body')).sort()).toEqual(['at', 'ok'])
+    expect(answer.body).not.toContain('ingest')
+    expect(answer.body).not.toContain('Spans')
   })
 
   it('a Tempo discard between two runs fails the second verdict', async () => {
@@ -1500,6 +1688,79 @@ describe('/healthz', () => {
     const reporter = createReporter(world.deps)
     await Promise.all([reporter.runOnce(), reporter.runOnce(), reporter.runOnce()])
     expect(world.requests.filter(entry => entry.url === ENDPOINTS.canaryReceiver)).toHaveLength(1)
+  })
+})
+
+describe('the ingest block in the detail', () => {
+  const metrics = collectorPage(
+    [
+      receiverCounters('marcusrbrown', 10, 1),
+      receiverCounters('fro-bot', 200, 3),
+      receiverCounters('workstation', 0, 0),
+      authRequests('401', 31),
+      authRequests('200', 13),
+      canaryRequests('200', 72),
+    ].join('\n'),
+  )
+
+  it('carries the counts, and sits beside the checks only in the loopback detail', async () => {
+    const out = await runOnce({collectorMetrics: metrics})
+    const ingest = record(record(JSON.parse(out.detail), 'detail').ingest, 'ingest')
+    expect(ingest.groups).toEqual({
+      marcusrbrown: {acceptedSpans: 10, refusedSpans: 1},
+      'fro-bot': {acceptedSpans: 200, refusedSpans: 3},
+      workstation: {acceptedSpans: 0, refusedSpans: 0},
+    })
+    expect(ingest.requests).toEqual({'200': 13, '401': 31})
+    expect(typeof ingest.note).toBe('string')
+    const response = handleDetail(out.reporter, new Request('http://localhost:8081/detail'))
+    expect(record(record(JSON.parse(await response.text()), 'detail').ingest, 'ingest').requests).toEqual({
+      '200': 13,
+      '401': 31,
+    })
+  })
+
+  it('never reaches the public answer', async () => {
+    const out = await runOnce({collectorMetrics: metrics})
+    const publicAnswer = out.reporter.health().body
+    expect(Object.keys(record(JSON.parse(publicAnswer), 'body')).sort()).toEqual(['at', 'ok'])
+    for (const word of ['ingest', 'acceptedSpans', 'refusedSpans', 'requests', '401', 'marcusrbrown']) {
+      expect(publicAnswer).not.toContain(word)
+    }
+    const response = handlePublic(out.reporter, new Request('http://traces/healthz'))
+    expect(await response.text()).toBe(publicAnswer)
+  })
+
+  it('is null before the first run', () => {
+    const reporter = createReporter(harness().deps)
+    expect(record(JSON.parse(reporter.detail()), 'detail').ingest).toBeNull()
+  })
+
+  it('is null when the metrics scrape fails, and the verdict is what it was without the block', async () => {
+    for (const collectorMetrics of ['throw', 500, '<html>nope</html>'] as const) {
+      const out = await runOnce({collectorMetrics})
+      expect(record(JSON.parse(out.detail), 'detail').ingest).toBeNull()
+      expect(check(out.detail, 'collector-refused').status).toBe('unknown')
+      expect(out.reporter.health().status).toBe(503)
+    }
+  })
+
+  it('does not keep the last counts when a later scrape fails', async () => {
+    let page: string | undefined = metrics
+    const world = harness()
+    const reporter = createReporter({
+      ...world.deps,
+      fetch: async (url, init) =>
+        url === ENDPOINTS.collectorMetrics
+          ? new Response(page ?? 'down', {status: page === undefined ? 500 : 200})
+          : world.deps.fetch(url, init),
+    })
+    await reporter.runOnce()
+    expect(record(JSON.parse(reporter.detail()), 'detail').ingest).not.toBeNull()
+    page = undefined
+    world.state.now += THRESHOLDS.intervalMs
+    await reporter.runOnce()
+    expect(record(JSON.parse(reporter.detail()), 'detail').ingest).toBeNull()
   })
 })
 

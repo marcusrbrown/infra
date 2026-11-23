@@ -95,6 +95,19 @@ export async function getTracesComposeStatus(
 
 // ─── The reporter's detail ────────────────────────────────────────────────────
 
+/**
+ * The counts block of the reporter's detail: totals since the collector started. It is optional because an older
+ * reporter does not send it, and a block that does not match is dropped (`catch`), never allowed to cost the
+ * verdict next to it.
+ */
+const ingestSchema = z.object({
+  groups: z.record(z.string(), z.object({acceptedSpans: z.number(), refusedSpans: z.number()})),
+  requests: z.record(z.string(), z.number()),
+  note: z.string(),
+})
+
+export type IngestCounts = z.infer<typeof ingestSchema>
+
 const detailSchema = z.object({
   schemaVersion: z.literal(1),
   generatedAt: z.string(),
@@ -110,6 +123,7 @@ const detailSchema = z.object({
       detail: z.string(),
     }),
   ),
+  ingest: ingestSchema.nullish().catch(null),
 })
 
 export type ReporterDetail = z.infer<typeof detailSchema>
@@ -161,6 +175,18 @@ export function failingLines(detail: ReporterDetail): string[] {
   if (!detail.ran) lines.push('the reporter has not finished a run yet')
   else if (detail.stale) lines.push('the last run is older than two intervals')
   return lines
+}
+
+/** The counts block as two lines: spans per group, then requests per status code. */
+export function ingestLines(ingest: IngestCounts): string[] {
+  const groups = Object.entries(ingest.groups).map(
+    ([group, counts]) => `${group} ${counts.acceptedSpans} accepted / ${counts.refusedSpans} refused spans`,
+  )
+  const requests = Object.entries(ingest.requests).map(([status, count]) => `${status}=${count}`)
+  return [
+    `Ingest (since collector start): ${groups.join('; ')}`,
+    `Ingest requests: ${requests.length > 0 ? requests.join(' ') : 'none'} (401 includes the monitor probe; refused spans are 429 or 503)`,
+  ]
 }
 
 // ─── Unified status aggregator export ────────────────────────────────────────
@@ -261,6 +287,9 @@ export async function tracesStatusAction(
     ctx.console.log('───────────────────────────────────────────────────────────')
     for (const entry of detail.detail.checks) {
       ctx.console.log(`${entry.id.padEnd(22)} ${entry.status.padEnd(8)} ${entry.detail}`)
+    }
+    if (detail.detail.ingest != null) {
+      for (const line of ingestLines(detail.detail.ingest)) ctx.console.log(line)
     }
     if (!passing) {
       for (const line of failingLines(detail.detail)) ctx.console.error(`not passing: ${line}`)

@@ -3,7 +3,14 @@ import {dirname} from 'node:path'
 import {afterEach, beforeEach, describe, expect, it} from 'bun:test'
 
 import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
-import {controlPaths, detailBody, detailOutput, recordingSpawn, RUNNING_SERVICES} from './__fixtures__/remote-fixture'
+import {
+  controlPaths,
+  detailBody,
+  detailOutput,
+  INGEST_FIXTURE,
+  recordingSpawn,
+  RUNNING_SERVICES,
+} from './__fixtures__/remote-fixture'
 import {REMOTE_COMMANDS, type SpawnFn} from './remote'
 import {
   failingLines,
@@ -94,6 +101,29 @@ describe('parseDetailOutput', () => {
       ok: false,
       reason: 'unreadable',
     })
+  })
+})
+
+describe('parseDetailOutput: the ingest block', () => {
+  const parse = (body: string) => parseDetailOutput({exitCode: 0, stdout: detailOutput(body), stderr: ''})
+
+  it('keeps the counts the reporter sent', () => {
+    const parsed = parse(detailBody({ingest: INGEST_FIXTURE}))
+    expect(parsed.ok && parsed.detail.ingest).toEqual(INGEST_FIXTURE)
+  })
+
+  it('reads a reporter without the block, or with a null one, as having no counts', () => {
+    for (const body of [detailBody(), detailBody({ingest: null})]) {
+      const parsed = parse(body)
+      expect(parsed.ok).toBe(true)
+      expect(parsed.ok && (parsed.detail.ingest ?? null)).toBeNull()
+    }
+  })
+
+  it('drops a malformed block instead of losing the verdict', () => {
+    const parsed = parse(detailBody({ingest: {groups: 'nope', requests: [1]}}))
+    expect(parsed.ok).toBe(true)
+    expect(parsed.ok && (parsed.detail.ingest ?? null)).toBeNull()
   })
 })
 
@@ -275,6 +305,41 @@ describe('tracesStatusAction', () => {
     const {spawn} = route({psExit: 255, detailExit: 255})
     await expect(tracesStatusAction({}, ctx, spawn)).rejects.toBeInstanceOf(MockProcessExit)
     expect(captured.stderr.join('\n')).toContain('Error:')
+  })
+
+  it('prints the ingest counts in two lines, with the monitor-probe caveat', async () => {
+    const detail = detailOutput(detailBody({ingest: INGEST_FIXTURE}))
+    const {ctx, captured} = createCapturedCtx()
+    await tracesStatusAction({}, ctx, route({detail}).spawn)
+    const lines = captured.stdout.filter(line => line.startsWith('Ingest'))
+    expect(lines).toEqual([
+      'Ingest (since collector start): marcusrbrown 10 accepted / 1 refused spans; fro-bot 200 accepted / 3 refused spans; workstation 0 accepted / 0 refused spans',
+      'Ingest requests: 200=13 401=31 429=6 (401 includes the monitor probe; refused spans are 429 or 503)',
+    ])
+  })
+
+  it('says there were no requests when the map is empty', async () => {
+    const detail = detailOutput(detailBody({ingest: {...INGEST_FIXTURE, requests: {}}}))
+    const {ctx, captured} = createCapturedCtx()
+    await tracesStatusAction({}, ctx, route({detail}).spawn)
+    expect(captured.stdout.join('\n')).toContain('Ingest requests: none')
+  })
+
+  it('prints no ingest line when the reporter sent none', async () => {
+    for (const body of [detailBody(), detailBody({ingest: null})]) {
+      const {ctx, captured} = createCapturedCtx()
+      await tracesStatusAction({}, ctx, route({detail: detailOutput(body)}).spawn)
+      expect(captured.stdout.join('\n')).not.toContain('Ingest')
+      expect(captured.stdout.join('\n')).toContain('Status: OK')
+    }
+  })
+
+  it('carries the counts in --json under health.ingest', async () => {
+    const detail = detailOutput(detailBody({ingest: INGEST_FIXTURE}))
+    const {ctx, captured} = createCapturedCtx()
+    await tracesStatusAction({json: true}, ctx, route({detail}).spawn)
+    const parsed = JSON.parse(captured.stdout.join('')) as {health: {ingest: unknown}}
+    expect(parsed.health.ingest).toEqual(INGEST_FIXTURE)
   })
 
   it('prints one JSON object with --json', async () => {

@@ -19,6 +19,8 @@ A trace records one agent run. It holds the prompts, the model output, the tool 
 
 A trace can therefore contain anything the agent read or produced during the run. That includes source code, and it includes secrets and other people's text if they appeared in a file, a command's output or an issue the agent read. Nothing removes them before storage.
 
+The Fro Bot Action can also send a second trace for the same run that records the run's own steps rather than the agent's work: setup, installs, cache restore and save, gate decisions, execution, response delivery and cleanup. It holds no prompts or tool content. It does hold the run identity, the Git ref, each step's outcome and duration, cache keys, and error messages. The Action removes secrets it knows about from error messages before sending, but an error message can still quote a path or a command line.
+
 ## Where it is stored
 
 On one self-hosted host, in two stores:

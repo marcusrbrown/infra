@@ -6,7 +6,8 @@ root_cause: incomplete_setup
 resolution_type: environment_setup
 severity: high
 date: 2026-11-22
-tags: [traces, digitalocean, docker-compose, ssh, ufw, clickhouse, langfuse, tempo]
+last_updated: 2026-11-23
+tags: [traces, digitalocean, docker-compose, ssh, clickhouse, langfuse, tempo, grafana]
 module: apps/traces
 applies_when:
   - "A new droplet app is about to merge its first PR, or is about to run its first deploy"
@@ -18,6 +19,9 @@ related_issues:
   - https://github.com/marcusrbrown/infra/pull/2015
   - https://github.com/marcusrbrown/infra/pull/2016
   - https://github.com/marcusrbrown/infra/pull/2019
+  - https://github.com/marcusrbrown/infra/pull/2028
+  - https://github.com/marcusrbrown/infra/pull/2029
+  - https://github.com/marcusrbrown/infra/pull/2032
 related_docs:
   - docs/solutions/workflow-issues/cliproxy-first-deploy-cascade-2026-04-06.md
   - docs/solutions/workflow-issues/gateway-first-deploy-cascade-2026-05-20.md
@@ -55,6 +59,7 @@ Each row: the defect, how it surfaced, and the fix with the pin that keeps it fi
 | Tempo creates its data directories mode 0700, so the health reporter could not list them and the verdict stayed `unknown` | Reporter verdict | The reporter runs as Tempo's user: `TEMPO_USER_ID` at `apps/traces/src/host.ts:109`, followed by `health-reporter.user` at `apps/traces/docker-compose.yaml:330-333` and the reporter secrets' owner |
 | Deploy compared a managed file by content only, so a file with the right content and a wrong owner or mode was left as it was | Found while fixing the reporter's secret ownership | `compareFileScript` at `apps/traces/src/deploy.ts:877-894` reads `uid:gid` and mode with `stat -c` as well; a failed comparison goes through the deploy's failure handler (`FilesNotComparedError` at `apps/traces/src/deploy.ts:1787`) |
 | Tempo keeps `work.json` beside its tenant directories; the reporter listed it as a directory | Reporter | `readTempoBlockMetasFrom` at `apps/traces/src/health-report.ts:1509-1517` enters directories only |
+| Grafana's image runs as uid 472 with gid 0. Deploy made `secrets/grafana` `root:472` mode 0750 (`apps/traces/src/deploy.ts:767`), so the process could not enter it. Grafana logged `Permission denied` for both `__FILE` secrets and started on its defaults: admin password `admin` and the built-in secret key. Its unauthenticated healthcheck (`apps/traces/docker-compose.yaml:321`) and every gate passed | The operator could not sign in with the deployed password, a day after first deploy | `user: '472:472'` (`apps/traces/docker-compose.yaml:285`), pinned through `GRAFANA_USER_ID` at `apps/traces/src/host.ts:118` and `apps/traces/docker-compose.test.ts:413-414`. A deploy check signs in with the password file and must get 200 (`grafanaSignInScript` at `apps/traces/src/deploy.ts:1268`, `evaluateGrafana` at `apps/traces/src/deploy.ts:1501`). It runs after the ingest route is final and fails the run without changing the route (`OperatorSurfaceError` at `apps/traces/src/deploy.ts:1864`). Grafana applies the admin password only when it creates its database. Its database held only provisioned settings, so recovery removed the volume and deployed again; that deletes anything made in the Grafana UI, which the [runbook](../../runbooks/trace-collection.md#grafana-sign-in-check-fails) says to export first. Trace data is not in that volume ([PR #2028](https://github.com/marcusrbrown/infra/pull/2028)) |
 | A build attestation changes the pinned image digest on every build | A deploy of unchanged code | [Provenance section](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md) |
 | The provider's listing lags completed actions | Provisioning, restore, backup | [Listing lag](../integration-issues/digitalocean-listing-lags-completed-actions-poll-read-backs-2026-11-22.md) |
 
@@ -66,17 +71,21 @@ Before merging the first PR of a new droplet app:
 - **Count SSH connections** per provisioning run and per CLI command. Anything that opens more than a few needs one multiplexed connection ([gateway cascade](./gateway-first-deploy-cascade-2026-05-20.md)).
 - **For each new image, read its defaults before mounting over them:** its config directories and the files the entrypoint writes there, its bind address and the env variable that sets it, its runtime user, and the mode of the directories it creates. Prefer single-file mounts.
 - **Make a healthcheck prove the path other containers use,** not only loopback.
+- **Prove each service uses its secrets.** An image that reads a secret file may fall back to built-in defaults when the read fails, and a healthcheck passes either way. Gate on the service accepting the secret: sign in with it, or read back state the service derives from it. File owner and mode do not prove it.
+  - Compare the process's `uid:gid` (`docker compose exec <service> id`) with the secret directory's owner and group. Image users are not always `uid == gid`.
+  - Do not probe with a known-wrong credential where the service counts failed logins per user. Refuse a weak or default value at input instead, so a successful sign-in also proves it is not the default (`GRAFANA_ADMIN_PASSWORD_MIN` at `apps/traces/src/deploy.ts:187`).
+  - A secret applied only when a database is created stays wrong after the read is fixed: Grafana's admin password, the Postgres role password ([umami cascade](./umami-first-deploy-cascade-2026-05-29.md)), and Langfuse's `LANGFUSE_INIT_*` user (`apps/traces/AGENTS.md`). Recover with the service's own reset or rotation, such as umami's `ALTER USER` procedure in `apps/umami/AGENTS.md`. Recreate the volume only when its state is disposable, or with a backup and a tested restore: recreating a database volume deletes the database.
 - **Compare managed files by content, owner and mode.**
 - **Use bounded polling for the volume and snapshot listing read-backs that lagged, and evaluate every other read-back after a provider change individually.** Some single reads are safe because they fail closed ([listing lag](../integration-issues/digitalocean-listing-lags-completed-actions-poll-read-backs-2026-11-22.md)).
 - **Verify pinned host keys out of band** (provider console) and record it in the PR.
 - **Keep a "proven only on the real host" list current.** `apps/traces/AGENTS.md` carries one, with what the first deploy proved and what is still unproven.
 - **Use a local break-glass deploy loop for first-deploy fixes,** then let the PR deploy prove the workflow path. Do not iterate through PR deploys at 30 to 45 minutes a round.
 
-Open test gap, not yet done: only per-app tests assert SSH multiplexing (for example `apps/traces/server/provision.test.ts:847` and `packages/cli/src/commands/traces/remote.test.ts:470`), which is how provisioning and the `traces` CLI missed the rule the traces deploy followed. A cross-app conventions test could fail a multi-call `ssh` or `scp` path that lacks multiplexing. Commands that make a single connection, such as `traces open` and `traces logs`, must stay allowed.
+A conventions test now fails any app deploy, provisioning or CLI file that spawns `ssh` or `scp` without a ControlMaster setting, unless it is on an allowlist with a reason and a cap on spawn sites (`findSshMultiplexingViolations` at `packages/cli/src/conventions.test.ts:1227`; [PR #2029](https://github.com/marcusrbrown/infra/pull/2029)). It is a file-level check, so per-call use stays with the per-app tests. `gateway restore` and broker and cliproxy provisioning then moved onto one shared connection through `withSshControl` (`packages/shared/server/droplet-helpers.ts:107`; [PR #2032](https://github.com/marcusrbrown/infra/pull/2032)). keeweb `setup-deploy-user` stays allowlisted.
 
 ## Related Issues
 
 - [DigitalOcean listing lag](../integration-issues/digitalocean-listing-lags-completed-actions-poll-read-backs-2026-11-22.md) and the [provenance section](../best-practices/off-droplet-docker-image-build-gateway-deploy-2026-06-04.md) — two of the defects, documented on their own.
 - [cliproxy](./cliproxy-first-deploy-cascade-2026-04-06.md), [gateway](./gateway-first-deploy-cascade-2026-05-20.md), [umami](./umami-first-deploy-cascade-2026-05-29.md), [broker](./broker-first-deploy-cascade-2026-06-30.md) and [vpn](./vpn-lightsail-first-provision-cascade-2026-06-10.md) — the earlier cascades; the SSH limit and DNS hits recur here.
-- PRs [#2007](https://github.com/marcusrbrown/infra/pull/2007), [#2012](https://github.com/marcusrbrown/infra/pull/2012), [#2015](https://github.com/marcusrbrown/infra/pull/2015), [#2016](https://github.com/marcusrbrown/infra/pull/2016), [#2019](https://github.com/marcusrbrown/infra/pull/2019).
+- PRs [#2007](https://github.com/marcusrbrown/infra/pull/2007), [#2012](https://github.com/marcusrbrown/infra/pull/2012), [#2015](https://github.com/marcusrbrown/infra/pull/2015), [#2016](https://github.com/marcusrbrown/infra/pull/2016), [#2019](https://github.com/marcusrbrown/infra/pull/2019), [#2028](https://github.com/marcusrbrown/infra/pull/2028), [#2029](https://github.com/marcusrbrown/infra/pull/2029), [#2032](https://github.com/marcusrbrown/infra/pull/2032).
 - `apps/traces/AGENTS.md` (Proven only on the real host) and `docs/runbooks/trace-collection.md`.

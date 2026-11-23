@@ -260,6 +260,14 @@ describe('collector Tempo branch', () => {
     'error.type',
     'exception.type',
     'exception.message',
+    // Fro Bot Action lifecycle: fixed codes and ids only
+    'fro_bot.outcome',
+    'fro_bot.reason',
+    'fro_bot.cache.tier',
+    'fro_bot.invocation.id',
+    'fro_bot.agent.role',
+    'fro_bot.gate',
+    'fro_bot.result',
     // Resource attributes
     'sender.group',
     'service.name',

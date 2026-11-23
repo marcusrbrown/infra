@@ -179,6 +179,15 @@ processors:
       - error.type
       - exception.type
       - exception.message
+      # Fro Bot Action lifecycle: outcome and reason codes, cache tier, invocation id, agent role, gate decisions.
+      # Fixed codes and ids only; free-text lifecycle attributes stay Langfuse-only.
+      - fro_bot.outcome
+      - fro_bot.reason
+      - fro_bot.cache.tier
+      - fro_bot.invocation.id
+      - fro_bot.agent.role
+      - fro_bot.gate
+      - fro_bot.result
       # Resource attributes
       - sender.group
       - service.name

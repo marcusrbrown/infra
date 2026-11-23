@@ -19,14 +19,14 @@ A trace records one agent run. It holds the prompts, the model output, the tool 
 
 A trace can therefore contain anything the agent read or produced during the run. That includes source code, and it includes secrets and other people's text if they appeared in a file, a command's output or an issue the agent read. Nothing removes them before storage.
 
-The Fro Bot Action can also send a second trace for the same run that records the run's own steps rather than the agent's work: setup, installs, cache restore and save, gate decisions, execution, response delivery and cleanup. It holds no prompts or tool content. It does hold the run identity, the Git ref, each step's outcome and duration, cache keys, and error messages. The Action removes secrets it knows about from error messages before sending, but an error message can still quote a path or a command line.
+The Fro Bot Action can also send a second trace for the same run that records the run's own steps rather than the agent's work: setup, installs, cache restore and save, gate decisions, execution, response delivery and cleanup. It holds no prompts, model output or tool content. It does hold the repository, the Git ref name, the run ID and attempt, the job, the trigger and the conversation key, each step's outcome, reason and duration, cache keys, and error messages from the Action's own work. The Action removes secrets it knows about from error messages and caps each message at 1,024 characters before sending, but an error message can still quote a path or a command line.
 
 ## Where it is stored
 
 On one self-hosted host, in two stores:
 
 - **Langfuse** holds every trace in full, content included.
-- **Tempo** holds structure only: the operation, provider and model, token counts, finish reasons, tool names and call IDs, the agent and session names, the run identity fields, error types, the sender group, span names, status messages and exception messages. Span names and messages are free text. A tool's error can quote a command line, a path or part of a prompt, so Tempo is not content-free. Attributes on span links are kept as sent, up to Tempo's per-attribute size limit. If a sender puts content in a link attribute, Tempo holds that content.
+- **Tempo** holds structure only: the operation, provider and model, token counts, finish reasons, tool names and call IDs, the agent and session names, the run identity fields, the Fro Bot Action's step outcome and reason codes, cache tier, invocation ID, agent role and gate decisions, error types, the sender group, span names, status messages and exception messages. Span names and messages are free text. A tool's error can quote a command line, a path or part of a prompt, so Tempo is not content-free. Attributes on span links are kept as sent, up to Tempo's per-attribute size limit. If a sender puts content in a link attribute, Tempo holds that content.
 
 The data volume is encrypted at rest by the hosting provider. The provider holds the keys. That protects lost or reused disks. It does not protect against someone who has control of the running host.
 

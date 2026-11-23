@@ -223,13 +223,13 @@ gh secret set VPN_PROBE_HOST --repo marcusrbrown/infra
 
 | Public page | Meaning | What to do |
 | --- | --- | --- |
-| Failing: Reachability, `reason: timeout` or `unreachable` | The box did not answer from the runner (the probe retried once). | Treat it as the [memory-pressure outage](#box-unreachable-memory-pressure): check the Lightsail console, reboot from the console, then `vpn deploy`. |
+| Failing: Reachability, `reason: timeout` or `unreachable` | The box did not answer from GitHub's runners (the probe retried once). That is a reachability problem from the runners, not proof of a host outage. | Confirm before rebooting (see below). If confirmed, treat it as the [memory-pressure outage](#box-unreachable-memory-pressure): reboot from the console, then `vpn deploy`. |
 | Failing: Reachability, `reason: refused` | The box answered but nothing listens on port 22. | The box is up with sshd down or the firewall changed. Check the console and the Lightsail firewall rules (SSH 22 must be open). |
 | Unknown: Reachability, `reason: dns` or `error` | The check could not decide. | Usually a runner-side problem. If it persists for several samples, treat as above. |
 | Unknown: Reachability, `reason: invalid-config` | `VPN_PROBE_HOST` is set but is not a bare hostname or IPv4 address (no port, no scheme). | Set it again. |
 | Not measured, `reason: missing-config` | `VPN_PROBE_HOST` is not set. This is not a failure. | Set the secret. |
 
-A single failed sample can be a runner blip. Two in a row (30 minutes apart) are an outage. Alerting beyond this page and the daily report is not in place.
+Before rebooting, confirm the box is down from another network: run `nc -vz -w 5 <host> 22` from the workstation, run `vpn status`, or check the instance in the Lightsail console. Two failed samples in a row are not independent confirmation, because both come from the same runners and a path problem can fail them both. Alerting beyond this page and the daily report is not in place.
 
 ## Reprovision Recovery
 

@@ -956,6 +956,53 @@ describe('top-level status table (rendered from observations)', () => {
     expect(captured.exit).toBeNull()
   })
 
+  it.each([
+    ['pass', '✅ pass'],
+    ['fail', '❌ fail'],
+  ] as const)(
+    'keeps the gate note on a Deploy cell whose newest settled deployment is a %s, with a newer one waiting',
+    async (result, cell) => {
+      const behindGate = deployObservation(result, {reason: 'newer_at_gate', since: '2026-11-16T20:00:00Z'})
+      const captured = await runTable({
+        readDeployStates: async () => ({
+          ...Object.fromEntries(APPS.map(app => [app, deployObservation()])),
+          vpn: behindGate,
+        }),
+      })
+
+      expect(captured.stdout).toContain(
+        `| vpn | ✅ pass | ✅ pass | ${cell} (newer deployment at approval gate) | ⚪ not measured | — |`,
+      )
+      // Only the affected cell changes: every other row keeps its bare cell.
+      expect(captured.stdout).toContain('| keeweb | ✅ pass | — | ✅ pass | — | — |')
+    },
+  )
+
+  it('does not add the gate note to a deployment that itself waits, or to a plain result', async () => {
+    const captured = await runTable({
+      readDeployStates: async () => ({
+        ...Object.fromEntries(APPS.map(app => [app, deployObservation()])),
+        vpn: deployObservation('unknown', {reason: 'at_gate', since: '2026-11-16T20:00:00Z'}),
+      }),
+    })
+
+    expect(captured.stdout).toContain('| vpn | ✅ pass | ✅ pass | ❓ unknown | ⚪ not measured | — |')
+    expect(captured.stdout.join('\n').match(/newer deployment/g)).toBeNull()
+  })
+
+  it('leaves status --json carrying the marker in the observation detail, unchanged', async () => {
+    const behindGate = deployObservation('fail', {reason: 'newer_at_gate', since: '2026-11-16T20:00:00Z'})
+    const {envelope, captured} = await runJson({
+      readDeployStates: async () => ({
+        ...Object.fromEntries(APPS.map(app => [app, deployObservation()])),
+        vpn: behindGate,
+      }),
+    })
+
+    expect(observation(envelope, 'vpn', 'deploy-state')).toEqual(behindGate)
+    expect(captured.stdout.join('')).not.toContain('approval gate')
+  })
+
   it('shows fail, unknown and not measured cells for a degraded fleet, keeping the other apps', async () => {
     const captured = await runTable({
       publicProbes: {

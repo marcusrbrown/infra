@@ -17,7 +17,7 @@ import type {ProbeOptions} from '../status/public-probes'
 
 import {z} from 'zod'
 import {assembleAppStatus, worstResult} from '../status/declared'
-import {readDeployStates} from '../status/deploy-state'
+import {NEWER_AT_GATE_REASON, readDeployStates} from '../status/deploy-state'
 import {resolveGithubToken} from '../status/github-api'
 import {githubObservationsFor, runGithubReads} from '../status/github-reads'
 import {readMonitorState} from '../status/monitor-state'
@@ -193,10 +193,26 @@ async function collectApp(
   )
 }
 
+/**
+ * A settled deploy result with a newer deployment waiting at its approval gate (`detail.reason`). The wording matches
+ * the public site's cell note, so a pass or fail never hides the parked gate.
+ */
+const GATE_NOTE = ' (newer deployment at approval gate)'
+
+function gateNote(app: AppStatus, kind: ObservationKind): string {
+  const parked = app.observations.some(
+    observation =>
+      observation.kind === kind &&
+      (observation.result === 'pass' || observation.result === 'fail') &&
+      observation.detail?.reason === NEWER_AT_GATE_REASON,
+  )
+  return parked ? GATE_NOTE : ''
+}
+
 function formatRow(app: AppStatus): string {
   const cells = TABLE_COLUMNS.map(({kind}) => {
     const worst = worstResult(app, kind)
-    return worst === undefined ? UNDECLARED_CELL : RESULT_CELLS[worst]
+    return worst === undefined ? UNDECLARED_CELL : `${RESULT_CELLS[worst]}${gateNote(app, kind)}`
   })
 
   return `| ${[app.app, ...cells].join(' | ')} |`

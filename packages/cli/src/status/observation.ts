@@ -17,7 +17,7 @@ export type {AppId, ObservationKind} from '@marcusrbrown/infra-shared/status/his
 export const STATUS_SCHEMA_VERSION = 1 as const
 
 export const OBSERVATION_RESULTS = ['pass', 'fail', 'unknown', 'not_measured'] as const
-export const OBSERVATION_SOURCES = ['http', 'ssh', 'github-api', 'monitor', 'config'] as const
+export const OBSERVATION_SOURCES = ['http', 'tcp', 'ssh', 'github-api', 'monitor', 'config'] as const
 
 export type ObservationResult = (typeof OBSERVATION_RESULTS)[number]
 export type ObservationSource = (typeof OBSERVATION_SOURCES)[number]

@@ -85,6 +85,9 @@ jobs:
       - name: Take snapshot
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # Repository secret (not the `vpn` Environment, whose reviewer would hold every snapshot). Sensitive:
+          # only this step may read it, and the CLI never prints or records it.
+          VPN_PROBE_HOST: ${{ secrets.VPN_PROBE_HOST }}
           BOOTSTRAP: ${{ inputs.bootstrap == true }}
           NO_COLOR: 1
         run: |

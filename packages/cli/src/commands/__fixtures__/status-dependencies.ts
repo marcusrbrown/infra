@@ -104,6 +104,14 @@ export function probeObservation(result: 'pass' | 'fail' | 'unknown' = 'pass'): 
   })
 }
 
+/** A TCP reachability pass for the VPN box; the real probe is exercised in `public-probes.test.ts`. */
+export function vpnProbeObservation(result: 'pass' | 'fail' | 'unknown' = 'pass'): Observation {
+  return observe(declaredObservation('vpn', 'public-reachability'), result, {
+    detail: {durationMs: 12},
+    now: FIXED_NOW,
+  })
+}
+
 /** Deterministic dependencies where every app is healthy. Override pieces per test. */
 export function makeStatusDependencies(overrides: Partial<StatusDependencies> = {}): StatusDependencies {
   const probe = async () => probeObservation()
@@ -115,6 +123,7 @@ export function makeStatusDependencies(overrides: Partial<StatusDependencies> = 
     dashboard: probe,
     broker: probe,
     traces: probe,
+    vpn: async () => vpnProbeObservation(),
   }
 
   return {
@@ -141,6 +150,7 @@ export const STATUS_ENV_KEYS = [
   'UMAMI_DOMAIN',
   'DASHBOARD_DOMAIN',
   'VPN_HOST',
+  'VPN_PROBE_HOST',
   'TRACES_HOST',
   'CLIPROXY_URL',
   'BROKER_DOMAIN',
@@ -155,6 +165,7 @@ export function withStatusEnv<T>(run: () => Promise<T>): Promise<T> {
   process.env.DASHBOARD_DOMAIN = 'dashboard.example.com'
   process.env.VPN_HOST = 'vpn.example.com'
   process.env.TRACES_HOST = 'traces.example.com'
+  delete process.env.VPN_PROBE_HOST
   delete process.env.GITHUB_TOKEN
   delete process.env.GH_TOKEN
   delete process.env.CLIPROXY_URL

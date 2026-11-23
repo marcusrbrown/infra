@@ -1,5 +1,6 @@
-import {afterEach, describe, expect, it} from 'bun:test'
+import type {TcpConnect} from './tcp-probe'
 
+import {afterEach, describe, expect, it} from 'bun:test'
 import {observationSchema} from './observation'
 import {
   httpGet,
@@ -11,7 +12,10 @@ import {
   probeKeeweb,
   probeTraces,
   probeUmami,
+  probeVpn,
   PUBLIC_PROBES,
+  VPN_PROBE_PORT,
+  vpnProbeHost,
   type ProbeOptions,
 } from './public-probes'
 
@@ -84,7 +88,7 @@ const probeCases: ProbeCase[] = [
 ]
 
 describe('PUBLIC_PROBES', () => {
-  it('has one probe for each public app and none for vpn', () => {
+  it('has one probe for each app that can be probed, including the vpn TCP probe', () => {
     expect(Object.keys(PUBLIC_PROBES).toSorted()).toEqual([
       'broker',
       'cliproxy',
@@ -93,6 +97,7 @@ describe('PUBLIC_PROBES', () => {
       'keeweb',
       'traces',
       'umami',
+      'vpn',
     ])
   })
 })
@@ -586,5 +591,160 @@ describe('traces probe', () => {
 
     installFetch(async () => new Response(JSON.stringify({ok: true, at}), {status: 200}))
     expect(JSON.stringify(await probeTraces(baseOptions))).not.toContain(at)
+  })
+})
+
+// ─── VPN: a TCP connect to the SSH port ───────────────────────────────────────
+
+// TEST-NET-3 (RFC 5737): no test, fixture, log line or snapshot holds a real address.
+const VPN_ADDRESS = '203.0.113.7'
+
+function refuseWith(code: string): TcpConnect {
+  return async () => {
+    throw Object.assign(new Error(`connect ${code} ${VPN_ADDRESS}:22`), {code})
+  }
+}
+
+describe('probeVpn', () => {
+  it('probes port 22 of the given host and reports pass, tagged as a TCP measurement', async () => {
+    const targets: {host: string; port: number}[] = []
+    const observation = await probeVpn({
+      ...baseOptions,
+      host: VPN_ADDRESS,
+      connect: async target => {
+        targets.push(target)
+      },
+    })
+
+    expect(VPN_PROBE_PORT).toBe(22)
+    expect(targets).toEqual([{host: VPN_ADDRESS, port: 22}])
+    expect(observation).toMatchObject({
+      id: 'public-reachability',
+      kind: 'reachability',
+      source: 'tcp',
+      result: 'pass',
+      observedAt: '2026-11-01T12:00:00.000Z',
+    })
+    expect(observation.detail?.durationMs).toBeGreaterThanOrEqual(0)
+    expect(observationSchema.safeParse(observation).success).toBe(true)
+  })
+
+  it.each([undefined, '', '  '])('is not measured, never a failure, when the host is %p', async host => {
+    let called = false
+    const observation = await probeVpn({
+      ...baseOptions,
+      ...(host === undefined ? {} : {host}),
+      connect: async () => {
+        called = true
+      },
+    })
+
+    expect(observation).toEqual({
+      id: 'public-reachability',
+      kind: 'reachability',
+      source: 'config',
+      result: 'not_measured',
+      observedAt: null,
+      detail: {reason: 'missing-config'},
+    })
+    expect(called).toBe(false)
+  })
+
+  it.each([
+    ['a port', `${VPN_ADDRESS}:22`],
+    ['a scheme', `ssh://${VPN_ADDRESS}`],
+    ['a flag', '-oProxyCommand=x'],
+  ])('is unknown with the fixed reason invalid-config for %s, and never echoes the value', async (_label, host) => {
+    let called = false
+    const observation = await probeVpn({
+      ...baseOptions,
+      host,
+      connect: async () => {
+        called = true
+      },
+    })
+
+    expect(observation).toMatchObject({result: 'unknown', source: 'tcp', detail: {reason: 'invalid-config'}})
+    expect(JSON.stringify(observation)).not.toContain(VPN_ADDRESS)
+    expect(JSON.stringify(observation)).not.toContain('ProxyCommand')
+    expect(called).toBe(false)
+    expect(observationSchema.safeParse(observation).success).toBe(true)
+  })
+
+  it.each([
+    ['ETIMEDOUT', 'fail', 'timeout'],
+    ['ECONNREFUSED', 'fail', 'refused'],
+    ['EHOSTUNREACH', 'fail', 'unreachable'],
+    ['ENOTFOUND', 'unknown', 'dns'],
+    ['ECONNRESET', 'unknown', 'error'],
+  ])(
+    'maps %s to %s with the fixed reason %s, and never carries the address or the error text',
+    async (code, result, reason) => {
+      const observation = await probeVpn({...baseOptions, host: VPN_ADDRESS, connect: refuseWith(code)})
+
+      expect(observation).toMatchObject({kind: 'reachability', source: 'tcp', result, detail: {reason}})
+      expect(JSON.stringify(observation)).not.toContain(VPN_ADDRESS)
+      expect(JSON.stringify(observation)).not.toContain(code)
+      expect(observationSchema.safeParse(observation).success).toBe(true)
+    },
+  )
+
+  it('reports a connect that hangs as a timeout failure within the timeout', async () => {
+    const observation = await probeVpn({
+      ...baseOptions,
+      host: VPN_ADDRESS,
+      timeoutMs: 20,
+      connect: () => new Promise<void>(() => undefined),
+    })
+
+    expect(observation).toMatchObject({result: 'fail', detail: {reason: 'timeout'}})
+  })
+
+  it('retries once after a timeout, like the HTTP probes retry a network error', async () => {
+    let calls = 0
+    const observation = await probeVpn({
+      ...baseOptions,
+      host: VPN_ADDRESS,
+      connect: async () => {
+        calls += 1
+        if (calls === 1) throw Object.assign(new Error('x'), {code: 'ETIMEDOUT'})
+      },
+    })
+
+    expect(calls).toBe(2)
+    expect(observation.result).toBe('pass')
+  })
+
+  it('does not retry a refusal', async () => {
+    let calls = 0
+    await probeVpn({
+      ...baseOptions,
+      host: VPN_ADDRESS,
+      connect: async () => {
+        calls += 1
+        throw Object.assign(new Error('x'), {code: 'ECONNREFUSED'})
+      },
+    })
+
+    expect(calls).toBe(1)
+  })
+})
+
+describe('vpnProbeHost', () => {
+  it('reads VPN_PROBE_HOST, and with the fallback also VPN_HOST on an operator workstation', () => {
+    expect(vpnProbeHost({VPN_PROBE_HOST: ' 203.0.113.7\n'}, {fallbackToVpnHost: false})).toBe('203.0.113.7')
+    expect(vpnProbeHost({VPN_PROBE_HOST: '203.0.113.7', VPN_HOST: '203.0.113.9'}, {fallbackToVpnHost: true})).toBe(
+      '203.0.113.7',
+    )
+    expect(vpnProbeHost({VPN_HOST: '203.0.113.9'}, {fallbackToVpnHost: true})).toBe('203.0.113.9')
+  })
+
+  it('never reads VPN_HOST without the fallback: the snapshot takes its address from VPN_PROBE_HOST only', () => {
+    expect(vpnProbeHost({VPN_HOST: '203.0.113.9'}, {fallbackToVpnHost: false})).toBeUndefined()
+  })
+
+  it('treats blank values as unset', () => {
+    expect(vpnProbeHost({VPN_PROBE_HOST: '  ', VPN_HOST: ''}, {fallbackToVpnHost: true})).toBeUndefined()
+    expect(vpnProbeHost({}, {fallbackToVpnHost: true})).toBeUndefined()
   })
 })

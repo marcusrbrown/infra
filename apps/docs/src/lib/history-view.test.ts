@@ -189,18 +189,17 @@ describe('container health', () => {
 })
 
 describe('vpn', () => {
-  it('reads reachability and end-to-end as not measured, and shows deploy state', () => {
-    const samples = [
-      sample(0, {'deploy-state': 'u'}, {'deploy-state': {reason: 'at_gate', since: at(-20)}}),
-      sample(30, {'deploy-state': 'u'}, {'deploy-state': {reason: 'at_gate', since: at(-20)}}),
-    ]
+  const gate = {'deploy-state': {reason: 'at_gate', since: at(-20)}}
+
+  it('reads reachability and end-to-end as not measured before the probe has ever run, and shows deploy state', () => {
+    const samples = [sample(0, {'deploy-state': 'u'}, gate), sample(30, {'deploy-state': 'u'}, gate)]
     const view = buildAppView('vpn', samples, new Date(at(30)))
 
     expect(view.cells.reachability.result).toBe('not_measured')
     expect(view.cells['end-to-end'].result).toBe('not_measured')
     expect(view.deploy.state).toBe('at_gate')
-    expect(view.verdict).not.toBe('pass')
-    expect(view.verdictLabel).toContain('not measured')
+    expect(view.verdict).toBe('partial')
+    expect(view.verdictLabel).toBe('Deploy state only; SSH port reachability not measured')
   })
 
   it('treats an explicitly recorded not_measured the same as an absent observation', () => {
@@ -208,6 +207,54 @@ describe('vpn', () => {
 
     expect(view.cells.reachability.result).toBe('not_measured')
     expect(view.deploy.state).toBe('succeeded')
+    expect(view.verdict).toBe('partial')
+    expect(view.verdictLabel).toBe('Deploy state only; SSH port reachability not measured')
+  })
+
+  it('shows a reachable SSH port as partly measured: the tunnel itself is still not measured', () => {
+    const view = buildAppView('vpn', [sample(0, {'public-reachability': 'p', 'deploy-state': 'p'})], new Date(at(0)))
+
+    expect(view.cells.reachability.result).toBe('pass')
+    expect(view.verdict).toBe('partial')
+    expect(view.verdictLabel).toBe('SSH port reachable; WireGuard tunnel not measured')
+    expect(VERDICT_DISPLAY[view.verdict].word).not.toBe(VERDICT_DISPLAY.pass.word)
+  })
+
+  it('fails when the SSH port is not reachable, whatever the deploy state says', () => {
+    const view = buildAppView(
+      'vpn',
+      [sample(0, {'public-reachability': 'f', 'deploy-state': 'p'}, {'public-reachability': {reason: 'timeout'}})],
+      new Date(at(0)),
+    )
+
+    expect(view.verdict).toBe('fail')
+    expect(view.verdictLabel).toBe('Failing: Reachability')
+    expect(view.observations.find(o => o.id === 'public-reachability')?.detail).toEqual({reason: 'timeout'})
+  })
+
+  it('reads a check that could not decide (dns, error, invalid config) as unknown, not red', () => {
+    const view = buildAppView(
+      'vpn',
+      [
+        sample(
+          0,
+          {'public-reachability': 'u', 'deploy-state': 'p'},
+          {'public-reachability': {reason: 'invalid-config'}},
+        ),
+      ],
+      new Date(at(0)),
+    )
+
+    expect(view.verdict).toBe('unknown')
+    expect(view.verdictLabel).toBe('Unknown: Reachability')
+  })
+
+  it('labels the vpn reachability row for what it proves: the SSH port, by TCP connect', () => {
+    const view = buildAppView('vpn', [sample(0, {'public-reachability': 'p', 'deploy-state': 'p'})], new Date(at(0)))
+    const keeweb = buildAppView('keeweb', [sample(0, reachability('p'))], new Date(at(0)))
+
+    expect(view.observations.find(o => o.id === 'public-reachability')?.proof).toBe('SSH port reachability')
+    expect(keeweb.observations.find(o => o.id === 'public-reachability')?.proof).toBe('Reachability')
   })
 })
 
@@ -232,6 +279,53 @@ describe('gateway', () => {
     )
 
     expect(view.verdict).toBe('fail')
+  })
+})
+
+describe('a deployment waiting at its gate in front of settled ones (issue 1992)', () => {
+  const newerWaits = (since: string) => ({'deploy-state': {reason: 'newer_at_gate', since}})
+
+  it('shows the failure and says a newer deployment waits: the failure is never hidden', () => {
+    const view = buildAppView(
+      'keeweb',
+      [sample(0, {'public-reachability': 'p', 'deploy-state': 'f'}, newerWaits(at(-300)))],
+      new Date(at(0)),
+    )
+
+    expect(view.deploy).toEqual({
+      state: 'failed',
+      label: 'Last deploy failed',
+      since: at(-300),
+      newerAtGate: true,
+    })
+    expect(view.cells['deploy-state']).toEqual({result: 'fail', note: 'newer deployment at approval gate'})
+    expect(view.verdict).toBe('fail')
+    expect(view.verdictLabel).toBe('Failing: Deploy state')
+  })
+
+  it('keeps a healthy app partly measured while a newer deployment waits, as a waiting deployment always did', () => {
+    const view = buildAppView(
+      'keeweb',
+      [sample(0, {'public-reachability': 'p', 'deploy-state': 'p'}, newerWaits(at(-300)))],
+      new Date(at(0)),
+    )
+
+    expect(view.deploy).toMatchObject({state: 'succeeded', newerAtGate: true, since: at(-300)})
+    expect(view.verdict).toBe('partial')
+    expect(view.verdictLabel).toBe('Reachable; deploy waiting at the approval gate')
+  })
+
+  it('is false for every other state, including a deployment that itself waits', () => {
+    const deploy = (code: 'p' | 'f' | 'u', d?: HistorySample['d']) =>
+      buildAppView('keeweb', [sample(0, {'public-reachability': 'p', 'deploy-state': code}, d)], new Date(at(0))).deploy
+
+    expect(deploy('p', {'deploy-state': {since: at(-5)}}).newerAtGate).toBe(false)
+    expect(deploy('f', {'deploy-state': {since: at(-5)}}).newerAtGate).toBe(false)
+    expect(deploy('u', {'deploy-state': {reason: 'at_gate', since: at(-5)}})).toMatchObject({
+      state: 'at_gate',
+      newerAtGate: false,
+    })
+    expect(deploy('u', {'deploy-state': {reason: 'running', since: at(-5)}}).newerAtGate).toBe(false)
   })
 })
 

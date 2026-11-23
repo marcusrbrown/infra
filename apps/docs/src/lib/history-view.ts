@@ -9,6 +9,7 @@ import type {
 import {
   APP_IDS,
   APPS_NOT_YET_DEPLOYED,
+  DEPLOY_NEWER_AT_GATE_REASON,
   HISTORY_WINDOW_MS,
   OBSERVATION_KINDS_BY_ID,
 } from '@marcusrbrown/infra-shared/status/history-schema'
@@ -49,6 +50,14 @@ export const PROOF_LABELS: Record<ProofKind, string> = {
   'end-to-end': 'End-to-end',
 }
 
+/**
+ * What one observation proves, where it is narrower than its kind says. The VPN box serves nothing over HTTPS: its
+ * reachability is a TCP connect to the SSH port, so the page must not read as "the VPN works".
+ */
+const PROOF_LABEL_OVERRIDES: Partial<Record<AppId, Readonly<Record<string, string>>>> = {
+  vpn: {'public-reachability': 'SSH port reachability'},
+}
+
 /** Symbol plus word, so a result never depends on colour. */
 export const RESULT_DISPLAY: Record<Result, {symbol: string; word: string}> = {
   pass: {symbol: '✅', word: 'Pass'},
@@ -59,11 +68,17 @@ export const RESULT_DISPLAY: Record<Result, {symbol: string; word: string}> = {
 
 /**
  * Apps whose snapshot can never show them fully healthy, however green the rest is. The gateway's model
- * calls are not probed; the VPN has no external probe at all.
+ * calls are not probed. The VPN's tunnel is not probed: its box is only checked for an open SSH port, and before the
+ * probe has a result there is nothing but the deploy state.
  */
-const CAVEATS: Partial<Record<AppId, string>> = {
-  gateway: 'Reachable; model route not measured',
-  vpn: 'Deploy state only; live health not measured',
+function caveatFor(app: AppId, cells: Record<ProofKind, Cell>): string | undefined {
+  if (app === 'gateway') return 'Reachable; model route not measured'
+  if (app === 'vpn') {
+    return cells.reachability.result === 'pass'
+      ? 'SSH port reachable; WireGuard tunnel not measured'
+      : 'Deploy state only; SSH port reachability not measured'
+  }
+  return undefined
 }
 
 export interface Counts {
@@ -105,6 +120,11 @@ export interface DeployView {
   label: string
   /** When the deployment reached this state; present for `at_gate` and the settled states. */
   since: string | undefined
+  /**
+   * True when `state` is the newest settled deployment and a newer one waits at its approval gate. The failure
+   * behind a parked gate stays visible; this says the gate is there.
+   */
+  newerAtGate: boolean
 }
 
 export interface EndToEndView {
@@ -213,20 +233,25 @@ function findGaps(samples: readonly HistorySample[]): Gap[] {
 function deployView(observation: ObservationView | undefined): DeployView {
   const detail = observation?.detail
   const since = detail?.since
+  const newerAtGate = detail?.reason === DEPLOY_NEWER_AT_GATE_REASON
   switch (observation?.latest) {
     case 'pass':
-      return {state: 'succeeded', label: 'Last deploy succeeded', since}
+      return {state: 'succeeded', label: 'Last deploy succeeded', since, newerAtGate}
     case 'fail':
-      return {state: 'failed', label: 'Last deploy failed', since}
+      return {state: 'failed', label: 'Last deploy failed', since, newerAtGate}
     case 'unknown':
-      if (detail?.reason === 'at_gate') return {state: 'at_gate', label: 'Waiting at the approval gate', since}
-      if (detail?.reason === 'running') return {state: 'running', label: 'Deploy running', since}
-      return {state: 'unknown', label: 'Deploy state unknown', since: undefined}
+      if (detail?.reason === 'at_gate') {
+        return {state: 'at_gate', label: 'Waiting at the approval gate', since, newerAtGate: false}
+      }
+      if (detail?.reason === 'running') return {state: 'running', label: 'Deploy running', since, newerAtGate: false}
+      return {state: 'unknown', label: 'Deploy state unknown', since: undefined, newerAtGate: false}
     case 'not_measured':
-      if (detail?.reason === 'none') return {state: 'none', label: 'No deployment recorded', since: undefined}
-      return {state: 'not_measured', label: 'Deploy state not measured', since: undefined}
+      if (detail?.reason === 'none') {
+        return {state: 'none', label: 'No deployment recorded', since: undefined, newerAtGate: false}
+      }
+      return {state: 'not_measured', label: 'Deploy state not measured', since: undefined, newerAtGate: false}
     default:
-      return {state: 'not_measured', label: 'Deploy state not measured', since: undefined}
+      return {state: 'not_measured', label: 'Deploy state not measured', since: undefined, newerAtGate: false}
   }
 }
 
@@ -267,6 +292,7 @@ function cellFor(
       note: deploy.state === 'at_gate' ? 'at approval gate' : deploy.state === 'running' ? 'running' : 'no deployment',
     }
   }
+  if (kind === 'deploy-state' && deploy.newerAtGate) return {result, note: 'newer deployment at approval gate'}
   if (kind === 'end-to-end' && e2e.stale) return {result, note: 'stale probe'}
   return {result, note: undefined}
 }
@@ -295,7 +321,7 @@ function verdictFor(
     return {verdict: 'unknown', label: `Unknown: ${unknownKinds.map(kind => PROOF_LABELS[kind]).join(', ')}`}
   }
 
-  const caveat = CAVEATS[app]
+  const caveat = caveatFor(app, cells)
   if (caveat !== undefined) return {verdict: 'partial', label: caveat}
   if (cells.reachability.result !== 'pass') return {verdict: 'partial', label: 'Reachability not measured'}
   if (
@@ -305,7 +331,9 @@ function verdictFor(
   ) {
     return {verdict: 'partial', label: 'Reachable; model route not measured'}
   }
-  if (deploy.state === 'at_gate') return {verdict: 'partial', label: 'Reachable; deploy waiting at the approval gate'}
+  if (deploy.state === 'at_gate' || deploy.newerAtGate) {
+    return {verdict: 'partial', label: 'Reachable; deploy waiting at the approval gate'}
+  }
   if (deploy.state === 'running') return {verdict: 'partial', label: 'Reachable; deploy running'}
   if (deploy.state === 'none') return {verdict: 'partial', label: 'Reachable; no deployment recorded'}
   // Past this point only a recorded success may claim a deploy; anything else is honest about what is missing.
@@ -338,7 +366,7 @@ export function buildAppView(
       {
         id,
         kind,
-        proof: PROOF_LABELS[kind],
+        proof: PROOF_LABEL_OVERRIDES[app]?.[id] ?? PROOF_LABELS[kind],
         // Declared but absent from the newest sample (the snapshot never measures it): not measured.
         latest: latestCode === undefined ? 'not_measured' : RESULT_BY_CODE[latestCode],
         detail: latest?.d?.[id],

@@ -182,9 +182,10 @@ The box is a Lightsail nano (~412 MB RAM). Under memory pressure `systemd-networ
 
 1. From outside, before touching anything:
    - `vpn status` and `vpn deploy` fail with SSH connect timeouts, while the Lightsail console shows the instance as running and the static IP still attached.
-   - A later deploy can wait at its `vpn` approval gate and never run. The public status page then shows the VPN's deploy state as `unknown`: it reads only the newest `main` deployment, so one waiting at its gate hides the earlier failure, and it does not measure reachability.
+   - The half-hourly status snapshot connects to the box's SSH port (see [Reachability probe](#reachability-probe)). A box that has lost its network shows as **Failing: Reachability** (`reason: timeout`) on the public status page within about an hour.
+   - A later deploy can wait at its `vpn` approval gate and never run. The page still shows the newest deployment that finished (for example "Last deploy failed", with "A newer deployment is waiting at the approval gate"), so the failure behind the gate stays visible.
    - An SSH-timeout deploy failure or report for this box warrants a Lightsail console check the same day.
-2. Reboot the instance from the Lightsail console. The provisioning credentials hold a minimal action set (see the [IAM note](../../apps/vpn/AGENTS.md#iam-note)): in the 2026-11 operator session a reboot attempted with them was denied and they could not read instance metrics or state. The cause can be confirmed only after the reboot.
+2. Reboot the instance from the Lightsail console. The provisioning credentials hold a minimal action set (see the [IAM note](../../apps/vpn/AGENTS.md#iam-note)): in the 2026-11 operator session a reboot attempted with them was denied and they could not read instance metrics or state. The provisioning credentials deliberately cannot reboot, because Lightsail IAM is account-wide (`lightsail:RebootInstance` would cover every instance in the account), so recovery is a console reboot, which the reachability probe gets you to sooner. The cause can be confirmed only after the reboot.
 3. SSH in and check the previous boot:
 
    ```bash
@@ -211,6 +212,24 @@ Either way the deploy stops before any WireGuard change, including a deploy that
 **Cause and fix (2026-11-12):** the stock daily `fwupd-refresh` job pushed the box into memory pressure; the kernel had OOM-killed `fwupd` repeatedly before that. The deploy now runs a memory-hardening step on every run (see [`apps/vpn/AGENTS.md`](../../apps/vpn/AGENTS.md#memory-hardening)). If the box goes unreachable again with those in place, something else is consuming memory — check `journalctl -b -1 -k` for the process the OOM killer named.
 
 ---
+
+## Reachability probe
+
+The status snapshot (`.github/workflows/status-snapshot.yaml`, minutes 11 and 41) opens a TCP connection to port 22 of the box and closes it at once. It sends nothing, reads nothing and does no SSH handshake. It shows the box is on the network and sshd is listening; it does **not** show that WireGuard works. The address comes from the repository secret `VPN_PROBE_HOST` (the same value as `VPN_HOST`), which only the snapshot step reads. Set it, and set it again after a reprovision changes the static IP:
+
+```bash
+gh secret set VPN_PROBE_HOST --repo marcusrbrown/infra
+```
+
+| Public page | Meaning | What to do |
+| --- | --- | --- |
+| Failing: Reachability, `reason: timeout` or `unreachable` | The box did not answer from GitHub's runners (the probe retried once). That is a reachability problem from the runners, not proof of a host outage. | Confirm before rebooting (see below). If confirmed, treat it as the [memory-pressure outage](#box-unreachable-memory-pressure): reboot from the console, then `vpn deploy`. |
+| Failing: Reachability, `reason: refused` | The box answered but nothing listens on port 22. | The box is up with sshd down or the firewall changed. Check the console and the Lightsail firewall rules (SSH 22 must be open). |
+| Unknown: Reachability, `reason: dns` or `error` | The check could not decide. | Usually a runner-side problem. If it persists for several samples, treat as above. |
+| Unknown: Reachability, `reason: invalid-config` | `VPN_PROBE_HOST` is set but is not a bare hostname or IPv4 address (no port, no scheme). | Set it again. |
+| Not measured, `reason: missing-config` | `VPN_PROBE_HOST` is not set. This is not a failure. | Set the secret. |
+
+Before rebooting, confirm the box is down from another network: run `nc -vz -w 5 <host> 22` from the workstation, run `vpn status`, or check the instance in the Lightsail console. Two failed samples in a row are not independent confirmation, because both come from the same runners and a path problem can fail them both. Alerting beyond this page and the daily report is not in place.
 
 ## Reprovision Recovery
 

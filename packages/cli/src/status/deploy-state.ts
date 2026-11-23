@@ -1,5 +1,6 @@
 import type {FetchLike, GitHubReadOptions} from './github-api'
 import type {AppId, Observation, ObservationDetail} from './observation'
+import {DEPLOY_NEWER_AT_GATE_REASON} from '@marcusrbrown/infra-shared/status/history-schema'
 import {z} from 'zod'
 
 import {notMeasured, observe} from './collect'
@@ -9,8 +10,11 @@ import {APP_IDS} from './observation'
 /**
  * Deploy state from the GitHub Deployments API: one environment per app, named after the app.
  *
- * Each app costs two calls: the newest `main` deployment, then that deployment's newest status. The read never
- * walks history, so an `inactive` newest status is reported as such (see `mapDeploymentState`).
+ * Each app costs two calls: the newest `main` deployments (one list), then the newest one's newest status. When
+ * that status is `waiting` (a deployment parked at its approval gate) the read looks behind it, at most
+ * `DEPLOY_STATE_LOOKBACK - 1` more deployments and one status call each, for the newest settled deployment: a
+ * failure before a parked gate must stay visible (issue 1992). Otherwise the read never walks history, so an
+ * `inactive` newest status is reported as such (see `mapDeploymentState`).
  *
  * `observedAt` is the read time. When the observed state began (the status `created_at`) is kept apart in
  * `detail.since`, so "waiting since" never looks like a fresh observation.
@@ -22,14 +26,37 @@ export const DEPLOY_STATE_ID = 'deploy-state'
  * deployment that ends in `failure` without ever touching the live app, so it must not read as the app's state.
  */
 export const DEPLOY_STATE_REF = 'main'
+/** The newest `main` deployments one list call returns: the newest, and what the read may look at behind a gate. */
+export const DEPLOY_STATE_LOOKBACK = 5
+/** Calls for one app whose newest deployment is not waiting: the list, then the newest status. */
 export const DEPLOY_STATE_CALLS_PER_APP = 2
-/** Hard ceiling on GitHub API calls for one `readDeployStates`: `DEPLOY_STATE_CALLS_PER_APP` for each of `APP_IDS`. */
-export const DEPLOY_STATE_CALL_BUDGET = APP_IDS.length * DEPLOY_STATE_CALLS_PER_APP
+/** Most calls for one app: the list, then one status call for each deployment in the look-back. */
+export const DEPLOY_STATE_MAX_CALLS_PER_APP = 1 + DEPLOY_STATE_LOOKBACK
+/** Hard ceiling on GitHub API calls for one `readDeployStates`: `DEPLOY_STATE_MAX_CALLS_PER_APP` for each of `APP_IDS`. */
+export const DEPLOY_STATE_CALL_BUDGET = APP_IDS.length * DEPLOY_STATE_MAX_CALLS_PER_APP
+
+/**
+ * `detail.reason` of a settled result that has a newer deployment waiting at its gate. The result and `since` are the
+ * settled deployment's; the waiting one has no field of its own in the history schema, so this marker is all of it.
+ */
+export const NEWER_AT_GATE_REASON = DEPLOY_NEWER_AT_GATE_REASON
 
 const SPEC = {id: DEPLOY_STATE_ID, kind: 'deploy-state', source: 'github-api'} as const
 
 const deploymentListSchema = z.array(z.object({id: z.number().int().positive(), ref: z.string()}))
 const statusListSchema = z.array(z.object({state: z.string().min(1).max(32), created_at: z.iso.datetime()}))
+
+type NewestStatus = {ok: true; status: z.infer<typeof statusListSchema>[number] | undefined} | {ok: false}
+
+async function readNewestStatus(fetchFn: FetchLike, token: string, deploymentId: number): Promise<NewestStatus> {
+  const statuses = await githubGetJson(
+    fetchFn,
+    token,
+    `/repos/${GITHUB_REPOSITORY}/deployments/${deploymentId}/statuses?per_page=1`,
+    statusListSchema,
+  )
+  return statuses.ok ? {ok: true, status: statuses.data[0]} : {ok: false}
+}
 
 export type DeployStateMapping = {result: 'pass' | 'fail'} | {result: 'unknown'; reason: string}
 
@@ -71,31 +98,47 @@ async function readAppDeployState(app: AppId, fetchFn: FetchLike, token: string,
   const deployments = await githubGetJson(
     fetchFn,
     token,
-    `/repos/${GITHUB_REPOSITORY}/deployments?environment=${encodeURIComponent(app)}&ref=${DEPLOY_STATE_REF}&per_page=1`,
+    `/repos/${GITHUB_REPOSITORY}/deployments?environment=${encodeURIComponent(app)}&ref=${DEPLOY_STATE_REF}&per_page=${DEPLOY_STATE_LOOKBACK}`,
     deploymentListSchema,
   )
   if (!deployments.ok) return apiError(now)
 
-  const newest = deployments.data[0]
+  const [newest, ...older] = deployments.data
   if (newest === undefined) return notMeasured(SPEC, 'none')
   // The `ref` filter is a request, not a guarantee: re-check it, and fail closed on anything else.
   if (newest.ref !== DEPLOY_STATE_REF) return apiError(now)
 
-  const statuses = await githubGetJson(
-    fetchFn,
-    token,
-    `/repos/${GITHUB_REPOSITORY}/deployments/${newest.id}/statuses?per_page=1`,
-    statusListSchema,
-  )
-  if (!statuses.ok) return apiError(now)
+  const newestStatus = await readNewestStatus(fetchFn, token, newest.id)
+  if (!newestStatus.ok) return apiError(now)
 
-  const status = statuses.data[0]
+  const {status} = newestStatus
   if (status === undefined) return observe(SPEC, 'unknown', {detail: {reason: 'no-status'}, now})
 
   const mapping = mapDeploymentState(status.state)
   const detail: ObservationDetail = {
     ...('reason' in mapping ? {reason: mapping.reason} : {}),
     since: status.created_at,
+  }
+  const atGate = status.state === 'waiting'
+  if (!atGate) return observe(SPEC, mapping.result, {detail, now})
+
+  // A deployment parked at its gate says nothing about the deployments before it: look behind it for the newest
+  // settled one, so a failure stays visible. The result and `since` are that deployment's; the marker says a newer
+  // one waits. Nothing settled inside the look-back is today's answer: unknown, at_gate, waiting since.
+  for (const deployment of older) {
+    if (deployment.ref !== DEPLOY_STATE_REF) return apiError(now)
+
+    const behind = await readNewestStatus(fetchFn, token, deployment.id)
+    if (!behind.ok) return apiError(now)
+    if (behind.status === undefined) continue
+
+    const settled = mapDeploymentState(behind.status.state)
+    if (settled.result === 'pass' || settled.result === 'fail') {
+      return observe(SPEC, settled.result, {
+        detail: {reason: NEWER_AT_GATE_REASON, since: behind.status.created_at},
+        now,
+      })
+    }
   }
 
   return observe(SPEC, mapping.result, {detail, now})

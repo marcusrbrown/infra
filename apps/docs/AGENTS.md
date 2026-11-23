@@ -55,7 +55,7 @@ History comes from `STATUS_HISTORY_DIR`, or the fixture when it is unset. `STATU
 
 - **Never exempt a gate finding by pattern.** Allowlist a real hostname with a reason and a narrow scope; reword anything else.
 - **Never publish a `.delivery.json`.** Archify receipts stay in `.diagrams/`; only `*.html` is copied to `public/`.
-- **Never render non-bounded history detail.** Status pages show only the closed result codes and the bounded `at_gate`, `running` and `none` details.
+- **Never render non-bounded history detail.** Status pages show only the closed result codes and the bounded reasons: `at_gate`, `newer_at_gate`, `running`, `none`, and the VPN probe's fixed codes (`timeout`, `refused`, `unreachable`, `dns`, `error`, `invalid-config`, `missing-config`). The VPN box address never reaches a sample, so it never reaches a page.
 - **Never print a secret finding's match.** Report the pattern ID, file and line only.
 - **Never deploy a directory the gate did not scan.** The Pages artifact is exactly `apps/docs/dist`.
 - **Never let a pull request publish.** PR builds use the fixture and have no write permission.

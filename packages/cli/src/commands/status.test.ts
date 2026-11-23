@@ -1,4 +1,5 @@
 import type {StatusEnvelope} from '../status/observation'
+import type {ProbeOptions} from '../status/public-probes'
 import type {SpawnFn} from './gateway/status'
 import {afterEach, describe, expect, it, spyOn} from 'bun:test'
 import {goke} from 'goke'
@@ -6,6 +7,7 @@ import {createCapturedCtx} from '../lib/mcp-ctx-fixture'
 import {readDeployStates} from '../status/deploy-state'
 import {readMonitorState} from '../status/monitor-state'
 import {STATUS_SCHEMA_VERSION, statusEnvelopeSchema} from '../status/observation'
+import {probeVpn} from '../status/public-probes'
 import {
   deployObservation,
   EXPECTED_OBSERVATION_IDS,
@@ -17,6 +19,7 @@ import {
   okWorkspace,
   probeObservation,
   routeObservation,
+  vpnProbeObservation,
   withStatusEnv,
 } from './__fixtures__/status-dependencies'
 import {DEGRADED_BODY, LIMIT_BYTES, workspaceStdout} from './gateway/__fixtures__/workspace-probe'
@@ -346,31 +349,32 @@ describe('top-level status --json (typed contract)', () => {
     })
   })
 
-  it('reports vpn reachability and end-to-end as not measured, and never runs a public probe for it', async () => {
-    const probed: string[] = []
-    const probe = (app: string) => async () => {
-      probed.push(app)
-      return probeObservation()
-    }
-    const {envelope} = await runJson({
-      publicProbes: {
-        keeweb: probe('keeweb'),
-        cliproxy: probe('cliproxy'),
-        gateway: probe('gateway'),
-        umami: probe('umami'),
-        dashboard: probe('dashboard'),
-        broker: probe('broker'),
-      },
-    })
+  it('keeps the vpn egress route not measured, and reports its reachability from the TCP probe', async () => {
+    const {envelope} = await runJson()
 
-    for (const id of ['public-reachability', 'egress-route']) {
-      expect(observation(envelope, 'vpn', id)).toMatchObject({
-        result: 'not_measured',
-        source: 'config',
-        observedAt: null,
-      })
-    }
-    expect(probed.sort()).toEqual(['broker', 'cliproxy', 'dashboard', 'gateway', 'keeweb', 'umami'])
+    expect(observation(envelope, 'vpn', 'egress-route')).toMatchObject({
+      result: 'not_measured',
+      source: 'config',
+      observedAt: null,
+    })
+    expect(observation(envelope, 'vpn', 'public-reachability')).toMatchObject({
+      kind: 'reachability',
+      source: 'tcp',
+      result: 'pass',
+      observedAt: FIXED_NOW.toISOString(),
+      detail: {durationMs: 12},
+    })
+  })
+
+  it('reports vpn reachability as unknown / missing-result when no vpn probe is supplied, like any other app', async () => {
+    const {publicProbes} = makeStatusDependencies()
+    const {vpn: _vpn, ...withoutVpn} = publicProbes
+    const {envelope} = await runJson({publicProbes: withoutVpn})
+
+    expect(observation(envelope, 'vpn', 'public-reachability')).toMatchObject({
+      result: 'unknown',
+      detail: {reason: 'missing-result'},
+    })
   })
 
   it('keeps public reachability for all six apps that have a probe, with the probe detail', async () => {
@@ -802,6 +806,136 @@ describe('top-level status for traces', () => {
   })
 })
 
+// TEST-NET-3 (RFC 5737): never a real address.
+const PROBE_ADDRESS = '203.0.113.7'
+const SSH_ADDRESS = '203.0.113.9'
+
+/** The options the unified status command hands the vpn probe, for a given environment. */
+async function vpnProbeOptions(env: Record<string, string | undefined>) {
+  const seen: (ProbeOptions | undefined)[] = []
+  const {ctx} = createCapturedCtx()
+  await withStatusEnv(async () => {
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    await unifiedStatusAction(
+      {json: true},
+      ctx,
+      makeStatusDependencies({
+        publicProbes: {
+          ...makeStatusDependencies().publicProbes,
+          vpn: async options => {
+            seen.push(options)
+            return vpnProbeObservation()
+          },
+        },
+      }),
+    )
+  })
+  return seen
+}
+
+describe('vpn TCP probe wiring (the address is sensitive)', () => {
+  it('passes VPN_PROBE_HOST to the probe, ahead of VPN_HOST', async () => {
+    expect(await vpnProbeOptions({VPN_PROBE_HOST: PROBE_ADDRESS, VPN_HOST: SSH_ADDRESS})).toEqual([
+      {host: PROBE_ADDRESS},
+    ])
+  })
+
+  it('falls back to VPN_HOST on an operator workstation', async () => {
+    expect(await vpnProbeOptions({VPN_PROBE_HOST: undefined, VPN_HOST: SSH_ADDRESS})).toEqual([{host: SSH_ADDRESS}])
+  })
+
+  it('passes no host when neither variable is set, so the probe reports not measured', async () => {
+    expect(await vpnProbeOptions({VPN_PROBE_HOST: undefined, VPN_HOST: undefined})).toEqual([{}])
+  })
+
+  it('reports not_measured / missing-config through the real probe when no address is set, and never connects', async () => {
+    let connected = false
+    const {ctx, captured} = createCapturedCtx()
+    await withStatusEnv(async () => {
+      delete process.env.VPN_HOST
+      await unifiedStatusAction(
+        {json: true},
+        ctx,
+        makeStatusDependencies({
+          publicProbes: {
+            ...makeStatusDependencies().publicProbes,
+            vpn: options =>
+              probeVpn({
+                ...options,
+                connect: async () => {
+                  connected = true
+                },
+              }),
+          },
+        }),
+      )
+    })
+    const envelope = statusEnvelopeSchema.parse(JSON.parse(captured.stdout[0] ?? ''))
+
+    expect(observation(envelope, 'vpn', 'public-reachability')).toEqual({
+      id: 'public-reachability',
+      kind: 'reachability',
+      source: 'config',
+      result: 'not_measured',
+      observedAt: null,
+      detail: {reason: 'missing-config'},
+    })
+    expect(connected).toBe(false)
+  })
+
+  it('never prints a probe failure message in table mode: it could carry the address', async () => {
+    const captured = await runTable({
+      publicProbes: {
+        ...makeStatusDependencies().publicProbes,
+        vpn: async () => {
+          throw new Error(`connect ETIMEDOUT ${PROBE_ADDRESS}:22`)
+        },
+      },
+    })
+
+    expect(captured.stderr).toEqual(['vpn status check failed'])
+    expect(captured.stdout.join('\n')).not.toContain(PROBE_ADDRESS)
+    expect(captured.stdout).toContain('| vpn | ❓ unknown | ✅ pass | ✅ pass | ⚪ not measured | — |')
+  })
+
+  it('never puts the address in the JSON envelope or on stderr, whatever the probe does', async () => {
+    const {ctx, captured} = createCapturedCtx()
+    await withStatusEnv(async () => {
+      process.env.VPN_PROBE_HOST = PROBE_ADDRESS
+      process.env.VPN_HOST = SSH_ADDRESS
+      await unifiedStatusAction(
+        {json: true},
+        ctx,
+        makeStatusDependencies({
+          publicProbes: {
+            ...makeStatusDependencies().publicProbes,
+            vpn: options =>
+              probeVpn({
+                ...options,
+                connect: async () => {
+                  throw Object.assign(new Error(`connect ECONNREFUSED ${options?.host}:22`), {code: 'ECONNREFUSED'})
+                },
+              }),
+          },
+        }),
+      )
+    })
+    const output = [...captured.stdout, ...captured.stderr].join('\n')
+    const envelope = statusEnvelopeSchema.parse(JSON.parse(captured.stdout[0] ?? ''))
+
+    expect(observation(envelope, 'vpn', 'public-reachability')).toMatchObject({
+      result: 'fail',
+      source: 'tcp',
+      detail: {reason: 'refused'},
+    })
+    expect(output).not.toContain(PROBE_ADDRESS)
+    expect(output).not.toContain(SSH_ADDRESS)
+  })
+})
+
 describe('top-level status table (rendered from observations)', () => {
   it('pins the whole table for a healthy fleet', async () => {
     const captured = await runTable()
@@ -814,12 +948,59 @@ describe('top-level status table (rendered from observations)', () => {
         '| gateway | ✅ pass | ✅ pass | ✅ pass | — | ✅ pass |',
         '| umami | ✅ pass | ✅ pass | ✅ pass | — | — |',
         '| dashboard | ✅ pass | ✅ pass | ✅ pass | — | — |',
-        '| vpn | ⚪ not measured | ✅ pass | ✅ pass | ⚪ not measured | — |',
+        '| vpn | ✅ pass | ✅ pass | ✅ pass | ⚪ not measured | — |',
         '| broker | ✅ pass | — | ✅ pass | — | — |',
         '| traces | ✅ pass | — | ✅ pass | — | — |',
       ].join('\n'),
     )
     expect(captured.exit).toBeNull()
+  })
+
+  it.each([
+    ['pass', '✅ pass'],
+    ['fail', '❌ fail'],
+  ] as const)(
+    'keeps the gate note on a Deploy cell whose newest settled deployment is a %s, with a newer one waiting',
+    async (result, cell) => {
+      const behindGate = deployObservation(result, {reason: 'newer_at_gate', since: '2026-11-16T20:00:00Z'})
+      const captured = await runTable({
+        readDeployStates: async () => ({
+          ...Object.fromEntries(APPS.map(app => [app, deployObservation()])),
+          vpn: behindGate,
+        }),
+      })
+
+      expect(captured.stdout).toContain(
+        `| vpn | ✅ pass | ✅ pass | ${cell} (newer deployment at approval gate) | ⚪ not measured | — |`,
+      )
+      // Only the affected cell changes: every other row keeps its bare cell.
+      expect(captured.stdout).toContain('| keeweb | ✅ pass | — | ✅ pass | — | — |')
+    },
+  )
+
+  it('does not add the gate note to a deployment that itself waits, or to a plain result', async () => {
+    const captured = await runTable({
+      readDeployStates: async () => ({
+        ...Object.fromEntries(APPS.map(app => [app, deployObservation()])),
+        vpn: deployObservation('unknown', {reason: 'at_gate', since: '2026-11-16T20:00:00Z'}),
+      }),
+    })
+
+    expect(captured.stdout).toContain('| vpn | ✅ pass | ✅ pass | ❓ unknown | ⚪ not measured | — |')
+    expect(captured.stdout.join('\n').match(/newer deployment/g)).toBeNull()
+  })
+
+  it('leaves status --json carrying the marker in the observation detail, unchanged', async () => {
+    const behindGate = deployObservation('fail', {reason: 'newer_at_gate', since: '2026-11-16T20:00:00Z'})
+    const {envelope, captured} = await runJson({
+      readDeployStates: async () => ({
+        ...Object.fromEntries(APPS.map(app => [app, deployObservation()])),
+        vpn: behindGate,
+      }),
+    })
+
+    expect(observation(envelope, 'vpn', 'deploy-state')).toEqual(behindGate)
+    expect(captured.stdout.join('')).not.toContain('approval gate')
   })
 
   it('shows fail, unknown and not measured cells for a degraded fleet, keeping the other apps', async () => {
@@ -848,7 +1029,7 @@ describe('top-level status table (rendered from observations)', () => {
       getVpnStatusSummary: () => new Promise(() => undefined),
     })
 
-    expect(captured.stdout).toContain('| vpn | ⚪ not measured | ❓ unknown | ✅ pass | ⚪ not measured | — |')
+    expect(captured.stdout).toContain('| vpn | ✅ pass | ❓ unknown | ✅ pass | ⚪ not measured | — |')
     expect(captured.stdout).toContain('| keeweb | ✅ pass | — | ✅ pass | — | — |')
     expect(captured.stderr).toEqual(['vpn status check timed out after 25ms'])
   })

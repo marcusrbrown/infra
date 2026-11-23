@@ -4,6 +4,7 @@ import type {ActionCtx} from '../lib/action-ctx'
 import type {ProbeOutcome} from '../status/declared'
 import type {HistorySample, RunIdentity} from '../status/history'
 import type {AppId, Observation} from '../status/observation'
+import type {ProbeOptions} from '../status/public-probes'
 import type {StatusDependencies} from './status'
 
 import {APPS_NOT_YET_DEPLOYED} from '@marcusrbrown/infra-shared/status/history-schema'
@@ -21,6 +22,7 @@ import {
   writeHistory,
 } from '../status/history'
 import {APP_IDS} from '../status/observation'
+import {vpnProbeHost} from '../status/public-probes'
 
 declare const process: {
   env: Record<string, string | undefined>
@@ -67,11 +69,26 @@ const SNAPSHOT_IDS = recordByApp(
     ),
 )
 
-async function runProbe(probe: ((options?: undefined) => Promise<Observation>) | undefined): Promise<ProbeOutcome> {
+/**
+ * Only the vpn probe takes options: its address. The snapshot reads `VPN_PROBE_HOST` and never `VPN_HOST`; the
+ * workflow sets the former on the snapshot step alone. The address goes to the probe and nowhere else.
+ */
+function probeOptionsFor(app: AppId, env: Env): ProbeOptions | undefined {
+  if (app !== 'vpn') return undefined
+
+  const host = vpnProbeHost(env, {fallbackToVpnHost: false})
+  return host === undefined ? {} : {host}
+}
+
+/** A probe that throws is `failed` with no message kept: an error could echo what the probe was given. */
+async function runProbe(
+  probe: ((options?: ProbeOptions) => Promise<Observation>) | undefined,
+  options: ProbeOptions | undefined,
+): Promise<ProbeOutcome> {
   if (probe === undefined) return {kind: 'none'}
 
   try {
-    return {kind: 'ok', observation: await probe()}
+    return {kind: 'ok', observation: await probe(options)}
   } catch {
     return {kind: 'failed'}
   }
@@ -83,9 +100,12 @@ async function collectObservations(
   token: string | undefined,
   now: Date,
   apps: readonly AppId[],
+  env: Env,
 ): Promise<(readonly [AppId, Observation[]])[]> {
   const reads = runGithubReads(deps, {token, now, apps, ...(deps.fetch === undefined ? {} : {fetch: deps.fetch})})
-  const probes = await Promise.all(apps.map(async app => [app, await runProbe(deps.publicProbes[app])] as const))
+  const probes = await Promise.all(
+    apps.map(async app => [app, await runProbe(deps.publicProbes[app], probeOptionsFor(app, env))] as const),
+  )
   const settled = await reads
 
   return probes.map(([app, probe]) => {
@@ -119,7 +139,7 @@ export async function statusSnapshotAction(
 
     // An app that is not yet deployed has no host to probe and no deployment to read: it gets no sample at all.
     const apps = APP_IDS.filter(app => !notYetDeployed.includes(app))
-    const observations = await collectObservations(deps, resolveGithubToken(env), now, apps)
+    const observations = await collectObservations(deps, resolveGithubToken(env), now, apps, env)
     const incoming: Partial<Record<AppId, HistorySample>> = Object.fromEntries(
       observations.map(([app, observed]) => [app, compactSample(observed, identity, now)]),
     )
@@ -144,7 +164,7 @@ export function registerStatusSnapshot(cli: ReturnType<typeof goke>, deps: Snaps
   cli
     .command(
       'status snapshot',
-      'Take one public-safe status sample and merge it into the 90-day history directory. Runs only the public HTTPS probes, the GitHub Deployments reader and the auth monitor reader (GITHUB_TOKEN or GH_TOKEN, read-only); it uses no SSH and no deploy secrets. Stages every file as a temp file before renaming any into place; any invariant violation exits non-zero and writes nothing. Prints counts only. Exits 0 once the snapshot is written, even when observations are fail or unknown, because those are data. CLI-only: not exposed over MCP.',
+      'Take one public-safe status sample and merge it into the 90-day history directory. Runs only the public HTTPS probes, the TCP connect to the VPN box on port 22 (address from VPN_PROBE_HOST, never printed or recorded), the GitHub Deployments reader and the auth monitor reader (GITHUB_TOKEN or GH_TOKEN, read-only); it uses no SSH session and no deploy secrets. Stages every file as a temp file before renaming any into place; any invariant violation exits non-zero and writes nothing. Prints counts only. Exits 0 once the snapshot is written, even when observations are fail or unknown, because those are data. CLI-only: not exposed over MCP.',
     )
     .option(
       '--history <dir>',

@@ -17,12 +17,12 @@ import type {ProbeOptions} from '../status/public-probes'
 
 import {z} from 'zod'
 import {assembleAppStatus, worstResult} from '../status/declared'
-import {readDeployStates} from '../status/deploy-state'
+import {NEWER_AT_GATE_REASON, readDeployStates} from '../status/deploy-state'
 import {resolveGithubToken} from '../status/github-api'
 import {githubObservationsFor, runGithubReads} from '../status/github-reads'
 import {readMonitorState} from '../status/monitor-state'
 import {APP_IDS, STATUS_SCHEMA_VERSION} from '../status/observation'
-import {PUBLIC_PROBES} from '../status/public-probes'
+import {PUBLIC_PROBES, vpnProbeHost} from '../status/public-probes'
 import {getCliproxyStatusSummary} from './cliproxy/status'
 import {getDashboardStatusSummary} from './dashboard'
 import {getGatewayStatusSummary} from './gateway'
@@ -165,7 +165,8 @@ async function collectApp(
 
   let probeOutcome: ProbeOutcome = {kind: 'none'}
   if (probeResult.status === 'rejected') {
-    logFailure(`status check failed: ${describeReason(probeResult.reason)}`)
+    // The vpn probe is handed the box address, which a thrown error could echo: print a fixed line instead.
+    logFailure(app === 'vpn' ? 'status check failed' : `status check failed: ${describeReason(probeResult.reason)}`)
     probeOutcome = {kind: 'failed'}
   } else if (probeResult.value !== undefined) {
     probeOutcome = {kind: 'ok', observation: probeResult.value}
@@ -192,10 +193,26 @@ async function collectApp(
   )
 }
 
+/**
+ * A settled deploy result with a newer deployment waiting at its approval gate (`detail.reason`). The wording matches
+ * the public site's cell note, so a pass or fail never hides the parked gate.
+ */
+const GATE_NOTE = ' (newer deployment at approval gate)'
+
+function gateNote(app: AppStatus, kind: ObservationKind): string {
+  const parked = app.observations.some(
+    observation =>
+      observation.kind === kind &&
+      (observation.result === 'pass' || observation.result === 'fail') &&
+      observation.detail?.reason === NEWER_AT_GATE_REASON,
+  )
+  return parked ? GATE_NOTE : ''
+}
+
 function formatRow(app: AppStatus): string {
   const cells = TABLE_COLUMNS.map(({kind}) => {
     const worst = worstResult(app, kind)
-    return worst === undefined ? UNDECLARED_CELL : RESULT_CELLS[worst]
+    return worst === undefined ? UNDECLARED_CELL : `${RESULT_CELLS[worst]}${gateNote(app, kind)}`
   })
 
   return `| ${[app.app, ...cells].join(' | ')} |`
@@ -238,6 +255,8 @@ export async function unifiedStatusAction(
     cliproxy: cliproxyBaseUrl,
     broker: brokerBaseUrl(process.env.BROKER_DOMAIN),
   }
+  // The vpn box has no URL: its probe is a TCP connect to the address in VPN_PROBE_HOST, or VPN_HOST on a workstation.
+  const vpnProbeAddress = vpnProbeHost(process.env, {fallbackToVpnHost: true})
   const json = options.json === true
 
   // Without a token the readers make no request and report `not_measured` (missing-config).
@@ -251,7 +270,8 @@ export async function unifiedStatusAction(
     APP_IDS.map(app => {
       const probe = dependencies.publicProbes[app]
       const baseUrl = probeBaseUrls[app]
-      const probeOptions: ProbeOptions | undefined = baseUrl === undefined ? undefined : {baseUrl}
+      let probeOptions: ProbeOptions | undefined = baseUrl === undefined ? undefined : {baseUrl}
+      if (app === 'vpn') probeOptions = vpnProbeAddress === undefined ? {} : {host: vpnProbeAddress}
       return collectApp(app, probe && (() => probe(probeOptions)), collectors[app], {
         ctx,
         now: dependencies.now,

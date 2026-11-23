@@ -78,6 +78,13 @@ const noData = view.latestSampleAt === undefined
         </>
       )
     }.
+    {
+      view.deploy.newerAtGate && (
+        <>
+          {' '}A newer deployment is waiting at the approval gate. This is the newest deployment that finished.
+        </>
+      )
+    }
   </p>
 
   <h2 id="end-to-end">End-to-end probe</h2>

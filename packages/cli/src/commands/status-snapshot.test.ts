@@ -14,6 +14,7 @@ import {readDeployStates} from '../status/deploy-state'
 import {historyAppFileSchema, historyMetaSchema, loadHistory, recordByApp, writeHistory} from '../status/history'
 import {readMonitorState} from '../status/monitor-state'
 import {APP_IDS} from '../status/observation'
+import {probeVpn} from '../status/public-probes'
 import {
   deployObservation,
   FIXED_NOW,
@@ -21,6 +22,7 @@ import {
   makeStatusDependencies,
   probeObservation,
   routeObservation,
+  vpnProbeObservation,
 } from './__fixtures__/status-dependencies'
 import {MCP_ALLOWLIST} from './mcp'
 import {registerStatus} from './status'
@@ -37,6 +39,11 @@ const APP_NAMES: readonly string[] = APP_IDS
 function snapshotDeps(overrides: Partial<SnapshotDependencies> = {}): SnapshotDependencies {
   const {publicProbes, readDeployStates: deploy, readMonitorState: monitor, now} = makeStatusDependencies()
   return {publicProbes, readDeployStates: deploy, readMonitorState: monitor, now, ...overrides}
+}
+
+function vpnProbeDeps(probe: NonNullable<SnapshotDependencies['publicProbes']['vpn']>): SnapshotDependencies {
+  const base = snapshotDeps()
+  return {...base, publicProbes: {...base.publicProbes, vpn: probe}}
 }
 
 function runEnv(run: string, attempt = '1', extra: Env = {}): Env {
@@ -85,6 +92,13 @@ describe('status snapshot', () => {
     return captured
   }
 
+  async function vpnSample(deps: SnapshotDependencies, env: Env) {
+    const captured = await run({bootstrap: true}, {deps, env})
+    const files = await readFiles(history)
+    const vpn = historyAppFileSchema.parse(JSON.parse(files[join('apps', 'vpn.json')] ?? '[]'))
+    return {captured, files, sample: vpn[0]}
+  }
+
   it('bootstraps an empty directory with one sample per app, printing counts only', async () => {
     const captured = await run({bootstrap: true})
 
@@ -127,8 +141,96 @@ describe('status snapshot', () => {
       'provider-route',
       'provider-route-go',
     ])
-    // Only the observations this command measures; the VPN has no public probe and no end-to-end route.
-    expect(Object.keys(vpn[0]?.r ?? {})).toEqual(['deploy-state'])
+    // Only the observations this command measures: the VPN's TCP reachability and its deploy state, no end-to-end route.
+    expect(Object.keys(vpn[0]?.r ?? {})).toEqual(['public-reachability', 'deploy-state'])
+  })
+
+  describe('vpn TCP reachability (the address is sensitive)', () => {
+    // TEST-NET-3 (RFC 5737): never a real address.
+    const ADDRESS = '203.0.113.7'
+    const OTHER_ADDRESS = '203.0.113.9'
+
+    it('hands the probe VPN_PROBE_HOST, and never VPN_HOST', async () => {
+      const seen: unknown[] = []
+      await vpnSample(
+        vpnProbeDeps(async options => {
+          seen.push(options)
+          return probeObservation()
+        }),
+        runEnv('1001', '1', {VPN_PROBE_HOST: ADDRESS, VPN_HOST: OTHER_ADDRESS}),
+      )
+      expect(seen).toEqual([{host: ADDRESS}])
+
+      seen.length = 0
+      await rm(history, {recursive: true, force: true})
+      await vpnSample(
+        vpnProbeDeps(async options => {
+          seen.push(options)
+          return probeObservation()
+        }),
+        runEnv('1002', '1', {VPN_HOST: OTHER_ADDRESS}),
+      )
+      expect(seen).toEqual([{}])
+    })
+
+    it('records a pass, and a failure by its fixed reason code only', async () => {
+      const passed = await vpnSample(
+        vpnProbeDeps(async () => vpnProbeObservation('pass')),
+        runEnv('1001', '1', {VPN_PROBE_HOST: ADDRESS}),
+      )
+      expect(passed.sample?.r['public-reachability']).toBe('p')
+
+      await rm(history, {recursive: true, force: true})
+      const failed = await vpnSample(
+        vpnProbeDeps(async () => ({...vpnProbeObservation('fail'), detail: {reason: 'timeout', durationMs: 5000}})),
+        runEnv('1002', '1', {VPN_PROBE_HOST: ADDRESS}),
+      )
+      expect(failed.sample?.r['public-reachability']).toBe('f')
+      expect(failed.sample?.d?.['public-reachability']).toEqual({reason: 'timeout'})
+    })
+
+    it('records an unset secret as not measured, so the public history does not turn red before it exists', async () => {
+      const unset = await vpnSample(
+        vpnProbeDeps(options =>
+          probeVpn({...options, connect: async () => Promise.reject(new Error('must not connect'))}),
+        ),
+        runEnv('1001'),
+      )
+
+      expect(unset.sample?.r['public-reachability']).toBe('n')
+      expect(unset.sample?.d?.['public-reachability']).toEqual({reason: 'missing-config'})
+    })
+
+    it('never writes the address to the history, stdout or stderr, whatever the probe does', async () => {
+      const throwing = await vpnSample(
+        vpnProbeDeps(async options => {
+          throw new Error(`boom ${options?.host}`)
+        }),
+        runEnv('1001', '1', {VPN_PROBE_HOST: ADDRESS, VPN_HOST: OTHER_ADDRESS}),
+      )
+      expect(throwing.sample?.r['public-reachability']).toBe('u')
+      expect(throwing.sample?.d?.['public-reachability']).toEqual({reason: 'check-failed'})
+
+      await rm(history, {recursive: true, force: true})
+      const refused = await vpnSample(
+        vpnProbeDeps(options =>
+          probeVpn({
+            ...options,
+            connect: async target => {
+              throw Object.assign(new Error(`connect ECONNREFUSED ${target.host}:22`), {code: 'ECONNREFUSED'})
+            },
+          }),
+        ),
+        runEnv('1002', '1', {VPN_PROBE_HOST: ADDRESS, VPN_HOST: OTHER_ADDRESS}),
+      )
+      expect(refused.sample?.d?.['public-reachability']).toEqual({reason: 'refused'})
+
+      for (const {captured, files} of [throwing, refused]) {
+        const everything = [...captured.stdout, ...captured.stderr, ...Object.values(files)].join('\n')
+        expect(everything).not.toContain(ADDRESS)
+        expect(everything).not.toContain(OTHER_ADDRESS)
+      }
+    })
   })
 
   it('appends a second sample on a normal run, giving two samples per app', async () => {

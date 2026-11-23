@@ -536,9 +536,10 @@ export interface AddOptions {
   print?: boolean | undefined
 }
 
-const REPO_SHAPE = /^[A-Z\d][A-Z\d-]*\/\w[\w.-]*$/i
+// A repository name may start with a dot (`.github`), but never with a hyphen, and is never `.` or `..`.
+const REPO_SHAPE = /^[A-Z\d][A-Z\d-]*\/(?!\.{1,2}$)[\w.][\w.-]*$/i
 const ORG_SHAPE = /^[A-Z\d][A-Z\d-]*$/i
-const REPO_NAME_SHAPE = /^\w[\w.-]*$/
+const REPO_NAME_SHAPE = /^(?!\.{1,2}$)[\w.][\w.-]*$/
 const SECRET_NAME_SHAPE = /^[A-Z_][A-Z\d_]*$/
 
 interface GithubTarget {

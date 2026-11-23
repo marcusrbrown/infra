@@ -437,8 +437,8 @@ function hasServedSpans(samples: readonly Sample[]): boolean {
  * the HTTP request count by status code can.
  *
  * A counter that was never incremented is not exported, so an absent 503 series is zero. That is believed only
- * while the request metric is exported at all: spans served and no request series anywhere means a renamed or
- * switched-off metric, and the check is `unknown` rather than a pass. A collector that has served nothing has
+ * while the request metric is exported at all: spans served and no request series anywhere (the canary's own
+ * included) means a renamed or switched-off metric, and the check is `unknown` rather than a pass. A collector that has served nothing has
  * nothing to report, so it passes.
  */
 function evaluateUnavailable(
@@ -450,7 +450,11 @@ function evaluateUnavailable(
   if (!requests.every(sample => isCount(sample.value))) {
     return {state, result: result('collector-refused', 'unknown', `${HTTP_REQUESTS} is not a count`)}
   }
-  if (requests.length === 0 && hasServedSpans(samples)) {
+  // Presence is tested on the whole family, the canary's series included: they prove the metric is exported even
+  // when the canary is the only traffic (after a restart with ingest held or off). Only the 503 total and the
+  // displayed counts leave the canary out.
+  const exported = samples.some(sample => sample.name === HTTP_REQUESTS)
+  if (!exported && hasServedSpans(samples)) {
     return {
       state,
       result: result('collector-refused', 'unknown', `spans were served but ${HTTP_REQUESTS} is not exported`),

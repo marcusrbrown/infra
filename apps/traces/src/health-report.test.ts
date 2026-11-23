@@ -541,6 +541,16 @@ describe('evaluateCollectorMetrics', () => {
     expect(out.results.find(entry => entry.id === 'collector-failures')?.status).toBe('pass')
   })
 
+  it('passes a collector that has served only the private canary, and shows no authenticated requests', () => {
+    // After a restart with ingest held or off, the canary is the only traffic. Its request series proves the
+    // metric is exported, so this must not read as a missing metric.
+    const canaryOnly = collectorPage([receiverCounters('canary', 1, 0), canaryRequests('200', 1)].join('\n'))
+    const out = evaluateCollectorMetrics(canaryOnly, emptyCounterState(), NOW)
+    expect(refusedOf(out)?.status).toBe('pass')
+    expect(out.ingest?.requests).toEqual({})
+    expect(out.ingest?.groups.workstation).toEqual({acceptedSpans: 0, refusedSpans: 0})
+  })
+
   it('treats a collector that has served nothing as having no 503s', () => {
     const idle = 'otelcol_receiver_accepted_spans{receiver="otlp/fro-bot",transport="http"} 0'
     expect(refusedOf(evaluateCollectorMetrics(collectorPage(idle), emptyCounterState(), NOW))?.status).toBe('pass')

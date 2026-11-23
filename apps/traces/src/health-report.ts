@@ -5,7 +5,7 @@
 //
 //   0.0.0.0:8080   GET /healthz   200 or 503, and a body of `{ok, at}`: one boolean and one timestamp.
 //                                 Caddy routes this path publicly, so nothing else may ever be in it.
-//   127.0.0.1:8081 GET /detail    every check with its status and numbers
+//   127.0.0.1:8081 GET /detail    every check with its status and numbers, and the ingest counts
 //                  GET /live      the process is up (the compose healthcheck)
 //                                 The second listener is bound to the container's own loopback, so only
 //                                 `docker compose exec` reaches it; `traces status` reads it over SSH.
@@ -85,9 +85,6 @@ export const EXPECTED_EXPORTERS = [
   'otlp_http/langfuse-canary',
   'otlp_http/tempo',
 ] as const
-
-/** Receivers whose refused spans are counted: the three groups and the canary. */
-export const REFUSING_RECEIVERS = [...GROUPS, CANARY_GROUP] as const
 
 /**
  * Langfuse's trace tables in ClickHouse. The retention TTL is set on these two and each holds the span
@@ -366,6 +363,114 @@ function readCounters(
 
 // ─── Collector metrics ────────────────────────────────────────────────────────
 
+const HTTP_REQUESTS = 'http_server_request_duration_count'
+
+/** The canary receiver's path: its series is the only one that carries `http_route`, and it is not ingest. */
+const CANARY_ROUTE = new URL(ENDPOINTS.canaryReceiver).pathname
+
+/**
+ * The note that travels with the counts. They are totals since the collector started, so a reader must not take
+ * them for rates, and the 401 total holds requests that are not senders'.
+ */
+export const INGEST_NOTE =
+  'Counters since collector start, not rates. refusedSpans counts spans answered 429 (byte limiter) or 503 (full queue). ' +
+  'The 401 total includes the unauthenticated probe the public monitor sends every 15 minutes, and deploy-gate probes.'
+
+export interface IngestCounts {
+  /** Spans per sender group, from the receiver's own counters. */
+  groups: Record<string, {acceptedSpans: number; refusedSpans: number}>
+  /** Requests per HTTP status code on the authenticated receivers, summed over every label combination. */
+  requests: Record<string, number>
+  note: string
+}
+
+function isCount(value: number): boolean {
+  return Number.isFinite(value) && value >= 0
+}
+
+function total(samples: readonly Sample[]): number {
+  return samples.reduce((sum, sample) => sum + sample.value, 0)
+}
+
+/**
+ * The collector's HTTP request counts, without the canary route's. The three authenticated receivers export no
+ * `http_route` and no `server_port`, so their series cannot be told apart by group; the canary's series carries both.
+ */
+function ingestRequests(samples: readonly Sample[]): Sample[] {
+  return samples.filter(sample => sample.name === HTTP_REQUESTS && sample.labels.http_route !== CANARY_ROUTE)
+}
+
+/**
+ * Counts for the operator: spans accepted and refused per group, and requests per status code. Absent series are
+ * zero, as everywhere in this file (the caller has already shown the page is the collector's). A value that is
+ * not a count makes the whole block `null`: a figure that cannot be believed is not shown.
+ */
+export function evaluateIngestCounts(samples: readonly Sample[]): IngestCounts | null {
+  const groups: IngestCounts['groups'] = {}
+  for (const group of GROUPS) {
+    const receiver = `otlp/${group}`
+    const accepted = matching(samples, 'otelcol_receiver_accepted_spans', {receiver})
+    const refused = matching(samples, 'otelcol_receiver_refused_spans', {receiver})
+    if (![...accepted, ...refused].every(sample => isCount(sample.value))) return null
+    groups[group] = {acceptedSpans: total(accepted), refusedSpans: total(refused)}
+  }
+
+  const requests: Record<string, number> = {}
+  for (const sample of ingestRequests(samples)) {
+    if (!isCount(sample.value)) return null
+    const status = sample.labels.http_response_status_code
+    if (status !== undefined) requests[status] = (requests[status] ?? 0) + sample.value
+  }
+  return {groups, requests, note: INGEST_NOTE}
+}
+
+/** True when any OTLP receiver has accepted or refused a span, so the collector has served requests. */
+function hasServedSpans(samples: readonly Sample[]): boolean {
+  return ['otelcol_receiver_accepted_spans', 'otelcol_receiver_refused_spans'].some(metric =>
+    matching(samples, metric).some(sample => sample.labels.receiver?.startsWith('otlp/') === true && sample.value > 0),
+  )
+}
+
+/**
+ * Only a 503 fails: it means a queue is full and the collector is shedding data. A 429 is the byte limiter doing
+ * its job and passes. The receivers' own `refused_spans` counter rises for both, so it cannot tell them apart;
+ * the HTTP request count by status code can.
+ *
+ * A counter that was never incremented is not exported, so an absent 503 series is zero. That is believed only
+ * while the request metric is exported at all: spans served and no request series anywhere (the canary's own
+ * included) means a renamed or switched-off metric, and the check is `unknown` rather than a pass. A collector that has served nothing has
+ * nothing to report, so it passes.
+ */
+function evaluateUnavailable(
+  samples: readonly Sample[],
+  state: CounterState,
+  nowMs: number,
+): {state: CounterState; result: CheckResult} {
+  const requests = ingestRequests(samples)
+  if (!requests.every(sample => isCount(sample.value))) {
+    return {state, result: result('collector-refused', 'unknown', `${HTTP_REQUESTS} is not a count`)}
+  }
+  // Presence is tested on the whole family, the canary's series included: they prove the metric is exported even
+  // when the canary is the only traffic (after a restart with ingest held or off). Only the 503 total and the
+  // displayed counts leave the canary out.
+  const exported = samples.some(sample => sample.name === HTTP_REQUESTS)
+  if (!exported && hasServedSpans(samples)) {
+    return {
+      state,
+      result: result('collector-refused', 'unknown', `spans were served but ${HTTP_REQUESTS} is not exported`),
+    }
+  }
+  const unavailable = total(requests.filter(sample => sample.labels.http_response_status_code === '503'))
+  const next = advanceCounter(state, 'http503:all', unavailable, nowMs).state
+  return {
+    state: next,
+    result:
+      recentlyRisen(next, 'http503:', nowMs).length > 0
+        ? result('collector-refused', 'fail', 'ingest answered 503 recently: an exporter queue was full')
+        : result('collector-refused', 'pass', 'no 503 answers on ingest'),
+  }
+}
+
 const COLLECTOR_SENTINEL = 'otelcol_process_uptime'
 
 function isCollectorPage(samples: readonly Sample[]): boolean {
@@ -410,14 +515,15 @@ export function evaluateQueues(samples: readonly Sample[]): CheckResult {
 }
 
 /**
- * Evaluate everything the collector's metrics say. Returns the results and the counter state for the next run.
- * A page that is not the collector's, or that lacks its sentinel, makes every metric check `unknown`.
+ * Evaluate everything the collector's metrics say. Returns the results, the counter state for the next run and the
+ * ingest counts for the detail. A page that is not the collector's, or that lacks its sentinel, makes every metric
+ * check `unknown` and carries no counts.
  */
 export function evaluateCollectorMetrics(
   text: string,
   state: CounterState,
   nowMs: number,
-): {results: CheckResult[]; state: CounterState} {
+): {results: CheckResult[]; state: CounterState; ingest: IngestCounts | null} {
   const samples = parsePrometheus(text)
   if (!isCollectorPage(samples)) {
     const why = 'collector metrics unreadable'
@@ -428,6 +534,7 @@ export function evaluateCollectorMetrics(
         result('collector-refused', 'unknown', why),
       ],
       state,
+      ingest: null,
     }
   }
 
@@ -438,15 +545,9 @@ export function evaluateCollectorMetrics(
     {id: 'enqueue', metric: 'otelcol_exporter_enqueue_failed_spans', label: 'exporter', values: EXPECTED_EXPORTERS},
     {id: 'send', metric: 'otelcol_exporter_send_failed_spans', label: 'exporter', values: EXPECTED_EXPORTERS},
   ]
-  const refusedSpec: CounterSpec = {
-    id: 'refused',
-    metric: 'otelcol_receiver_refused_spans',
-    label: 'receiver',
-    values: REFUSING_RECEIVERS.map(group => `otlp/${group}`),
-  }
 
   const invalid: string[] = []
-  for (const spec of [...failureSpecs, refusedSpec]) {
+  for (const spec of failureSpecs) {
     const read = readCounters(samples, spec, next, nowMs)
     next = read.state
     if (read.invalid !== undefined) invalid.push(read.invalid)
@@ -456,7 +557,9 @@ export function evaluateCollectorMetrics(
     ...recentlyRisen(next, 'enqueue:', nowMs).map(name => `${name} enqueue failed`),
     ...recentlyRisen(next, 'send:', nowMs).map(name => `${name} send failed`),
   ]
-  const refused = recentlyRisen(next, 'refused:', nowMs)
+
+  const unavailable = evaluateUnavailable(samples, next, nowMs)
+  next = unavailable.state
 
   return {
     results: [
@@ -466,13 +569,10 @@ export function evaluateCollectorMetrics(
         : failed.length > 0
           ? result('collector-failures', 'fail', `spans lost recently: ${failed.join(', ')}`)
           : result('collector-failures', 'pass', 'no enqueue or send failures'),
-      invalid.length > 0
-        ? result('collector-refused', 'unknown', invalid.join('; '))
-        : refused.length > 0
-          ? result('collector-refused', 'fail', `spans refused recently: ${refused.join(', ')}`)
-          : result('collector-refused', 'pass', 'no refused spans'),
+      unavailable.result,
     ],
     state: next,
+    ingest: evaluateIngestCounts(samples),
   }
 }
 
@@ -1285,6 +1385,8 @@ async function guarded(ids: readonly string[], run: () => Promise<CheckResult[]>
 export interface RunOutcome {
   verdict: Verdict
   counters: CounterState
+  /** The ingest counts from this run's scrape, or null when the scrape failed or could not be read. */
+  ingest: IngestCounts | null
 }
 
 /**
@@ -1300,7 +1402,7 @@ export function assembleVerdict(results: readonly CheckResult[], at: number): Ve
   return {ok: all.every(entry => entry.status === 'pass' || entry.status === 'warn'), at, checks: all}
 }
 
-const COLLECTOR_COUNTER_PREFIXES = ['enqueue:', 'send:', 'refused:'] as const
+const COLLECTOR_COUNTER_PREFIXES = ['enqueue:', 'send:', 'http503:'] as const
 const TEMPO_COUNTER_PREFIXES = ['discard:', 'truncate:'] as const
 
 function pick<T>(record: Record<string, T>, prefixes: readonly string[]): Record<string, T> {
@@ -1335,6 +1437,7 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
   const startedAt = deps.now()
   let collectorState = counters
   let tempoState = counters
+  let ingest: IngestCounts | null = null
 
   const [collector, tempo, langfuse, disk, ages, canary] = await Promise.all([
     guarded(['collector-health', 'collector-queues', 'collector-failures', 'collector-refused'], async () => {
@@ -1353,6 +1456,7 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
       }
       const evaluated = evaluateCollectorMetrics(metrics.value.text, counters, startedAt)
       collectorState = evaluated.state
+      ingest = evaluated.ingest
       return [health, ...evaluated.results]
     }),
     guarded(['tempo-ready', 'tempo-discards', 'tempo-truncation'], async () => {
@@ -1399,6 +1503,7 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
   return {
     verdict: assembleVerdict([...collector, ...tempo, ...langfuse, ...disk, ...ages, ...canary], deps.now()),
     counters: mergeCounters(counters, collectorState, tempoState),
+    ingest,
   }
 }
 
@@ -1429,6 +1534,7 @@ export interface Reporter {
 
 export function createReporter(deps: ReporterDeps): Reporter {
   let verdict: Verdict | undefined
+  let ingest: IngestCounts | null = null
   let counters = emptyCounterState()
   let running: Promise<void> | undefined
 
@@ -1441,6 +1547,7 @@ export function createReporter(deps: ReporterDeps): Reporter {
         const outcome = await bounded(() => runChecks(deps, counters), runLimit(deps))
         counters = outcome.counters
         verdict = outcome.verdict
+        ingest = outcome.ingest
       } catch (error) {
         // A run that dies leaves the old verdict to go stale; it never turns into a pass. A run that overran its
         // deadline publishes a failing verdict now, instead of letting the old one age out: its late result is
@@ -1450,6 +1557,7 @@ export function createReporter(deps: ReporterDeps): Reporter {
             [result('run-deadline', 'fail', `the run did not finish within ${Math.round(runLimit(deps) / 1000)} s`)],
             deps.now(),
           )
+          ingest = null
         }
       } finally {
         running = undefined
@@ -1477,6 +1585,7 @@ export function createReporter(deps: ReporterDeps): Reporter {
         ok: verdict?.ok === true && isFresh(),
         at: verdict === undefined ? null : new Date(verdict.at).toISOString(),
         checks: verdict?.checks ?? [],
+        ingest,
       }),
   }
 }

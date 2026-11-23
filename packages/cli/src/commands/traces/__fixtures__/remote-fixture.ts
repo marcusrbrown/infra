@@ -100,10 +100,22 @@ export interface CheckFixture {
   detail: string
 }
 
+/** The reporter's counts block as the host writes it. Whether it is present at all is the caller's choice. */
+export const INGEST_FIXTURE = {
+  groups: {
+    marcusrbrown: {acceptedSpans: 10, refusedSpans: 1},
+    'fro-bot': {acceptedSpans: 200, refusedSpans: 3},
+    workstation: {acceptedSpans: 0, refusedSpans: 0},
+  },
+  requests: {'200': 13, '401': 31, '429': 6},
+  note: 'Counters since collector start, not rates. The 401 total includes the monitor probe every 15 minutes.',
+} as const
+
 export function detailBody(
-  overrides: {ok?: boolean; stale?: boolean; ran?: boolean; checks?: CheckFixture[]} = {},
+  overrides: {ok?: boolean; stale?: boolean; ran?: boolean; checks?: CheckFixture[]; ingest?: unknown} = {},
 ): string {
   return JSON.stringify({
+    ...('ingest' in overrides ? {ingest: overrides.ingest} : {}),
     schemaVersion: 1,
     generatedAt: '2026-11-20T12:00:00.000Z',
     intervalMs: 300_000,

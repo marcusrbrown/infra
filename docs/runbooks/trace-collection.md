@@ -51,6 +51,15 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
 
    Success: every service `running` (and `healthy` where it has a check), `Health verdict: PASSING`, and `Status: OK` with exit code 0. On failure it prints `Status: DEGRADED`, exits 1 and lists each check that keeps the verdict from passing as `not passing: <check>: <detail>`. `Health verdict: UNKNOWN` means the reporter could not be reached or answered something unreadable. `--json` prints one object, `{ok, services, health}`.
 
+   Below the check table it prints two `Ingest` lines when the reporter sent counts: spans accepted and refused per group, then requests per HTTP status code. They are totals since the collector started, not rates (they reset when the collector restarts), and they hold no sender, token or trace content. `--json` carries the same block as `health.ingest`; `null` or missing means the reporter could not read the collector's metrics (the `collector-refused` check says so).
+
+   Reading the counts and `collector-refused`:
+
+   - **429** is the byte limiter working: a sender spent its 1 GiB allowance and is refilling at 32 KiB/s. It shows in `requests` (`429=<n>`) and in `refusedSpans`, and it does **not** fail the verdict, so it does not file `traces-unhealthy` or block `ingest open`.
+   - **503** fails `collector-refused` for 30 minutes after the count last rose. It means an exporter queue is full and the collector is shedding data: read `collector-queues`, then `traces logs collector`. The 503 count covers the three authenticated receivers together; it cannot say which group.
+   - **401** includes the public monitor's deliberate unauthenticated `POST` to `/workstation/v1/traces` every 15 minutes (about 96 a day) and deploy-gate probes, so a steady 401 count alone does not show a sender with a bad token.
+   - `refusedSpans` counts spans answered 429 or 503, so it can be above zero on a healthy stack.
+
 2. Read the public health path, which needs no SSH:
 
    ```bash

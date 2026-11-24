@@ -42,7 +42,7 @@ services:
       start_period: 30s
 
   db:
-    image: postgres:18-alpine@sha256:ff64c9e3bdf8e2120107d3559de8db314e8305f7e38c5105903c6295876738ff
+    image: postgres:18-alpine@sha256:0115267ab5a509022df9319c77be365cef335adb71556c75f60f5360ee247e71
     restart: unless-stopped
     # Postgres is reachable only on the internal compose network — port 5432 is
     # intentionally NOT published to the host. Caddy terminates TLS and proxies

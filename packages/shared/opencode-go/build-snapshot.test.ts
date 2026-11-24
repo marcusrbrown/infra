@@ -660,6 +660,18 @@ describe('a footnote for a live model with no Privacy row leaves the model out',
     expect(buildFrom(FOOTNOTE, [...live(), permissive]).snapshot.models['hungerg-free']).toBeUndefined()
   })
 
+  test('orphan text that names a model with a row fails the build, so that row keeps no stale zero retention', () => {
+    const line = `${FOOTNOTE} Kimi K3 requests are retained for 30 days.`
+    expect(entryOf('kimi-k3')?.zeroRetention).toBe(true)
+    expect(() => buildFrom(line, withHungerG())).toThrow(/prose names "Kimi K3"/)
+  })
+
+  test('orphan text that names a reviewed family label fails the build', () => {
+    expect(() => buildFrom(`${FOOTNOTE} The DeepSeek agreement ends soon.`, withHungerG())).toThrow(
+      /prose names "deepseek"/,
+    )
+  })
+
   test('the same label twice is reported once', () => {
     const result = buildFrom(`${FOOTNOTE}\n- **HungerG Free:** Free for a limited time.`, withHungerG())
     expect(result.unmatched).toEqual([{missing: 'footnote', id: 'hungerg-free', name: 'HungerG Free'}])

@@ -1133,4 +1133,28 @@ describe('parsePrivacyDocsWithOrphans reports a footnote whose whole label names
     )
     expect(() => parsePrivacyDocsWithOrphans(source)).toThrow(/availability sentence not attributed to a model/)
   })
+
+  test.each([
+    ['a row name', 'Kimi K3 requests are retained for 30 days.', 'Kimi K3'],
+    ['a row name in another case', 'KIMI K3 requests are retained for 30 days.', 'Kimi K3'],
+    ['a row name with a hyphen for a space', 'Kimi-K3 requests are retained for 30 days.', 'Kimi K3'],
+    ['a row name inside markup', 'Requests for **Kimi K3** are retained for 30 days.', 'Kimi K3'],
+    ['a family label', 'The current agreement for DeepSeek is valid through March 1, 2027.', 'deepseek'],
+    ['an API id that is a reviewed alias', 'deepseek-v4.1-flash is hosted in China.', 'DeepSeek V4.1 Flash'],
+  ])('orphan text that names a Privacy model (%s) throws, so no restriction is dropped', (_name, sentence, shown) => {
+    const source = withFootnote('HungerG Free', `${HUNGERG_TEXT} ${sentence}`)
+    expect(() => parsePrivacyDocsWithOrphans(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocsWithOrphans(source)).toThrow(`Privacy footnotes: prose names "${shown}"`)
+  })
+
+  test('the text is checked on its own: a model name in it throws even when the label is fine and the rest is benign', () => {
+    expect(() => parsePrivacyDocsWithOrphans(withFootnote('HungerG Free', 'Same terms as GLM-5.3.'))).toThrow(
+      /prose names "GLM-5.3"/,
+    )
+  })
+
+  test('a name that only contains a row name as part of another word does not throw', () => {
+    const {orphanFootnotes} = parsePrivacyDocsWithOrphans(withFootnote('HungerG Free', 'Tuned like Kimi K30 and Hy40.'))
+    expect(orphanFootnotes).toHaveLength(1)
+  })
 })

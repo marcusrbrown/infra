@@ -17,7 +17,7 @@
  * - A footnote label names a row by exact normalized name, a list of exact names, or a label in `LABEL_GROUPS`.
  *   Never by prefix or suffix. One exception: a Privacy footnote whose whole label is a single name that is no
  *   row and no reviewed group is an orphan footnote. `parsePrivacyDocsWithOrphans` returns it unread, and
- *   `buildSnapshot` accepts it only when the label exactly names a live model; `parsePrivacyDocs` throws on it.
+ *   `buildSnapshot` accepts it only when the label exactly names a live model; `parsePrivacyDocs` throws on it. Its text must name no Privacy model, so a restriction on a row cannot ride in it.
  * - The Usage limits section is read for region limits by paragraph, never by markup: a paragraph with an
  *   availability word must hold only the recognised "Not available in <places>." form and must name exactly one
  *   Privacy model. Pricing paragraphs churn weekly and are ignored.
@@ -382,12 +382,14 @@ function isOrphanLabel(label: string, accumulators: ReadonlyMap<string, Accumula
  * Apply the Privacy footnotes. Each sentence must be wholly one known sentence form, or the refresh throws; a
  * contradiction with the table throws too. A footnote whose whole label names no row is returned instead of read:
  * whether the label names a live model is for the join, which has the live list. Its sentences are not read, because
- * the model has no row for them to change.
+ * the model has no row for them to change. Its text must name no Privacy model, family label or alias, by the same
+ * check as any other prose: a sentence about a model that has a row would be dropped unread.
  */
 function applyFootnotes(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): OrphanFootnote[] {
   const orphans: OrphanFootnote[] = []
   for (const {label, text} of bulletsOf(lines, 'Privacy footnotes', 'every-line').bullets) {
     if (isOrphanLabel(label, accumulators)) {
+      assertProseNamesNoModel([text], 'Privacy footnotes', accumulators)
       orphans.push({label, text})
       continue
     }

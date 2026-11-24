@@ -15,7 +15,9 @@
  *   must match one known sentence form from the first character to the last; there is no "starts with" or "contains"
  *   branch, so a clause added to a known sentence is a new sentence and throws.
  * - A footnote label names a row by exact normalized name, a list of exact names, or a label in `LABEL_GROUPS`.
- *   Never by prefix or suffix.
+ *   Never by prefix or suffix. One exception: a Privacy footnote whose whole label is a single name that is no
+ *   row and no reviewed group is an orphan footnote. `parsePrivacyDocsWithOrphans` returns it unread, and
+ *   `buildSnapshot` accepts it only when the label exactly names a live model; `parsePrivacyDocs` throws on it. Its text must name no Privacy model, so a restriction on a row cannot ride in it.
  * - The Usage limits section is read for region limits by paragraph, never by markup: a paragraph with an
  *   availability word must hold only the recognised "Not available in <places>." form and must name exactly one
  *   Privacy model. Pricing paragraphs churn weekly and are ignored.
@@ -33,6 +35,20 @@ export class PrivacyTableError extends Error {
     super(message)
     this.name = 'PrivacyTableError'
   }
+}
+
+/** A Privacy footnote whose whole label names no row and no reviewed group. Returned unread: it changes no row. */
+export interface OrphanFootnote {
+  /** The label as the page writes it. */
+  label: string
+  /** The text after the label, as the page writes it. */
+  text: string
+}
+
+/** What the page says: one record per Privacy row, and the footnotes that name no row. */
+export interface ParsedPrivacyDocs {
+  rows: DocsPrivacyRow[]
+  orphanFootnotes: OrphanFootnote[]
 }
 
 interface Table {
@@ -215,6 +231,15 @@ function resolveToken(token: string, accumulators: ReadonlyMap<string, Accumulat
   })
 }
 
+/** The error for a label that names no model. One text for every path, so a failure reads the same wherever it is found. */
+export const notAModel = (label: string): string => `${quoted(label)} does not name a model in the Privacy table`
+
+/** The names in "A / B" and "A and B"; a label that is neither has one part, itself. */
+const labelParts = (label: string): string[] =>
+  normalizeName(label)
+    .split('/')
+    .flatMap(piece => piece.split(' and '))
+
 /**
  * Resolve a footnote or bullet label to the rows it names: the whole label as an exact name or reviewed group, or
  * each part of "A / B" and "A and B" as one. Anything else throws. This module never matches by prefix or suffix.
@@ -223,13 +248,11 @@ function resolveLabel(label: string, accumulators: ReadonlyMap<string, Accumulat
   const whole = resolveToken(normalizeName(label), accumulators)
   if (whole !== undefined) return whole
   const resolved = new Set<Accumulator>()
-  for (const part of normalizeName(label)
-    .split('/')
-    .flatMap(piece => piece.split(' and '))) {
+  for (const part of labelParts(label)) {
     const token = normalizeName(part)
     const found = token === '' ? undefined : resolveToken(token, accumulators)
     if (found === undefined) {
-      throw new PrivacyTableError(`${quoted(label)} does not name a model in the Privacy table`)
+      throw new PrivacyTableError(notAModel(label))
     }
     for (const target of found) resolved.add(target)
   }
@@ -346,11 +369,30 @@ const HOSTED_SENTENCE = new RegExp(String.raw`^Hosted in ${NAME}(?: and ${NAME})
 const EXPIRY_SENTENCE = /^The current agreement is valid through ([A-Z]+ \d{1,2}, \d{4})\.$/i
 
 /**
- * Apply the Privacy footnotes. Each sentence must be wholly one known sentence form, or the refresh throws; a
- * contradiction with the table throws too.
+ * True when a footnote label is a single name that is no row and no reviewed group: the one case that is not an
+ * immediate error. A list ("A / B", "A and B") never qualifies, so a list with one bad name throws, and so does a
+ * label that normalizes to nothing.
  */
-function applyFootnotes(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): void {
+function isOrphanLabel(label: string, accumulators: ReadonlyMap<string, Accumulator>): boolean {
+  const name = normalizeName(label)
+  return name !== '' && labelParts(label).length === 1 && resolveToken(name, accumulators) === undefined
+}
+
+/**
+ * Apply the Privacy footnotes. Each sentence must be wholly one known sentence form, or the refresh throws; a
+ * contradiction with the table throws too. A footnote whose whole label names no row is returned instead of read:
+ * whether the label names a live model is for the join, which has the live list. Its sentences are not read, because
+ * the model has no row for them to change. Its text must name no Privacy model, family label or alias, by the same
+ * check as any other prose: a sentence about a model that has a row would be dropped unread.
+ */
+function applyFootnotes(lines: readonly string[], accumulators: ReadonlyMap<string, Accumulator>): OrphanFootnote[] {
+  const orphans: OrphanFootnote[] = []
   for (const {label, text} of bulletsOf(lines, 'Privacy footnotes', 'every-line').bullets) {
+    if (isOrphanLabel(label, accumulators)) {
+      assertProseNamesNoModel([text], 'Privacy footnotes', accumulators)
+      orphans.push({label, text})
+      continue
+    }
     const targets = resolveLabel(label, accumulators)
     const sentences = stripLinks(text)
       .split(/(?<=\.)\s+/)
@@ -390,6 +432,7 @@ function applyFootnotes(lines: readonly string[], accumulators: ReadonlyMap<stri
       }
     }
   }
+  return orphans
 }
 
 /** The "Enable restricted models" bullets: the Global-region requirement, and which models opt in to training. */
@@ -573,10 +616,12 @@ function applyUsageNotices(lines: readonly string[], accumulators: ReadonlyMap<s
 }
 
 /**
- * Parse `go.mdx` into one record per Privacy row, in page order. Throws `PrivacyTableError` on anything it
- * cannot map.
+ * Parse `go.mdx` into one record per Privacy row, in page order, and the footnotes that name no row. Throws
+ * `PrivacyTableError` on anything else it cannot map. Pure: the caller must check each orphan footnote against the
+ * live models (`buildSnapshot` does, from `options.orphanFootnotes`), because only the live list can tell a model
+ * the page footnotes without a row from a typo.
  */
-export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
+export function parsePrivacyDocsWithOrphans(mdx: string): ParsedPrivacyDocs {
   const lines = mdx.split('\n')
   const privacy = sectionLines(lines, '## Privacy')
   const {table, start, end} = readTable(privacy, 'Privacy', PRIVACY_COLUMNS)
@@ -595,10 +640,10 @@ export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
   // The lines in front of the table are not a footnote or a rule, so nothing else reads them.
   assertProseNamesNoModel(privacy.slice(0, start), 'Privacy', accumulators)
   applyRestrictedModels(lines, accumulators)
-  applyFootnotes(privacy.slice(end), accumulators)
+  const orphanFootnotes = applyFootnotes(privacy.slice(end), accumulators)
   applyUsageNotices(lines, accumulators)
 
-  return [...accumulators.values()].map(
+  const rows = [...accumulators.values()].map(
     ({row, trainingGranted, regionRequirement, availabilityLimited, agreementExpiry}) => {
       // `*` is the zero-retention agreement marker; without its expiry footnote the agreement date is unknown.
       if (row.marker && agreementExpiry === null) {
@@ -616,4 +661,16 @@ export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
       }
     },
   )
+  return {rows, orphanFootnotes}
+}
+
+/**
+ * The strict reader: one record per Privacy row, and a throw on any footnote that names no row. Use it when there
+ * is no live list to check a footnote label against.
+ */
+export function parsePrivacyDocs(mdx: string): DocsPrivacyRow[] {
+  const {rows, orphanFootnotes} = parsePrivacyDocsWithOrphans(mdx)
+  const [orphan] = orphanFootnotes
+  if (orphan !== undefined) throw new PrivacyTableError(notAModel(orphan.label))
+  return rows
 }

@@ -3,7 +3,7 @@ import {readFileSync} from 'node:fs'
 
 import {describe, expect, test} from 'bun:test'
 
-import {parsePrivacyDocs, PrivacyTableError} from './parse-privacy-table'
+import {parsePrivacyDocs, parsePrivacyDocsWithOrphans, PrivacyTableError} from './parse-privacy-table'
 
 const readFixture = (name: string) => readFileSync(new URL(`__fixtures__/${name}`, import.meta.url), 'utf8')
 
@@ -1056,5 +1056,105 @@ describe('parsePrivacyDocs resolves a family mapping only where the page uses it
       () => '**Deepseek:** Not available in Angola.\n\n**Gemini 4 Argon:**',
     )
     expect(() => parsePrivacyDocs(used)).toThrow(/ambiguous/)
+  })
+})
+
+describe('parsePrivacyDocsWithOrphans reports a footnote whose whole label names no row', () => {
+  // The two HungerG Free lines upstream published: a usage notice and a footnote, with no Privacy row.
+  const HUNGERG_TEXT =
+    'Free for a limited time. No data training: your prompts and completions are not used to train models.'
+  const HUNGERG_NOTICE = '**HungerG Free:** Free for a limited time.'
+  const withFootnote = (label: string, text: string): string =>
+    mutate('- **Grok 4.7:**', `- **${label}:** ${text}\n- **Grok 4.7:**`)
+  const withHungerG = (): string =>
+    withFootnote('HungerG Free', HUNGERG_TEXT).replace(
+      '**Gemini 4 Argon:** The 50%',
+      () => `${HUNGERG_NOTICE}\n\n**Gemini 4 Argon:** The 50%`,
+    )
+
+  test('on the pinned page it returns the same rows as parsePrivacyDocs and no orphans', () => {
+    const {rows, orphanFootnotes} = parsePrivacyDocsWithOrphans(mdx)
+    expect(rows).toEqual(parsePrivacyDocs(mdx))
+    expect(orphanFootnotes).toEqual([])
+  })
+
+  test('the label and text come back, the rows are unchanged, and the usage notice adds nothing', () => {
+    const source = withHungerG()
+    expect(source).toContain(HUNGERG_NOTICE)
+    const {rows, orphanFootnotes} = parsePrivacyDocsWithOrphans(source)
+    expect(orphanFootnotes).toEqual([{label: 'HungerG Free', text: HUNGERG_TEXT}])
+    expect(rows).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test('parsePrivacyDocs, with no live list to check against, still throws on the same page', () => {
+    expect(() => parsePrivacyDocs(withHungerG())).toThrow('"HungerG Free" does not name a model in the Privacy table')
+  })
+
+  test('an orphan footnote is never read as a rule: its sentences change no row, whatever they say', () => {
+    const {rows, orphanFootnotes} = parsePrivacyDocsWithOrphans(
+      withFootnote(
+        'HungerG Free',
+        'Requests are retained for 12 days. Hosted in China. A sentence nobody has reviewed. The current agreement is valid through March 1, 2027.',
+      ),
+    )
+    expect(orphanFootnotes).toHaveLength(1)
+    expect(rows).toEqual(parsePrivacyDocs(mdx))
+  })
+
+  test.each([
+    ['a row and a name with no row, joined by a slash', 'GPT 6 Luna / HungerG Free'],
+    ['a name with no row and a row, joined by "and"', 'HungerG Free and GPT 6 Luna'],
+    ['two names with no row, joined by a slash', 'HungerG Free / Other Free'],
+    ['two names with no row, joined by "and"', 'HungerG Free and Other Free'],
+  ])('a partial label (%s) still throws', (_name, label) => {
+    expect(() => parsePrivacyDocsWithOrphans(withFootnote(label, 'Hosted in China.'))).toThrow(
+      `"${label}" does not name a model in the Privacy table`,
+    )
+  })
+
+  test('a label that normalizes to nothing still throws', () => {
+    expect(() => parsePrivacyDocsWithOrphans(withFootnote(' ', 'Hosted in China.'))).toThrow(PrivacyTableError)
+  })
+
+  test('the restricted-models bullets still throw for a name with no row', () => {
+    const source = mutate(
+      '- **LongCat 2.5 Free:** select',
+      '- **HungerG Free:** select **Global** under **Regions**.\n- **LongCat 2.5 Free:** select',
+    )
+    expect(() => parsePrivacyDocsWithOrphans(source)).toThrow(
+      '"HungerG Free" does not name a model in the Privacy table',
+    )
+  })
+
+  test('a usage notice that restricts a name with no row still throws', () => {
+    const source = mutate(
+      '**Gemini 4 Argon:** The 50%',
+      '**HungerG Free:** Not available in Angola.\n\n**Gemini 4 Argon:** The 50%',
+    )
+    expect(() => parsePrivacyDocsWithOrphans(source)).toThrow(/availability sentence not attributed to a model/)
+  })
+
+  test.each([
+    ['a row name', 'Kimi K3 requests are retained for 30 days.', 'Kimi K3'],
+    ['a row name in another case', 'KIMI K3 requests are retained for 30 days.', 'Kimi K3'],
+    ['a row name with a hyphen for a space', 'Kimi-K3 requests are retained for 30 days.', 'Kimi K3'],
+    ['a row name inside markup', 'Requests for **Kimi K3** are retained for 30 days.', 'Kimi K3'],
+    ['a family label', 'The current agreement for DeepSeek is valid through March 1, 2027.', 'deepseek'],
+    ['an API id that is a reviewed alias', 'deepseek-v4.1-flash is hosted in China.', 'DeepSeek V4.1 Flash'],
+  ])('orphan text that names a Privacy model (%s) throws, so no restriction is dropped', (_name, sentence, shown) => {
+    const source = withFootnote('HungerG Free', `${HUNGERG_TEXT} ${sentence}`)
+    expect(() => parsePrivacyDocsWithOrphans(source)).toThrow(PrivacyTableError)
+    expect(() => parsePrivacyDocsWithOrphans(source)).toThrow(`Privacy footnotes: prose names "${shown}"`)
+  })
+
+  test('the text is checked on its own: a model name in it throws even when the label is fine and the rest is benign', () => {
+    expect(() => parsePrivacyDocsWithOrphans(withFootnote('HungerG Free', 'Same terms as GLM-5.3.'))).toThrow(
+      /prose names "GLM-5.3"/,
+    )
+  })
+
+  test('a name that only contains a row name as part of another word does not throw', () => {
+    const {orphanFootnotes} = parsePrivacyDocsWithOrphans(withFootnote('HungerG Free', 'Tuned like Kimi K30 and Hy40.'))
+    expect(orphanFootnotes).toHaveLength(1)
   })
 })

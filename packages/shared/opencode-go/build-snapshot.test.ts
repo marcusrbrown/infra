@@ -13,7 +13,7 @@ import {
 } from './build-snapshot'
 import {computeEligibility, parseSnapshot} from './eligibility'
 import {parseLiveModels, type LiveModel} from './live-models'
-import {parsePrivacyDocs, PrivacyTableError} from './parse-privacy-table'
+import {parsePrivacyDocs, parsePrivacyDocsWithOrphans, PrivacyTableError} from './parse-privacy-table'
 
 const FIXTURE_COMMIT = '011f9043e8a90dc9a1ac42fb1181486dd4d13b71'
 
@@ -549,5 +549,152 @@ describe('buildSnapshot on live models upstream published no privacy fields for'
     const line = describeUnmatched({missing: 'privacy', id: 'x', name: '# A\n`b` |c|'})
     expect(line).not.toMatch(/\n/)
     expect(line).toContain('named `# A b |c|`')
+  })
+})
+
+describe('a footnote for a live model with no Privacy row leaves the model out', () => {
+  // The footnote upstream published for a model it gave no Privacy row. The API lists it as `hungerg-free`.
+  const FOOTNOTE =
+    '- **HungerG Free:** Free for a limited time. No data training: your prompts and completions are not used to train models.'
+  const HUNGERG: LiveModel = {
+    id: 'hungerg-free',
+    name: 'HungerG Free',
+    training: false,
+    zdr: true,
+    limitedRegions: false,
+  }
+  const expected = JSON.parse(readFixture('go.expected.json')) as ReturnType<typeof build>['snapshot']
+
+  const mdxWith = (line: string): string => {
+    const source = readFixture('go.mdx')
+    return source.replace('- **Grok 4.7:**', () => `${line}\n- **Grok 4.7:**`)
+  }
+  /** Parse with the orphan-tolerant reader and join, as the refresh does. */
+  const buildFrom = (line: string, models: LiveModel[], options: Parameters<typeof buildSnapshot>[3] = {}) => {
+    const {rows, orphanFootnotes} = parsePrivacyDocsWithOrphans(mdxWith(line))
+    return buildSnapshot(rows, models, FIXTURE_COMMIT, {...options, orphanFootnotes})
+  }
+  const withHungerG = (): LiveModel[] => [...live(), HUNGERG]
+
+  test('the model is reported with its reason, has no entry, and every other entry is unchanged', () => {
+    const result = buildFrom(FOOTNOTE, withHungerG())
+    expect(result.snapshot).toEqual(expected)
+    expect(result.snapshot.models['hungerg-free']).toBeUndefined()
+    expect(result.disagreements).toEqual([])
+    expect(result.unmatched).toEqual([{missing: 'footnote', id: 'hungerg-free', name: 'HungerG Free'}])
+    expect(describeUnmatched(result.unmatched[0] as Unmatched)).toBe(
+      'live model `hungerg-free` named `HungerG Free`: footnote only, no Privacy row, so it has no entry',
+    )
+  })
+
+  test('eligibility leaves it excluded as not in the snapshot, and nothing else becomes eligible', () => {
+    const ids = withHungerG().map(model => model.id)
+    const result = computeEligibility(parseSnapshot(buildFrom(FOOTNOTE, withHungerG()).snapshot), ids, '2026-11-19')
+    const baseline = computeEligibility(
+      parseSnapshot(build().snapshot),
+      live().map(model => model.id),
+      '2026-11-19',
+    )
+    expect(result.excluded).toContainEqual({id: 'hungerg-free', reason: 'not-in-snapshot'})
+    expect(result.eligible).toEqual(baseline.eligible)
+  })
+
+  test('the label is matched by the join’s own name normalization', () => {
+    const result = buildFrom('- **hungerg  FREE:** Free for a limited time.', withHungerG())
+    expect(result.unmatched).toEqual([{missing: 'footnote', id: 'hungerg-free', name: 'HungerG Free'}])
+  })
+
+  test('the join’s reviewed alias map names a model too, and without the alias the label fails', () => {
+    const line = '- **HungerG:** Free for a limited time.'
+    const aliases = {...DOCS_NAME_ALIASES, hungerg: 'hungerg-free'}
+    expect(buildFrom(line, withHungerG(), {aliases}).unmatched).toEqual([
+      {missing: 'footnote', id: 'hungerg-free', name: 'HungerG Free'},
+    ])
+    expect(() => buildFrom(line, withHungerG())).toThrow('"HungerG" does not name a model in the Privacy table')
+  })
+
+  test('the model is absent from the live list: the build throws as it did before', () => {
+    expect(() => buildFrom(FOOTNOTE, live())).toThrow(PrivacyTableError)
+    expect(() => buildFrom(FOOTNOTE, live())).toThrow('"HungerG Free" does not name a model in the Privacy table')
+  })
+
+  test('a misspelled label for an existing row throws', () => {
+    expect(() => buildFrom('- **GLM-5.3x:** Hosted in China.', withHungerG())).toThrow(
+      '"GLM-5.3x" does not name a model in the Privacy table',
+    )
+  })
+
+  test('a label for a model that has a row, written so the parser cannot resolve it, throws: its rules would be lost', () => {
+    // "GLM 5.3" is the live model glm-5.3, which has the row "GLM-5.3". Skipping the footnote would drop its terms.
+    expect(() => buildFrom('- **GLM 5.3:** Requests are retained for 30 days.', withHungerG())).toThrow(
+      '"GLM 5.3" does not name a model in the Privacy table',
+    )
+  })
+
+  test.each([
+    ['a row and a live model with no row', 'GPT 6 Luna / HungerG Free'],
+    ['a live model with no row and a row', 'HungerG Free and GPT 6 Luna'],
+    ['two live models with no row', 'HungerG Free / Beam Free Plus'],
+  ])('a partial label (%s) throws even when every name in it is live', (_name, label) => {
+    const models = [...live(), HUNGERG, {...HUNGERG, id: 'beam-free-plus', name: 'Beam Free Plus'}]
+    expect(() => buildFrom(`- **${label}:** Free for a limited time.`, models)).toThrow(
+      `"${label}" does not name a model in the Privacy table`,
+    )
+  })
+
+  test.each([
+    [
+      'training allowed',
+      '- **HungerG Free:** Free for a limited time in exchange for permission to use your prompts and completions to improve the model.',
+    ],
+    ['retained for 30 days', '- **HungerG Free:** Requests are retained for 30 days.'],
+    ['region-limited', '- **HungerG Free:** Availability is limited to regions permitted by Meta.'],
+  ])('a restrictive orphan footnote (%s) leaves the model out and clears nothing', (_name, line) => {
+    const result = buildFrom(line, withHungerG())
+    expect(result.snapshot).toEqual(expected)
+    expect(result.unmatched).toEqual([{missing: 'footnote', id: 'hungerg-free', name: 'HungerG Free'}])
+  })
+
+  test('a footnote can never add the model: the entry stays absent whatever the API says about it', () => {
+    const permissive = {...HUNGERG, training: false, zdr: true, limitedRegions: false}
+    expect(buildFrom(FOOTNOTE, [...live(), permissive]).snapshot.models['hungerg-free']).toBeUndefined()
+  })
+
+  test('orphan text that names a model with a row fails the build, so that row keeps no stale zero retention', () => {
+    const line = `${FOOTNOTE} Kimi K3 requests are retained for 30 days.`
+    expect(entryOf('kimi-k3')?.zeroRetention).toBe(true)
+    expect(() => buildFrom(line, withHungerG())).toThrow(/prose names "Kimi K3"/)
+  })
+
+  test('orphan text that names a reviewed family label fails the build', () => {
+    expect(() => buildFrom(`${FOOTNOTE} The DeepSeek agreement ends soon.`, withHungerG())).toThrow(
+      /prose names "deepseek"/,
+    )
+  })
+
+  test('the same label twice is reported once', () => {
+    const result = buildFrom(`${FOOTNOTE}\n- **HungerG Free:** Free for a limited time.`, withHungerG())
+    expect(result.unmatched).toEqual([{missing: 'footnote', id: 'hungerg-free', name: 'HungerG Free'}])
+  })
+
+  test('a live entry with no privacy fields is reported once, as having none', () => {
+    const result = buildFrom(FOOTNOTE, live(), {noPrivacy: [{id: 'hungerg-free', name: 'HungerG Free'}]})
+    expect(result.unmatched).toEqual([{missing: 'privacy', id: 'hungerg-free', name: 'HungerG Free'}])
+    expect(result.snapshot).toEqual(expected)
+  })
+
+  test('the orphan list is checked even when it is the only thing wrong with a join that otherwise pairs', () => {
+    const {rows} = parsePrivacyDocsWithOrphans(mdxWith(FOOTNOTE))
+    expect(() => buildSnapshot(rows, live(), FIXTURE_COMMIT, {orphanFootnotes: [{label: 'Nope', text: 'x'}]})).toThrow(
+      '"Nope" does not name a model in the Privacy table',
+    )
+  })
+
+  test('a line rendered for a hostile label stays one bounded plain line', () => {
+    const nasty = '# Heading\n- item |x| `code` [link](https://example.com) <b>bold</b>'
+    const line = describeUnmatched({missing: 'footnote', id: 'brand-new', name: nasty})
+    expect(line).not.toMatch(/[\n\r]/)
+    expect(line.startsWith('live model `brand-new` named `# Heading - item |x| code [link]')).toBe(true)
+    expect(line.split('`').length % 2).toBe(1)
   })
 })

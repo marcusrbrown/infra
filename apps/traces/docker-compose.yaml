@@ -207,7 +207,7 @@ services:
   minio:
     # Chainguard publishes only the `latest` tag of this image without a subscription; the digest is
     # the real pin.
-    image: cgr.dev/chainguard/minio:latest@sha256:e9cf6b99c226e9539ed0f14b6f00e37b07da153c7ba1f4f8709c807574b471ec
+    image: cgr.dev/chainguard/minio:latest@sha256:9f0aab4471ebb181be3cfabea21b719303ec583cd9abdb7779f9e53032b844f7
     restart: unless-stopped
     entrypoint: sh
     # Create the 'langfuse' bucket before starting the service. The console is not served.

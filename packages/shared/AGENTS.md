@@ -1,6 +1,6 @@
 # Shared Ops Helpers
 
-Shared TypeScript utilities for DigitalOcean droplet provisioning, CLIProxyAPI management-API requests, OpenCode Go exposure policy, documentation validation, and public status history. Used by `apps/cliproxy`, `apps/gateway`, `apps/broker`, `apps/vpn`, `apps/umami`, `apps/dashboard`, `apps/docs`, and `packages/cli`.
+Shared TypeScript utilities for DigitalOcean droplet provisioning, CLIProxyAPI management-API requests, OpenCode Go exposure policy, documentation validation, and public status history. Used by `apps/cliproxy`, `apps/gateway`, `apps/broker`, `apps/vpn`, `apps/umami`, `apps/dashboard`, `apps/traces`, `apps/docs`, and `packages/cli`.
 
 ## CONTENTS
 

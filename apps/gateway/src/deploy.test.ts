@@ -2750,8 +2750,8 @@ describe('buildGatewayEnvFileContents', () => {
       config: '{"provider":{"anthropic":{"options":{"baseURL":"https://cliproxy.fro.bot/v1"}}}}',
     })
     // Must contain exactly this line so mitmproxy allows the workspace to reach cliproxy
-    // and the OpenCode model catalog (models.dev for V1, models.opencode.ai for V2) — without the
-    // catalog host OpenCode cannot start
+    // and both OpenCode model-catalog hosts. The V2 server fetches neither, but a rollback to a
+    // release that still ships V1 needs them.
     expect(result.split('\n')).toContain('WORKSPACE_EGRESS_HOSTS=cliproxy.fro.bot,models.dev,models.opencode.ai')
   })
 })

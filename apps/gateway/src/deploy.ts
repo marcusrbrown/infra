@@ -223,7 +223,8 @@ const ENV_PATH = `${DEPLOY_DIR}/.env`
 const DEFAULT_REMOTE_USER = 'root'
 export const CLIPROXY_EGRESS_HOST = 'cliproxy.fro.bot'
 // OpenCode fetches its model catalog at startup; the sandboxed workspace reaches it through the mitmproxy egress allowlist.
-// V1 uses models.dev, V2 uses models.opencode.ai. Keep both so a V1 rollback keeps working.
+// The V2 server sets OPENCODE_DISABLE_MODELS_FETCH, so it fetches neither host. Both stay allowlisted so a
+// rollback to a release that still ships V1 (fro-bot/agent v0.138.0 or older) keeps working.
 export const OPENCODE_CATALOG_HOSTS = ['models.dev', 'models.opencode.ai'] as const
 // Mirrors upstream's default (packages/gateway/src/bindings/backfill-runner.ts:
 // `process.env.S3_PREFIX ?? 'fro-bot-state'`). The deploy does not otherwise reference
@@ -368,29 +369,53 @@ const MODEL_ALLOWLIST_RE = /^[\w.-]+\/[\w.-]+$/
  * OpenCode evaluates bash patterns with last-matching-rule-wins, so the `"*"`
  * catch-all is listed first and destructive patterns follow. `"ask"` routes a
  * command through the Discord Approve/Deny gate; `"allow"` runs it autonomously.
- * This is a human-in-the-loop tripwire layered on top of the container and
- * mitmproxy egress boundary — not a hard sandbox.
+ *
+ * Each pattern is matched against the raw text of one simple command. Wrappers
+ * bypass it (`sh -c`, `env`, `xargs`, `/bin/rm`, quoting), so this is a
+ * human-in-the-loop tripwire layered on top of the container and mitmproxy
+ * egress boundary, not a sandbox. `mv` is deliberately not listed: every rename
+ * would ask.
+ *
+ * `permission-policy.test.ts` checks every pattern against a vendored copy of
+ * the OpenCode matcher.
  */
 export const WORKSPACE_PERMISSION_POLICY = Object.freeze({
   external_directory: 'allow',
   doom_loop: 'allow',
   bash: Object.freeze({
     '*': 'allow',
+    // File and disk destruction
     'rm *': 'ask',
     'rmdir *': 'ask',
+    'truncate *': 'ask',
+    'dd *': 'ask',
+    'find *-delete*': 'ask',
+    // Git history and remote destruction. A short flag must start a word (`-f*` after a space), or
+    // `git push origin fix-fast` asks.
     'git push *--force*': 'ask',
-    'git push *-f*': 'ask',
+    'git push -f*': 'ask',
+    'git push * -f*': 'ask',
     'git push +*': 'ask',
+    'git push *--delete*': 'ask',
+    'git push * :*': 'ask',
+    'git branch *-D *': 'ask',
     'git reset --hard*': 'ask',
     'git clean *-f*': 'ask',
+    // Privilege and ownership
     'sudo *': 'ask',
     'chmod *': 'ask',
     'chown *': 'ask',
+    // Network writes. `-dBODY` and `-TFILE` are valid curl, so the short flags match with or without a space.
     'curl *-X POST*': 'ask',
-    'curl *-d *': 'ask',
-    'curl *-T *': 'ask',
+    'curl -d*': 'ask',
+    'curl * -d*': 'ask',
+    'curl *--data*': 'ask',
+    'curl -T*': 'ask',
+    'curl * -T*': 'ask',
+    'curl *--upload-file*': 'ask',
     'wget *--post-data*': 'ask',
     'wget *--post-file*': 'ask',
+    // Package installs
     'apt install*': 'ask',
     'apt-get install*': 'ask',
     'pip install*': 'ask',

@@ -26,6 +26,7 @@
 import {createMcpAction} from '@goke/mcp'
 import {Client} from '@modelcontextprotocol/sdk/client'
 import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js'
+import {ErrorCode} from '@modelcontextprotocol/sdk/types.js'
 import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, test} from 'bun:test'
 import {goke} from 'goke'
 
@@ -181,6 +182,17 @@ describe('mcp integration (Tier-1, in-process)', () => {
       expect(names.has(excluded)).toBe(false)
     }
   })
+
+  test('every tool advertises the global --verbose option as an optional boolean', async () => {
+    const result = await client.listTools()
+    const toolsByName = new Map(result.tools.map(tool => [tool.name, tool]))
+    for (const name of EXPECTED_TOOLS) {
+      const tool = toolsByName.get(name)
+      expect(tool, `tool ${name} is listed`).toBeDefined()
+      expect(tool?.inputSchema.properties?.verbose, `tool ${name} advertises verbose`).toMatchObject({type: 'boolean'})
+      expect(tool?.inputSchema.required ?? [], `tool ${name} does not require verbose`).not.toContain('verbose')
+    }
+  })
 })
 
 // ─── cliproxy_models end-to-end call (Tier-1, in-process) ────────────────────
@@ -281,6 +293,25 @@ describe('cliproxy_models MCP tool (Tier-1, in-process call)', () => {
     expect(text).toContain('claude-opus-4')
     expect(text).toContain('claude-sonnet-4-5')
     expect(text).toContain('gpt-4o')
+  })
+
+  // `--verbose` is a plain (schema-less) boolean option. Like argv it takes only booleans and strings, and a string
+  // must read as true/false; anything else is rejected before the action runs.
+  test.each([
+    {label: 'a non-string/boolean value', value: {}, message: 'Invalid argument verbose'},
+    {label: 'an unparseable string', value: 'not-a-bool', message: 'Invalid value for --verbose'},
+  ])('rejects $label for verbose as InvalidParams before the action runs', async ({value, message}) => {
+    const fetchCalls: string[] = []
+    globalThis.fetch = createFetchImplementation(async url => {
+      fetchCalls.push(url)
+      throw new Error(`Unexpected fetch: ${url}`)
+    })
+
+    await expect(callClient.callTool({name: 'cliproxy_models', arguments: {verbose: value}})).rejects.toMatchObject({
+      code: ErrorCode.InvalidParams,
+      message: expect.stringContaining(message),
+    })
+    expect(fetchCalls).toEqual([])
   })
 })
 

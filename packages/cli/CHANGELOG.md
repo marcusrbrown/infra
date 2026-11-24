@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.30.3
+
+### Patch Changes
+
+- The MCP server now exposes the global `--verbose` option on every tool, coerces tool arguments the way the CLI parses flags, and rejects invalid values with an `InvalidParams` error. ([#2063](https://github.com/marcusrbrown/infra/pull/2063))
+
 ## 0.30.2
 
 ### Patch Changes

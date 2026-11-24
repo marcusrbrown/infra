@@ -161,6 +161,22 @@
       allowedVersions: '<18',
     },
     {
+      // ClickHouse holds Langfuse's trace data and the 30-day TTLs the deploy sets. It stays on the 26.3 LTS
+      // line that Langfuse pins upstream, on its own branch so it never rides along with a routine group.
+      description: ['Keep the trace stack ClickHouse on the 26.3 LTS line, on its own branch'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: ['clickhouse/clickhouse-server'],
+      groupName: null,
+      allowedVersions: '/^26\\.3\\./',
+    },
+    {
+      // Langfuse supports and tests Redis 7, and a Redis 7 server may not read data written by Redis 8.
+      description: ['Hold the trace stack Redis at major 7'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: ['redis'],
+      allowedVersions: '<8',
+    },
+    {
       // The object store is pinned as `latest@sha256:<digest>`: the tag is a moving label, and the digest is
       // the pin. Only a new digest may be proposed; Renovate must never rewrite the tag to a version.
       description: ['Update the trace stack object store by digest only'],
@@ -176,6 +192,13 @@
       matchFileNames: ['apps/traces/collector/Dockerfile'],
       matchManagers: ['dockerfile'],
       automerge: false,
+    },
+    {
+      // katex is a root override that clears an advisory in the version micromark-extension-math declares
+      // (^0.16). 0.18.x already has the fix; a newer minor only moves further from the declared range.
+      description: ['Hold the katex override on 0.18.x'],
+      matchPackageNames: ['katex'],
+      allowedVersions: '<0.19',
     },
   ],
   // Track the upstream daemon source pin (`ref`) in apps/gateway/upstream.json so new

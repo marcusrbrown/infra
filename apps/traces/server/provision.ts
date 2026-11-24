@@ -39,6 +39,8 @@ import {
   pinHostKeys,
   sleep,
   ssh,
+  SSH_CONTROL_PERSIST,
+  SSH_SCAN_PAUSE_MS,
   validateDoctl,
   waitForSsh,
 } from '@marcusrbrown/infra-shared/server/droplet-helpers'
@@ -68,18 +70,8 @@ export const VOLUME_SIZE = '100GiB'
 /** A new volume can be missing from `volume list` for a few seconds after `volume create` returns. */
 export const VOLUME_LIST_ATTEMPTS = 12
 export const VOLUME_LIST_INTERVAL_MS = 5000
-/**
- * The image ships `ufw limit 22/tcp`: the sixth connection from one source within 30 seconds is refused. A key
- * scan opens several connections (one per key type the local OpenSSH asks for), so the run waits this long before
- * each scan and again after the last one, before the first remote step opens the control master.
- */
-export const SSH_SCAN_PAUSE_MS = 35_000
-/**
- * How long the shared SSH master outlives its last client. The timer only runs while no step is using the
- * connection, so it covers the local gap between steps; a running step (mkfs on 100 GiB, a Docker restart)
- * holds the connection open. Same value as the traces deploy.
- */
-export const SSH_CONTROL_PERSIST = '120s'
+// The scan pause and control-master lifetime are the shared values in droplet-helpers.ts. Re-exported for tests.
+export {SSH_CONTROL_PERSIST, SSH_SCAN_PAUSE_MS}
 /** Where an operator reads what to do after a restore stops. Named in the errors that need it. */
 const RESTORE_RUNBOOK = 'docs/runbooks/trace-collection.md'
 export const FIREWALL_NAME = 'traces-fw'

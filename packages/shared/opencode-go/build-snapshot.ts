@@ -1,10 +1,10 @@
 import type {PrivacySnapshot} from './eligibility'
 import type {LiveModel, NoPrivacyModel} from './live-models'
-import type {DocsPrivacyRow} from './parse-privacy-table'
+import type {DocsPrivacyRow, OrphanFootnote} from './parse-privacy-table'
 
 import {parseSnapshot, SNAPSHOT_SCHEMA_VERSION, SNAPSHOT_SOURCE_PATH, SNAPSHOT_SOURCE_REPO} from './eligibility'
 import {DOCS_NAME_ALIASES, normalizeModelName, quoted, reportText} from './model-names'
-import {PrivacyTableError} from './parse-privacy-table'
+import {notAModel, PrivacyTableError} from './parse-privacy-table'
 
 export {DOCS_NAME_ALIASES, normalizeModelName}
 
@@ -20,6 +20,11 @@ export {DOCS_NAME_ALIASES, normalizeModelName}
  * for it would leave every other restriction stale. A join that is itself wrong (one name fitting several models,
  * two rows resolving to one model) throws `PrivacyTableError`, so the refresh stops instead of guessing. Both
  * inputs are passed in; this module does no I/O.
+ *
+ * A Privacy footnote can name a model the page gave no row (`options.orphanFootnotes`). The parser cannot tell such a
+ * model from a typo, because only the live list can, so the join does: a footnote label that exactly names a live
+ * model with no row leaves that model out and reports it; any other such label throws. The footnote is never read
+ * as evidence, so it can leave a model out and can never put one in.
  */
 
 export type SnapshotFact = 'zeroRetention' | 'trainsOnData' | 'regionGated'
@@ -43,10 +48,11 @@ export interface Disagreement {
 /** A model one source knows and the other does not. It has no snapshot entry. */
 export interface Unmatched {
   /**
-   * What is missing: `docs` is a live model with no Privacy row, `api` is a Privacy row with no live model, and
-   * `privacy` is a live model upstream published no `go` privacy fields for (whatever the page says about it).
+   * What is missing: `docs` is a live model with no Privacy row, `footnote` is such a model that a Privacy footnote
+   * names (a footnote with no row), `api` is a Privacy row with no live model, and `privacy` is a live model
+   * upstream published no `go` privacy fields for (whatever the page says about it).
    */
-  missing: 'docs' | 'api' | 'privacy'
+  missing: 'docs' | 'footnote' | 'api' | 'privacy'
   /** The live model id; null for a Privacy row, which has none. */
   id: string | null
   name: string
@@ -58,6 +64,7 @@ export function describeUnmatched(item: Unmatched): string {
   if (item.missing === 'privacy') {
     return `${live}: upstream published no privacy fields (\`go\`) for it, so it has no entry`
   }
+  if (item.missing === 'footnote') return `${live}: footnote only, no Privacy row, so it has no entry`
   return item.missing === 'docs'
     ? `${live}: no Privacy row on the page`
     : `Privacy row ${reportText(item.name)}: no live model`
@@ -101,12 +108,18 @@ interface LiveRef {
  * Pair each docs row with its live model. A row or model without a partner is reported, not paired, and a live model
  * with no privacy fields is reported and never paired; an ambiguous pairing throws. Models with no privacy fields
  * take part in the name join so they cannot hide an ambiguity, and so their docs row is not misreported.
+ *
+ * An orphan footnote label is matched the way a row name is (by normalized name, or by the reviewed alias map) and
+ * is accepted only when it names exactly one live model that no row claimed. A label for a claimed model is a
+ * footnote the parser could not resolve to its row, so its terms would be lost: that throws, as does any label that
+ * names no live model. An accepted label changes the report for its model (`footnote`), and nothing else.
  */
 function joinSources(
   docs: readonly DocsPrivacyRow[],
   live: readonly LiveModel[],
   noPrivacy: readonly NoPrivacyModel[],
   aliases: Readonly<Record<string, string>>,
+  orphanFootnotes: readonly OrphanFootnote[],
 ): Joined {
   const refs: LiveRef[] = [
     ...live.map(model => ({id: model.id, name: model.name, model})),
@@ -127,6 +140,16 @@ function joinSources(
   }
 
   const aliasById = new Map(Object.entries(aliases))
+  /** The live entries a normalized name stands for: the one that bears it, and the one a reviewed alias names. */
+  const candidatesFor = (key: string): Map<string, LiveRef> => {
+    const candidates = new Map<string, LiveRef>()
+    const named = refByName.get(key)
+    if (named !== undefined) candidates.set(named.id, named)
+    const aliasId = aliasById.get(key)
+    const aliased = aliasId === undefined ? undefined : refById.get(aliasId)
+    if (aliased !== undefined) candidates.set(aliased.id, aliased)
+    return candidates
+  }
   const matched: Joined['matched'] = new Map()
   const claimed = new Map<string, string>()
   const unmatched: Unmatched[] = []
@@ -136,13 +159,7 @@ function joinSources(
     if (docsKeys.has(key)) throw new PrivacyTableError(`join: duplicate Privacy row ${quoted(row.name)}`)
     docsKeys.add(key)
 
-    const candidates = new Map<string, LiveRef>()
-    const named = refByName.get(key)
-    if (named !== undefined) candidates.set(named.id, named)
-    const aliasId = aliasById.get(key)
-    const aliased = aliasId === undefined ? undefined : refById.get(aliasId)
-    if (aliased !== undefined) candidates.set(aliased.id, aliased)
-
+    const candidates = candidatesFor(key)
     if (candidates.size > 1) {
       throw new PrivacyTableError(
         `join: Privacy row ${quoted(row.name)} matches more than one live model (${[...candidates.keys()].sort().join(', ')})`,
@@ -164,11 +181,21 @@ function joinSources(
     if (ref.model !== null) matched.set(ref.id, {row, model: ref.model})
   }
 
+  const footnoted = new Set<string>()
+  for (const {label} of orphanFootnotes) {
+    const candidates = candidatesFor(normalizeModelName(label))
+    const [ref] = candidates.values()
+    if (candidates.size !== 1 || ref === undefined || claimed.has(ref.id)) throw new PrivacyTableError(notAModel(label))
+    footnoted.add(ref.id)
+  }
+
   for (const ref of refs) {
     if (ref.model === null) unmatched.push({missing: 'privacy', id: ref.id, name: ref.name})
   }
   for (const model of live) {
-    if (!claimed.has(model.id)) unmatched.push({missing: 'docs', id: model.id, name: model.name})
+    if (!claimed.has(model.id)) {
+      unmatched.push({missing: footnoted.has(model.id) ? 'footnote' : 'docs', id: model.id, name: model.name})
+    }
   }
   // A join that pairs nothing is a join that is wrong (a format change), not a quiet day.
   if (matched.size === 0) throw new PrivacyTableError('join: no docs row matches any live model')
@@ -178,13 +205,18 @@ function joinSources(
 /**
  * Join the docs rows to the live models and merge their facts. `sourceCommit` is the anomalyco/opencode commit the
  * page came from. `options.aliases` defaults to the reviewed {@link DOCS_NAME_ALIASES}; `options.noPrivacy` is the live
- * entries that carry no privacy fields (from `parseLiveModels`), which get no entry.
+ * entries that carry no privacy fields (from `parseLiveModels`), which get no entry; `options.orphanFootnotes` is the
+ * footnotes the parser found for no row (from `parsePrivacyDocsWithOrphans`), each of which must name a live model.
  */
 export function buildSnapshot(
   docs: readonly DocsPrivacyRow[],
   live: readonly LiveModel[],
   sourceCommit: string,
-  options: {aliases?: Readonly<Record<string, string>>; noPrivacy?: readonly NoPrivacyModel[]} = {},
+  options: {
+    aliases?: Readonly<Record<string, string>>
+    noPrivacy?: readonly NoPrivacyModel[]
+    orphanFootnotes?: readonly OrphanFootnote[]
+  } = {},
 ): BuiltSnapshot {
   if (!/^[0-9a-f]{40}$/.test(sourceCommit)) {
     throw new PrivacyTableError('source commit must be 40 lowercase hex characters')
@@ -197,6 +229,7 @@ export function buildSnapshot(
     live,
     options.noPrivacy ?? [],
     options.aliases ?? DOCS_NAME_ALIASES,
+    options.orphanFootnotes ?? [],
   )
   const models: PrivacySnapshot['models'] = {}
   const disagreements: Disagreement[] = []

@@ -17,7 +17,10 @@ import {
   SNAPSHOT_SOURCE_REPO,
 } from '@marcusrbrown/infra-shared/opencode-go/eligibility'
 import {GO_LIVE_MODELS_URL, parseLiveModels} from '@marcusrbrown/infra-shared/opencode-go/live-models'
-import {parsePrivacyDocs, PrivacyTableError} from '@marcusrbrown/infra-shared/opencode-go/parse-privacy-table'
+import {
+  parsePrivacyDocsWithOrphans,
+  PrivacyTableError,
+} from '@marcusrbrown/infra-shared/opencode-go/parse-privacy-table'
 
 // Refreshes packages/shared/opencode-go/privacy-snapshot.json from two sources: anomalyco/opencode
 // `console/go.mdx` (retention days, agreement expiry, workspace Global rule) and the live Go models list
@@ -354,7 +357,9 @@ export async function refreshGoPrivacy({
   const livePayload = await fetchLiveModels(fetchImpl)
 
   const {models: liveModels, noPrivacy} = parseLiveModels(livePayload)
-  const {snapshot: next, disagreements, unmatched} = buildSnapshot(parsePrivacyDocs(mdx), liveModels, sha, {noPrivacy})
+  // The footnotes the page gives no row are checked against the live list inside `buildSnapshot`.
+  const {rows, orphanFootnotes} = parsePrivacyDocsWithOrphans(mdx)
+  const {snapshot: next, disagreements, unmatched} = buildSnapshot(rows, liveModels, sha, {noPrivacy, orphanFootnotes})
   if (Object.keys(next.models).length === 0) throw new PrivacyTableError('built zero models')
   // Logged before the change test: a left-out model must show in the workflow log even when no PR opens.
   for (const item of unmatched) log(`left out: ${describeUnmatched(item)}`)

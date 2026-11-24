@@ -926,6 +926,95 @@ describe('refreshGoPrivacy: a model one source does not know is left out and rep
   })
 })
 
+describe('refreshGoPrivacy: a footnote for a live model with no Privacy row', () => {
+  const HUNGERG_FOOTNOTE =
+    '- **HungerG Free:** Free for a limited time. No data training: your prompts and completions are not used to train models.'
+  const REASON = 'footnote only, no Privacy row, so it has no entry'
+  const mdxWith = (line: string): string => MDX.replace('- **Grok 4.7:**', () => `${line}\n- **Grok 4.7:**`)
+  const addLive = (id: string, name: string): string => {
+    const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+    body.data.push({...body.data[0], id, name})
+    return JSON.stringify(body)
+  }
+  const runLogged = (h: Harness) => {
+    const lines: string[] = []
+    return {
+      lines,
+      done: refreshGoPrivacy({
+        snapshotPath: h.snapshotPath,
+        bodyPath: h.bodyPath,
+        fetch: h.fetch,
+        log: line => lines.push(line),
+      }),
+    }
+  }
+
+  it('leaves the model out, reports it in the PR body and the log, and keeps the rest of the snapshot', async () => {
+    const h = harness(staleSnapshot().snapshot, {
+      mdx: mdxWith(HUNGERG_FOOTNOTE),
+      live: addLive('hungerg-free', 'HungerG Free'),
+    })
+    const {lines, done} = runLogged(h)
+
+    const result = await done
+
+    expect(result.changed).toBe(true)
+    const written = JSON.parse(readFileSync(h.snapshotPath, 'utf8')) as PrivacySnapshot
+    expect(written.models['hungerg-free']).toBeUndefined()
+    expect(written.models).toEqual(tableAt(NEW_SHA).models)
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain('### Left out of the snapshot (1)')
+    expect(body).toContain(`- live model \`hungerg-free\` named \`HungerG Free\`: ${REASON}`)
+    expect(lines).toEqual([`left out: live model \`hungerg-free\` named \`HungerG Free\`: ${REASON}`])
+  })
+
+  it('prints the report even when nothing changed and no PR opens', async () => {
+    const h = harness(tableAt(OLD_SHA), {
+      mdx: mdxWith(HUNGERG_FOOTNOTE),
+      live: addLive('hungerg-free', 'HungerG Free'),
+    })
+    const {lines, done} = runLogged(h)
+
+    expect(await done).toEqual({changed: false, sourceCommit: NEW_SHA})
+    expect(lines).toEqual([`left out: live model \`hungerg-free\` named \`HungerG Free\`: ${REASON}`])
+    expect(existsSync(h.bodyPath)).toBe(false)
+  })
+
+  it('renders an upstream name as one bounded plain line in the PR body and the log', async () => {
+    const nasty = '# Hunger `G` |x| [link] <b>'
+    const h = harness(staleSnapshot().snapshot, {
+      mdx: mdxWith(`- **${nasty}:** Free for a limited time.`),
+      live: addLive('hungerg-free', nasty),
+    })
+    const {lines, done} = runLogged(h)
+
+    await done
+
+    const entry = `- live model \`hungerg-free\` named \`# Hunger G |x| [link] <b>\`: ${REASON}`
+    const body = readFileSync(h.bodyPath, 'utf8')
+    expect(body).toContain(entry)
+    expect(lines).toEqual([`left out: ${entry.slice(2)}`])
+    expect(body.split('\n').filter(line => line.includes('Hunger'))).toHaveLength(1)
+  })
+
+  it('fails as before, and writes nothing, when the model is not in the live list', async () => {
+    await expectUntouched(
+      harness(staleSnapshot().snapshot, {mdx: mdxWith(HUNGERG_FOOTNOTE)}),
+      /"HungerG Free" does not name a model in the Privacy table/,
+    )
+  })
+
+  it('fails as before, and writes nothing, for a misspelled label', async () => {
+    await expectUntouched(
+      harness(staleSnapshot().snapshot, {
+        mdx: mdxWith('- **Kimi K3x:** Hosted in China.'),
+        live: addLive('hungerg-free', 'HungerG Free'),
+      }),
+      /"Kimi K3x" does not name a model in the Privacy table/,
+    )
+  })
+})
+
 async function expectUntouched(h: Harness, pattern: RegExp | typeof PrivacyTableError): Promise<void> {
   const before = readFileSync(h.snapshotPath, 'utf8')
   await expect(run(h)).rejects.toThrow(pattern)

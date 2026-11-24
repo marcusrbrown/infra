@@ -7,7 +7,7 @@
 # Both base images are pinned by tag and digest (Renovate moves them). The builder stage always runs
 # on the build machine's own architecture and cross-compiles, so an arm64 laptop and an amd64 runner
 # produce the same linux/amd64 binary without emulating the Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.26.11@sha256:6e59e17a20f13c102e49d82dffab66d41cffe6c266b225d82794328aea859ab5 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:5f1b98fa02fe396ebce2a0227a0e08309e11792915b9dd2e1f71053d7e7e6666 AS build
 
 # The builder and every component in builder-config.yaml share one version set; Renovate moves them
 # together (.github/renovate.json5, "traces collector"), and builder-config.test.ts checks they match.

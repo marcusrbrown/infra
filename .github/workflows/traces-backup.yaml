@@ -65,7 +65,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.4
+          bun-version: 1.4.5
 
       # The script imports no package, so there is no install step. This is the only step that holds the DigitalOcean
       # token, and it holds neither the issue token nor the webhook. It exits 1 on any failure.
@@ -97,7 +97,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: 1.4.4
+          bun-version: 1.4.5
 
       # Any API failure fails this step: a broken alert path must show as a red run. A re-run (attempt above 1) replays an
       # old backup result, so the script then makes no API call and changes nothing: wait for the next scheduled backup.

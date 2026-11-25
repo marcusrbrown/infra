@@ -126,7 +126,7 @@
     "@changesets/get-github-info@0.6.0": "patches/@changesets%2Fget-github-info@0.6.0.patch",
   },
   "overrides": {
-    "@hono/node-server": "2.1.6",
+    "@hono/node-server": "2.1.11",
     "katex": "0.18.11",
     "minimatch": "11.0.9",
   },
@@ -339,7 +339,7 @@
 
     "@goke/mcp": ["@goke/mcp@0.2.0", "", { "dependencies": { "@modelcontextprotocol/sdk": "^1.30.0", "js-yaml": "^4.1.1" }, "peerDependencies": { "goke": "^6.19.0" } }, "sha512-WTjzriZd7zuf9g2y7BCB5XQkO2IdZrlkWvi6OTNVIsjKKAWtLsK1a8hBmpxRk5r8bX3Nt2hNRX7Rn+5Y74F3OQ=="],
 
-    "@hono/node-server": ["@hono/node-server@2.1.6", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-p/KH9MnfNcsm3sR6x4lNgm5j+QN4Et8srKredl9DZfXiyZ1UQ3aQ2YVpFLbqktYN5JI+DB+VZFKM2PqE5hLKjQ=="],
+    "@hono/node-server": ["@hono/node-server@2.1.11", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-KzKz9vl4vvr1vgLHamj+g5uonbrj5NwAdO3yzOS6cd2HjALVeOgTgeZOyAzNxejbkfOOPIcvuf/Tg8l1pEFLog=="],
 
     "@humanfs/core": ["@humanfs/core@0.19.2", "", { "dependencies": { "@humanfs/types": "^0.15.0" } }, "sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA=="],
 

@@ -41,7 +41,7 @@
   },
   "prettier": "@bfra.me/prettier-config/120-proof",
   "overrides": {
-    "@hono/node-server": "2.1.6",
+    "@hono/node-server": "2.1.11",
     "katex": "0.18.11",
     "minimatch": "11.0.9"
   },

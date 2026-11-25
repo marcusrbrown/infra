@@ -1448,9 +1448,20 @@ export const CANARY_CHECKS = ['canary-send', 'canary-langfuse', 'canary-tempo'] 
  * The deploy's one canary: the reporter script run once more inside its own container, in `--canary-once` mode (the
  * flag is pinned to `CANARY_ONCE_FLAG` in `health-report.ts` by a test). It prints the three canary checks and exits 0
  * whatever they say.
+ *
+ * It writes a trace into the stack, so it is a step that changes the host: it takes the step lock and checks the deploy
+ * marker (`ownershipPrelude`), and holds the lock through the send and the readback, which is the whole `exec`. An
+ * overtaken deploy prints `DEPLOY_OVERTAKEN` and runs nothing; a lock that is not free in time prints
+ * `DEPLOY_STEP_BUSY`.
  */
 export const CANARY_SENTINEL = 'TRACES_CANARY_END'
-export const CANARY_COMMAND = `${COMPOSE} exec -T health-reporter bun run --no-install /app/health-report.ts --canary-once && echo && echo ${CANARY_SENTINEL}`
+export function canaryScript(id: string): string {
+  return guardedStep(
+    'reporter-canary',
+    id,
+    `${COMPOSE} exec -T health-reporter bun run --no-install /app/health-report.ts --canary-once && echo && echo ${CANARY_SENTINEL}`,
+  )
+}
 
 /** The canary checks, from a complete answer only (exit 0, the sentinel, a body of the expected shape). */
 export function parseCanaryChecks(result: RunResult): ReporterCheck[] | undefined {
@@ -2109,8 +2120,8 @@ async function awaitGrafanaSignIn(exec: RemoteExec, deps: DeployDeps): Promise<G
   return last
 }
 
-async function runCanaryOnce(exec: RemoteExec): Promise<CanaryState> {
-  const checks = parseCanaryChecks(await exec(CANARY_COMMAND))
+async function runCanaryOnce(exec: RemoteExec, deployId: string): Promise<CanaryState> {
+  const checks = parseCanaryChecks(await exec(bashCommand(canaryScript(deployId))))
   return checks === undefined ? {state: 'unreadable'} : {state: 'ran', checks}
 }
 
@@ -2487,7 +2498,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
         // The one canary of this deploy, sent only now that the reporter's own checks are fresh. The periodic verdict
         // sends none.
         log('==> Running the canary')
-        canary = await runCanaryOnce(exec)
+        canary = await runCanaryOnce(exec, deployId)
       }
 
       const pair = inputs.bootstrapKey ?? host.envBootstrap ?? host.pendingBootstrap

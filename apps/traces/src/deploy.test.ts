@@ -24,7 +24,7 @@ import {
   bootstrapProbeScript,
   buildEnvFile,
   buildSecretFiles,
-  CANARY_COMMAND,
+  canaryScript,
   closeMasterArgv,
   compareFileScript,
   createCollectorScript,
@@ -499,6 +499,7 @@ describe('remote scripts', () => {
     digest: runningDigestScript('collector'),
     bootstrap: bootstrapProbeScript(),
     hygiene: hygieneScript(),
+    canary: canaryScript(ID_A),
     grafana: grafanaSignInScript(),
     ...Object.fromEntries(SENDER_GROUPS.map(group => [`token-${group}`, tokenFileScript(group, ID_A)])),
   }
@@ -523,7 +524,6 @@ describe('remote scripts', () => {
       ...scripts,
       setState: setIngestStateCommand('held', ID_A),
       detail: REPORTER_DETAIL_COMMAND,
-      canary: CANARY_COMMAND,
     }
     for (const [name, script] of Object.entries(everything)) {
       expect({name, nullDevice: script.includes('/dev/null')}).toEqual({name, nullDevice: false})
@@ -785,9 +785,16 @@ describe('remote scripts', () => {
 
   // The deploy's canary: the reporter script run once in its own container. No new service, port or route.
   it('runs the canary through exec in the reporter container, with the flag the script reads', async () => {
-    expect(CANARY_COMMAND).toBe(
+    const script = canaryScript(ID_A)
+    expect(script).toContain('# traces-step:reporter-canary\n')
+    expect(script).toContain(
       `docker compose --project-directory ${TRACES_APP_DIR} exec -T health-reporter bun run --no-install /app/health-report.ts ${CANARY_ONCE_FLAG} && echo && echo TRACES_CANARY_END`,
     )
+    // A step that changes the host: the step lock and the marker check come before the exec, which the lock outlives.
+    const lines = script.split('\n')
+    expect(lines.at(-1)).toContain('exec -T health-reporter')
+    expect(script.indexOf(ownershipPrelude(ID_A))).toBeGreaterThan(-1)
+    expect(script.indexOf(ownershipPrelude(ID_A))).toBeLessThan(script.indexOf('exec -T health-reporter'))
     const compose = await Bun.file(join(APP, 'docker-compose.yaml')).text()
     expect(compose).toContain('command: [bun, run, --no-install, /app/health-report.ts]')
   })
@@ -1210,7 +1217,7 @@ describe('first deploy', () => {
     expect(logs.join('\n')).toContain('Ingest is OFF')
     expect(logs.join('\n')).toContain('TRACES_LANGFUSE_PUBLIC_KEY')
     expect(host.count('raw:reporter-detail')).toBe(0)
-    expect(host.count('raw:reporter-canary')).toBe(0)
+    expect(host.count('reporter-canary')).toBe(0)
   })
 
   it('with a key pair and ingest not asked for ends with ingest off and a message naming the missing gate', async () => {
@@ -1257,7 +1264,7 @@ describe('first deploy', () => {
       'up-caddy',
       'token-dirs',
       'raw:reporter-detail',
-      'raw:reporter-canary',
+      'reporter-canary',
       'bootstrap-hygiene',
       'raw:set-state:open',
       'remove:.deploy-in-progress',
@@ -1296,7 +1303,7 @@ describe('first deploy', () => {
     expect(error).toBeInstanceOf(AppliedButUnverifiedError)
     expect(error.message).toContain('no fresh reporter verdict')
     expect(error.message).toContain('canary')
-    expect(host.count('raw:reporter-canary')).toBe(0)
+    expect(host.count('reporter-canary')).toBe(0)
     expect(host.setStates()).toEqual([])
     expect(host.served).toBe('off')
   })
@@ -1304,9 +1311,9 @@ describe('first deploy', () => {
   it('runs the canary exactly once per deploy, after the fresh verdict and before the route changes', async () => {
     const host = new FakeHost()
     await run(host)
-    expect(host.count('raw:reporter-canary')).toBe(1)
-    expect(host.indexOf('raw:reporter-canary')).toBeGreaterThan(host.steps.lastIndexOf('raw:reporter-detail'))
-    expect(host.indexOf('raw:reporter-canary')).toBeLessThan(host.indexOf('raw:set-state:open'))
+    expect(host.count('reporter-canary')).toBe(1)
+    expect(host.indexOf('reporter-canary')).toBeGreaterThan(host.steps.lastIndexOf('raw:reporter-detail'))
+    expect(host.indexOf('reporter-canary')).toBeLessThan(host.indexOf('raw:set-state:open'))
   })
 
   it('runs the canary once even when the verdict took several reads to arrive', async () => {
@@ -1320,14 +1327,14 @@ describe('first deploy', () => {
     })
     await run(host)
     expect(host.count('raw:reporter-detail')).toBe(2)
-    expect(host.count('raw:reporter-canary')).toBe(1)
+    expect(host.count('reporter-canary')).toBe(1)
   })
 
   it('runs the canary on a redeploy too, since the config or image may have changed', async () => {
     const host = new FakeHost()
     await run(host)
     await run(host)
-    expect(host.count('raw:reporter-canary')).toBe(2)
+    expect(host.count('reporter-canary')).toBe(2)
   })
 
   it.each([
@@ -3599,6 +3606,23 @@ describe('overlapping deploys: the newest one owns the host', () => {
     expect(host.unguarded).toEqual([])
   })
 
+  it('overtaken just before its canary: the canary is not run, and the newest deploy still finishes and opens', async () => {
+    const host = new FakeHost()
+    const o = await overlap(host, (_step, command) => command.includes('--canary-once'))
+    expect(o.aError).toBeInstanceOf(DeployOvertakenError)
+    expect(host.refused).toEqual(['reporter-canary'])
+    expect(host.canaryRuns).toBe(0)
+    expect(host.setStates()).toEqual([])
+    expect(host.markerOwner()).toBe(ID_B)
+
+    const result = await o.finishB()
+    expect(result.ingest).toBe('open')
+    expect(host.canaryRuns).toBe(1)
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.marker).toBeUndefined()
+    expect(host.unguarded).toEqual([])
+  })
+
   it('overtaken exactly at its open step: the route is not opened, and the newest deploy opens it', async () => {
     const host = new FakeHost()
     const o = await overlap(host, isOpenAttempt)
@@ -3752,6 +3776,7 @@ const MUTATING_SCRIPTS: Record<string, string[]> = {
   upScript: [upScript(ID_A, 'up-private', ['postgres', 'redis']), upScript(ID_A, 'up-x', ['collector'], {force: true})],
   createCollectorScript: [createCollectorScript(ID_A)],
   queueVolumeScript: [queueVolumeScript(ID_A)],
+  canaryScript: [canaryScript(ID_A)],
   setIngestStateCommand: (['off', 'held', 'open'] as const).map(state => setIngestStateCommand(state, ID_A)),
   applyTtlScript: [applyTtlScript(ownershipPrelude(ID_A))],
   addLifecycleScript: OBJECT_STORE_PREFIXES.map(prefix => addLifecycleScript(prefix, ownershipPrelude(ID_A))),
@@ -4168,6 +4193,39 @@ describe('the step lock: a takeover waits for the older deploy’s step that is 
     expect(error.message).not.toContain('Retry when')
     expect(host.markerOwner()).toBe(ID_A)
     expect(host.setStates()).toEqual([])
+  })
+
+  it('the canary holds the step lock from its check to the end of the exec, so a takeover waits for it', async () => {
+    const {host, a, b, finishStep} = await startWhileStepInFlight('reporter-canary')
+
+    expect(host.stepLockHolder).toBe('reporter-canary')
+    expect(host.waitingForStepLock).toEqual(['host-state'])
+    expect(host.markerOwner()).toBe(ID_A)
+    expect(host.canaryRuns).toBe(0)
+
+    finishStep()
+    const [resultA, resultB] = await Promise.all([a, b])
+    expect(host.events.indexOf(`marker:${ID_B}`)).toBeGreaterThan(host.events.indexOf('done:reporter-canary'))
+    expect(resultA.ok).toBe(false)
+    if (!resultA.ok) expect(resultA.error).toBeInstanceOf(DeployOvertakenError)
+    expect(resultB.ok).toBe(true)
+    expect(host.unlocked).toEqual([])
+    expect(host.stepLockHolder).toBeUndefined()
+  })
+
+  it('a canary that cannot get the step lock fails with the step-busy error, runs nothing and opens nothing', async () => {
+    const host = new FakeHost({
+      override: step =>
+        step === 'reporter-canary' ? {exitCode: 1, stdout: 'DEPLOY_STEP_BUSY\n', stderr: ''} : undefined,
+    })
+    const error = await failure(host, baseEnv(), {deployId: () => ID_A})
+    // The canary runs after the files are applied, so the failure is reported as applied but unverified.
+    expect(error).toBeInstanceOf(AppliedButUnverifiedError)
+    expect(error.message).toContain('could not start')
+    expect(error.message).toContain('60 seconds')
+    expect(host.canaryRuns).toBe(0)
+    expect(host.setStates()).toEqual([])
+    expect(host.markerOwner()).toBe(ID_A)
   })
 
   it('a deploy refused as overtaken has already released the lock: the newer deploy is not kept waiting by it', async () => {

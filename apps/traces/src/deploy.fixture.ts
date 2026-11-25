@@ -9,7 +9,7 @@ import type {DeployDeps, DeployInputs, IngestState} from './deploy'
 import {chmodSync, writeFileSync} from 'node:fs'
 import {join} from 'node:path'
 
-import {CANARY_COMMAND, GATED_SERVICES, generateVoidTokenLine, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
+import {GATED_SERVICES, generateVoidTokenLine, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
 import {SENDER_GROUPS, TRACES_DEPLOY_MARKER, TRACES_VOID_TOKEN_PREFIX} from './host'
 import {OBJECT_STORE_PREFIXES, RETENTION_TABLES} from './retention'
 
@@ -54,7 +54,6 @@ const READ_ONLY_STEPS: readonly RegExp[] = [
   /^probe-ingest$/,
   /^retention-read-/,
   /^raw:reporter-detail$/,
-  /^raw:reporter-canary$/,
 ]
 
 /** True for a step that changes nothing on the host. Everything else must carry the ownership prelude. */
@@ -165,6 +164,8 @@ export class FakeHost {
   /** The image the running collector was started from. */
   runningImage: string | undefined
   reporterAt = EPOCH - 100
+  /** How many times the canary command actually ran (a refused step does not count). */
+  canaryRuns = 0
   tables: Map<string, string | undefined>
   rules: {Prefix: string; Days: number}[] = []
   clock = EPOCH
@@ -302,7 +303,8 @@ export class FakeHost {
       if (this.options.reporterUnreadable) return fail('exec failed')
       return ok(`${JSON.stringify(this.reporterDetail())}\nTRACES_DETAIL_END\n`)
     }
-    if (step === 'raw:reporter-canary') {
+    if (step === 'reporter-canary') {
+      this.canaryRuns += 1
       if (this.options.canaryUnreadable === 'garbled') return ok('not json\nTRACES_CANARY_END\n')
       if (this.options.canaryUnreadable) return fail('exec failed')
       return ok(`${JSON.stringify({schemaVersion: 1, checks: this.canaryChecks()})}\nTRACES_CANARY_END\n`)
@@ -671,7 +673,6 @@ export function installFlockStandIn(directory: string): boolean {
 export function stepOf(command: string): string {
   if (command.includes('TRACES_INGEST_STATE_SET=')) return 'raw:set-state'
   if (command === REPORTER_DETAIL_COMMAND) return 'raw:reporter-detail'
-  if (command === CANARY_COMMAND) return 'raw:reporter-canary'
   const marker = /# traces-step:([^\n]+)\n/.exec(command)?.[1]
   return marker ?? 'unknown'
 }

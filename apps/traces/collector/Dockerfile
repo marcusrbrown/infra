@@ -12,7 +12,7 @@ FROM --platform=$BUILDPLATFORM golang:1.27.4@sha256:5f1b98fa02fe396ebce2a0227a0e
 # The builder and every component in builder-config.yaml share one version set; Renovate moves them
 # together (.github/renovate.json5, "traces collector"), and builder-config.test.ts checks they match.
 # renovate: datasource=go depName=go.opentelemetry.io/collector/cmd/builder
-ARG OCB_VERSION=v0.165.0
+ARG OCB_VERSION=v0.166.0
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 

@@ -32,7 +32,7 @@ Bun workspace monorepo for personal infrastructure — KeeWeb deploy automation,
 
 | Task | Location | Notes |
 | --- | --- | --- |
-| Add new app | `apps/<name>/` | Copy keeweb structure, add to workspace |
+| Add new app | `apps/<name>/` | Copy keeweb structure, add to workspace; for a deployable app, add it to the daily report's Deploy Pipeline Health list in `.github/workflows/fro-bot.yaml` |
 | Add CLI command | `packages/cli/src/commands/` | goke command module, register in cli.ts |
 | Check deploy health | `bunx @marcusrbrown/infra keeweb status` | HTTP, last deploy, content hash |
 | Trigger deploy | `bunx @marcusrbrown/infra keeweb deploy` | Remote (default) or `--local` |

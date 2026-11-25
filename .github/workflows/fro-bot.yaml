@@ -79,8 +79,9 @@ env:
   SCHEDULE_PROMPT: |
     Perform daily repository autohealing for marcusrbrown/infra — a Bun
     workspace monorepo that deploys KeeWeb, CLIProxyAPI, the Fro Bot gateway
-    and dashboard, Umami, a WireGuard VPN egress box, and an OIDC credential
-    broker across DigitalOcean, AWS Lightsail, and Mail-in-a-Box.
+    and dashboard, Umami, a WireGuard VPN egress box, an OIDC credential
+    broker, and the trace collection stack across DigitalOcean, AWS
+    Lightsail, and Mail-in-a-Box.
     Read AGENTS.md for full project conventions before making changes.
 
     EXECUTION MODEL
@@ -214,7 +215,7 @@ env:
        branch. Group related lint/format/convention fixes into a single PR.
 
     7. DEPLOY PIPELINE HEALTH
-       Verify deploy infrastructure for all seven deployed apps is
+       Verify deploy infrastructure for all eight deployed apps is
        operational.
 
        STRANDED-DEPLOY CHECK (applies to every app below): a deploy run
@@ -443,6 +444,78 @@ env:
          do not flag it as missing if absent from secrets listings).
        - Check .github/known_hosts contains host keys for broker.fro.bot
          (both domain and droplet IP entries).
+
+       Traces:
+       - Check the most recent Deploy workflow run (deploy-traces job) on
+         main via the deploy router (`gh run list --workflow=deploy.yaml`);
+         inside router runs the job is named `deploy-traces /
+         deploy-traces`. If it failed OR was cancelled/incomplete after its
+         deploy job ran steps, without a later successful deploy (see
+         STRANDED-DEPLOY CHECK), diagnose from logs and open an issue. If
+         the deploy job never ran a step (at gate), report a table row
+         only — no issue.
+         Note: `deploy-traces.yaml` also has a `build-collector` job
+         (`deploy-traces / build-collector` in router runs) that is NOT
+         the deploy; never read its conclusion as the deploy's. If it
+         failed, the deploy job is skipped and nothing was deployed: for
+         the latest run that touched traces, diagnose from logs and open
+         an issue (this is not at gate).
+       - Verify traces.fro.bot is reachable: `curl -sf -o /dev/null -w
+         "%{http_code}" https://traces.fro.bot/healthz` should return 200.
+         A 5xx, a 503 from the health reporter, a connection error, or a
+         timeout means the trace stack is unhealthy.
+       - Verify the ingest route matches the ingest state. Read the
+         repository variable `TRACES_INGEST_OPEN` (`gh variable get
+         TRACES_INGEST_OPEN`); exactly `true` means ingest is meant to be
+         open, unset or anything else means not open. Send one
+         unauthenticated, tokenless `curl -s -o /dev/null -w
+         "%{http_code}" -X POST -H "content-type: application/json" -d
+         '{}' https://traces.fro.bot/workstation/v1/traces`. Open: expect
+         401 (the collector refuses a request with no token) — do not
+         interpret 401 as a failure. Not open: expect 404 (route off) or
+         503 (route held). Anything else is a finding: a 503 or 404 while
+         ingest is meant to be open (report it, do not lift a hold), or a
+         401 or 2xx while it is not (ingest is open when it should not
+         be).
+         Langfuse and Grafana are loopback-only with no hostname: do not
+         probe them, and do not treat their absence as a failure.
+       - Verify the traces environment exists with TRACES_SSH_KEY,
+         TRACES_HOST, TRACES_POSTGRES_PASSWORD,
+         TRACES_CLICKHOUSE_PASSWORD, TRACES_CLICKHOUSE_READER_PASSWORD,
+         TRACES_REDIS_PASSWORD, TRACES_MINIO_PASSWORD,
+         TRACES_NEXTAUTH_SECRET, TRACES_SALT, TRACES_ENCRYPTION_KEY,
+         TRACES_GRAFANA_ADMIN_PASSWORD, TRACES_GRAFANA_SECRET_KEY,
+         TRACES_LANGFUSE_USER_EMAIL, and TRACES_LANGFUSE_USER_PASSWORD
+         configured. TRACES_LANGFUSE_PUBLIC_KEY and
+         TRACES_LANGFUSE_SECRET_KEY (the collector's Application-role
+         key) are set by the operator after the first deploy; report them
+         missing only as a warning. TRACES_LANGFUSE_BOOTSTRAP_PUBLIC_KEY
+         and TRACES_LANGFUSE_BOOTSTRAP_SECRET_KEY must be ABSENT after
+         bootstrap: their presence is a finding. TRACES_DOMAIN and
+         TRACES_INGEST_OPEN are repository variables, and
+         TRACES_SNAPSHOT_DO_TOKEN is a repository secret; none of them is
+         an environment secret, so do not flag them as missing from the
+         environment.
+       - Check .github/known_hosts contains host keys for traces.fro.bot
+         (both domain and droplet IP entries).
+       - Traces monitor and backup (reporting only — never remediate):
+         inspect the latest `schedule`-triggered run of
+         `.github/workflows/traces-monitor.yaml` (every 15 minutes) and of
+         `.github/workflows/traces-backup.yaml` (daily) with `gh run list
+         --workflow=<file> --event schedule`. Judge each latest run only —
+         never skip a newer failed/pending run and substitute an older
+         success. Queued/in progress: report pending. Completed with a
+         non-success conclusion: report failing, and check that the
+         canonical alert issue (label `traces-unhealthy` for the monitor,
+         `traces-backup-failure` for the backup) is open; the monitor
+         opens it after two unhealthy runs in a row, the backup after one
+         failed run. No queued/in-progress run and no completed scheduled
+         run in the past 120 minutes (monitor) or 36 hours (backup):
+         report missing scheduled delivery. Completed successfully:
+         report healthy; flag a still-open alert issue with that label as
+         reconciliation drift.
+       - Never print or request a sender token, and never SSH to the
+         host; every check above is unauthenticated or a GitHub API read.
 
        Docs status snapshot (table row only — never open an issue):
        - Status snapshot age: read the newest `status-history` artifact
@@ -821,6 +894,13 @@ env:
     | broker | broker.fro.bot/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | broker | Env secrets/variable | ✅ Set / ⚠️ Missing | [details] |
     | broker | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | traces | Last deploy-traces run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | traces | traces.fro.bot/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
+    | traces | Ingest route | ✅ As expected / ❌ Unexpected | [HTTP status, TRACES_INGEST_OPEN] |
+    | traces | Env secrets | ✅ Set / ⚠️ Missing / ❌ Bootstrap keys present | [details] |
+    | traces | Host keys | ✅ Current / ⚠️ Stale | [details] |
+    | traces | Monitor scheduled run | ✅ Healthy / ⚠️ Pending / ❌ Failing / — Missing | [run link] |
+    | traces | Backup scheduled run | ✅ Healthy / ⚠️ Pending / ❌ Failing / — Missing | [run link] |
     | docs | Status snapshot age | ✅ Fresh / ⚠️ Stale (> 90 min) / ⚠️ Not bootstrapped / — Missing | [artifact time] |
 
     ### Live Site Review

@@ -3449,6 +3449,7 @@ const DEPLOY_HEALTH_APP_SECTIONS = [
   ['dashboard', 'Dashboard:'],
   ['vpn', 'VPN:'],
   ['broker', 'Broker:'],
+  ['traces', 'Traces:'],
 ] as const
 
 /** Splits the daily prompt's Deploy Pipeline Health category into its stranded-deploy block and per-app sections. */
@@ -3797,7 +3798,7 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
   })
 
   describe('Deploy Pipeline Health: at-gate deploys are table rows only', () => {
-    const DEPLOY_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker'] as const
+    const DEPLOY_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker', 'traces'] as const
 
     it('classifies AT-GATE vs RAN by whether the deploy job ever ran a step', async () => {
       const {strandedCheck} = await loadHealthCategory()
@@ -3850,17 +3851,17 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       expect(strandedCheck).toMatch(/Either way it stays a table row only — never an issue/)
     })
 
-    it('allows the not-notified suffix on all seven Last deploy-<app> template rows', async () => {
+    it('allows the not-notified suffix on all eight Last deploy-<app> template rows', async () => {
       const {parsed} = await loadFroBotWorkflow()
       const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
       const rows = prompt.split('\n').filter(line => /\|\s*Last deploy-[\w-]+ run\s*\|/.test(line))
-      expect(rows).toHaveLength(7)
+      expect(rows).toHaveLength(8)
       for (const row of rows) {
         expect(row, `missing not-notified status: ${row.trim()}`).toContain('⏸ At gate — not notified (<outcome>)')
       }
     })
 
-    it('offers the At gate status on all seven Last deploy-<app> template rows', async () => {
+    it('offers the At gate status on all eight Last deploy-<app> template rows', async () => {
       const {parsed} = await loadFroBotWorkflow()
       const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
       const rows = prompt.split('\n').filter(line => /\|\s*Last deploy-[\w-]+ run\s*\|/.test(line))
@@ -3872,7 +3873,7 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       }
     })
 
-    it('carries the at-gate table-row-only clause on each of the seven per-app deploy bullets', async () => {
+    it('carries the at-gate table-row-only clause on each of the eight per-app deploy bullets', async () => {
       const {sections} = await loadHealthCategory()
       expect(Object.keys(sections).toSorted()).toEqual([...DEPLOY_APPS].toSorted())
       for (const app of DEPLOY_APPS) {
@@ -3940,11 +3941,11 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       expect(LAST_DEPLOY_ROW.test(row)).toBe(false)
     })
 
-    it('leaves exactly seven Last deploy-<app> rows', async () => {
+    it('leaves exactly eight Last deploy-<app> rows', async () => {
       const {parsed} = await loadFroBotWorkflow()
       const rows = (parsed.env?.SCHEDULE_PROMPT ?? '').split('\n').filter(line => LAST_DEPLOY_ROW.test(line))
 
-      expect(rows).toHaveLength(7)
+      expect(rows).toHaveLength(8)
     })
 
     it('names the artifact, the 90-minute threshold and all four outcomes in the decision tree', async () => {
@@ -3971,7 +3972,7 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       const tree = category.indexOf('Docs status snapshot')
       const closing = category.indexOf('Report findings as issues only for this category')
 
-      expect(tree).toBeGreaterThan(category.indexOf(' Broker: - '))
+      expect(tree).toBeGreaterThan(category.indexOf(' Traces: - '))
       expect(closing).toBeGreaterThan(tree)
       expect(category.trimEnd().endsWith('or the deployed servers.')).toBe(true)
       expect(category.indexOf('Report findings as issues only', closing + 1)).toBe(-1)

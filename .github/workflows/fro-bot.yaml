@@ -1092,6 +1092,8 @@ jobs:
           prompt: ${{ env.PROMPT }}
           repo-skills: 'true'
           isolate-agent: 'true'
+          trace-endpoint: https://traces.fro.bot/marcusrbrown/v1/traces
+          trace-headers: 'Authorization: Bearer ${{ secrets.FRO_BOT_TRACE_TOKEN }}'
           trusted-head-sha: ${{ steps.prehead.outputs.ref }}
           timeout: 0
           # Mirror upstream's `packages/*/src` convention; deploy-critical files under `apps/` remain intentionally excluded.
@@ -1226,6 +1228,8 @@ jobs:
           prompt: ${{ env.PROMPT }}
           repo-skills: 'true'
           isolate-agent: 'true'
+          trace-endpoint: https://traces.fro.bot/marcusrbrown/v1/traces
+          trace-headers: 'Authorization: Bearer ${{ secrets.FRO_BOT_TRACE_TOKEN }}'
           timeout: 0
           output-mode: branch-pr
           skip-cache: ${{ steps.classify.outputs.mode == 'daily-equivalent' }}

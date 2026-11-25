@@ -36,6 +36,14 @@
       dependencyDashboardApproval: true,
     },
     {
+      // The SDK releases almost daily, and each bump queues gated gateway and VPN deploys. Nothing here
+      // needs every release, so a bump waits for a dashboard checkbox and is taken in batches.
+      description: ['Require dashboard approval for AWS SDK updates'],
+      matchDatasources: ['npm'],
+      matchPackageNames: ['@aws-sdk/**'],
+      dependencyDashboardApproval: true,
+    },
+    {
       description: ['Add changelog context for Umami Docker image updates'],
       matchDatasources: ['docker'],
       matchPackageNames: ['umamisoftware/umami'],

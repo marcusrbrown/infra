@@ -42,7 +42,7 @@ These are targets, not guarantees. A delayed database merge or a failed snapshot
 
 After a restore from a snapshot, any Tempo data block that was caught half-written is moved into a quarantine folder on the same volume instead of being deleted. That folder is outside the 30-day retention, and the operator deletes it by hand.
 
-Langfuse also keeps a usage ledger with one row per span, trace and score. A row holds the trace and span IDs, the project and timestamps, and no trace content. The ledger has no expiry, so these rows are kept indefinitely.
+Langfuse also keeps a usage ledger. It records each span, trace and score it stores, and a trace can add a row each time more of it arrives. A row holds the event's IDs (trace, span or score), its type, size, environment, project and timestamps, and no trace content. The ledger has no expiry, so these rows are kept indefinitely, and deleting a trace on request does not remove them. The 31-day age alert above checks trace data only, not the ledger.
 
 ## Deleting data
 

@@ -3449,6 +3449,7 @@ const DEPLOY_HEALTH_APP_SECTIONS = [
   ['dashboard', 'Dashboard:'],
   ['vpn', 'VPN:'],
   ['broker', 'Broker:'],
+  ['traces', 'Traces:'],
 ] as const
 
 /** Splits the daily prompt's Deploy Pipeline Health category into its stranded-deploy block and per-app sections. */
@@ -3797,7 +3798,7 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
   })
 
   describe('Deploy Pipeline Health: at-gate deploys are table rows only', () => {
-    const DEPLOY_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker'] as const
+    const DEPLOY_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker', 'traces'] as const
 
     it('classifies AT-GATE vs RAN by whether the deploy job ever ran a step', async () => {
       const {strandedCheck} = await loadHealthCategory()
@@ -3850,17 +3851,17 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       expect(strandedCheck).toMatch(/Either way it stays a table row only — never an issue/)
     })
 
-    it('allows the not-notified suffix on all seven Last deploy-<app> template rows', async () => {
+    it('allows the not-notified suffix on all eight Last deploy-<app> template rows', async () => {
       const {parsed} = await loadFroBotWorkflow()
       const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
       const rows = prompt.split('\n').filter(line => /\|\s*Last deploy-[\w-]+ run\s*\|/.test(line))
-      expect(rows).toHaveLength(7)
+      expect(rows).toHaveLength(8)
       for (const row of rows) {
         expect(row, `missing not-notified status: ${row.trim()}`).toContain('⏸ At gate — not notified (<outcome>)')
       }
     })
 
-    it('offers the At gate status on all seven Last deploy-<app> template rows', async () => {
+    it('offers the At gate status on all eight Last deploy-<app> template rows', async () => {
       const {parsed} = await loadFroBotWorkflow()
       const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
       const rows = prompt.split('\n').filter(line => /\|\s*Last deploy-[\w-]+ run\s*\|/.test(line))
@@ -3872,7 +3873,7 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       }
     })
 
-    it('carries the at-gate table-row-only clause on each of the seven per-app deploy bullets', async () => {
+    it('carries the at-gate table-row-only clause on each of the eight per-app deploy bullets', async () => {
       const {sections} = await loadHealthCategory()
       expect(Object.keys(sections).toSorted()).toEqual([...DEPLOY_APPS].toSorted())
       for (const app of DEPLOY_APPS) {
@@ -3924,6 +3925,78 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     })
   })
 
+  describe('Deploy Pipeline Health: traces section', () => {
+    it('evaluates the latest deploy attempt across the router and a direct deploy-traces.yaml dispatch', async () => {
+      const {sections} = await loadHealthCategory()
+      const section = sections.traces ?? ''
+      expect(section).toContain(
+        '`deploy.yaml` (jobs `deploy-traces / build-collector` and `deploy-traces / deploy-traces`)',
+      )
+      expect(section).toContain('direct dispatch of `deploy-traces.yaml` (jobs `build-collector` and `deploy-traces`)')
+      expect(section).toContain('LAST DEPLOY EVIDENCE')
+    })
+
+    it('opens an issue for a failed build-collector in either workflow without a later successful deploy job', async () => {
+      const {sections} = await loadHealthCategory()
+      expect(sections.traces ?? '').toMatch(
+        /A failed `build-collector` in either workflow, with no later successful deploy job, is an issue/,
+      )
+    })
+
+    it('lets freshness win: an old successful run is missing delivery, not healthy', async () => {
+      const {sections} = await loadHealthCategory()
+      expect(sections.traces ?? '').toMatch(
+        /older than 120 minutes \(monitor\) or 36 hours \(backup\) is Missing scheduled delivery even if it succeeded/,
+      )
+    })
+
+    it('reports the not-configured notice as a no-op, never Healthy', async () => {
+      const {sections} = await loadHealthCategory()
+      const section = sections.traces ?? ''
+      expect(section).toContain('No-op (not configured)')
+      expect(section).toContain(
+        'TRACES_DOMAIN is not set, so the trace collection stack is treated as not deployed yet. Nothing was probed.',
+      )
+      expect(section).toContain(
+        'TRACES_DOMAIN not set, so the trace stack is treated as not deployed yet. No snapshot was taken.',
+      )
+    })
+
+    it('reports an unreadable job log as Unknown, never Healthy, on the step and both template rows', async () => {
+      const {parsed} = await loadFroBotWorkflow()
+      const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
+      const section = extractDeployHealthCategory(prompt).sections.traces ?? ''
+      expect(section).toMatch(/If the log cannot be retrieved, report Unknown \(log unreadable\), never Healthy/)
+      expect(section).toMatch(/Healthy only for a fresh successful run whose log was read and has no such notice/)
+      for (const label of ['Monitor scheduled run', 'Backup scheduled run']) {
+        const row = prompt.split('\n').find(line => line.includes(`| traces | ${label} |`))
+        expect(row, `${label} row`).toContain('Unknown (log unreadable)')
+      }
+    })
+
+    it('flags a missing alert issue only when the workflow policy calls for one', async () => {
+      const {sections} = await loadHealthCategory()
+      const section = sections.traces ?? ''
+      expect(section).toMatch(/A missing real issue is a finding only when the workflow's own policy calls for one/)
+      expect(section).toMatch(/monitor, after two unhealthy scheduled runs in a row, or at once for an urgent/)
+      expect(section).toContain('`ingest-open-unexpected`')
+      expect(section).toMatch(/backup, after one failed run/)
+      expect(section).toMatch(/A single ordinary unhealthy monitor run with no issue is expected, not a finding/)
+    })
+
+    it('matches the real alert issue by label and real marker, and ignores rehearsal issues', async () => {
+      const {sections} = await loadHealthCategory()
+      const section = sections.traces ?? ''
+      expect(section).toContain('<!-- traces-monitor-alert:v1 -->')
+      expect(section).toContain('<!-- traces-backup-alert:v1 -->')
+      expect(section).toContain('Trace collection stack is unhealthy')
+      expect(section).toContain('Trace data backup is failing')
+      expect(section).toContain('traces-monitor-alert-rehearsal:v1')
+      expect(section).toContain('traces-backup-alert-rehearsal:v1')
+      expect(section).toMatch(/a labelled issue without the real marker is not the alert/i)
+    })
+  })
+
   describe('Deploy Pipeline Health: status snapshot age row', () => {
     const SNAPSHOT_ROW = /^\s*\|\s*docs\s*\|\s*Status snapshot age\s*\|/
     const LAST_DEPLOY_ROW = /\|\s*Last deploy-[\w-]+ run\s*\|/
@@ -3940,11 +4013,11 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       expect(LAST_DEPLOY_ROW.test(row)).toBe(false)
     })
 
-    it('leaves exactly seven Last deploy-<app> rows', async () => {
+    it('leaves exactly eight Last deploy-<app> rows', async () => {
       const {parsed} = await loadFroBotWorkflow()
       const rows = (parsed.env?.SCHEDULE_PROMPT ?? '').split('\n').filter(line => LAST_DEPLOY_ROW.test(line))
 
-      expect(rows).toHaveLength(7)
+      expect(rows).toHaveLength(8)
     })
 
     it('names the artifact, the 90-minute threshold and all four outcomes in the decision tree', async () => {
@@ -3971,7 +4044,7 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       const tree = category.indexOf('Docs status snapshot')
       const closing = category.indexOf('Report findings as issues only for this category')
 
-      expect(tree).toBeGreaterThan(category.indexOf(' Broker: - '))
+      expect(tree).toBeGreaterThan(category.indexOf(' Traces: - '))
       expect(closing).toBeGreaterThan(tree)
       expect(category.trimEnd().endsWith('or the deployed servers.')).toBe(true)
       expect(category.indexOf('Report findings as issues only', closing + 1)).toBe(-1)

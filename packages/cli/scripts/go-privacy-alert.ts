@@ -14,6 +14,11 @@
  * - `notify`  Posts ONE Discord message when `notify` is `created` or `recovered`: on the first failing run of an
  *             outage and on recovery, never on every failing day. Always exits 0: Discord is a courtesy, the issue is
  *             the record.
+ * - `restriction`  Posts ONE Discord message when a SUCCESSFUL refresh opened or updated the snapshot PR and that PR
+ *             would restrict models the proxy serves (the previous snapshot made them eligible, the new one does not).
+ *             The models stay exposed until the PR merges and the gated deploy is approved, so this is a separate step
+ *             with its own webhook read. It opens no issue. While the PR stays open the refresh updates it daily and
+ *             this posts daily: a reminder, not state. Always exits 0.
  *
  * Safety contract:
  * - ZERO package imports. It runs after checkout + setup-bun WITHOUT `bun install` (Bun built-ins, `node:fs` and the
@@ -35,7 +40,8 @@
  * Rehearsal (`ALERT_REHEARSE` = `fail` | `clear`, from the dispatch input): the same paths under a separate marker, with
  * every write marked as a rehearsal, so a rehearsal can never absorb a real failure and a real failure never lands on
  * a rehearsal issue. It is owner-only and the workflow skips the real refresh for it. Only the explicit `clear`
- * closes a rehearsal issue; a real success never touches one.
+ * closes a rehearsal issue; a real success never touches one. `restrict` rehearses the restriction message alone: no
+ * issue is touched, the message carries the `[REHEARSAL]` tag and links the repository's PR list. Also owner-only.
  *
  * Environment inputs (names are this script's contract):
  * - `ALERT_REFRESH_RESULT`  `needs.refresh.result`: `success` | `failure` | `cancelled` | `skipped`.
@@ -43,7 +49,12 @@
  * - `ALERT_RUN_ATTEMPT`     `issue` only: `github.run_attempt`. Anything but exactly `1` is a re-run.
  * - `ALERT_NOTIFY`          `notify` only: the previous step's `notify` output.
  * - `ALERT_ISSUE_NUMBER`    `notify` only: the previous step's `issue-number` output.
- * - `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK`  `notify` only. Missing or blank => skipped.
+ * - `ALERT_RESTRICTED`      `restriction` only: the refresh job's `restricted` output, a count. Empty reads as 0; anything
+ *                           but 1 to 4 digits is refused. The ids of the models never reach this script.
+ * - `ALERT_PR_URL`          `restriction` only: the refresh job's `pr-url` output. Used only when it is exactly this
+ *                           repository's pull URL; any other value is dropped for a link to the repository's PR list.
+ * - `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK`  `notify` and `restriction` only. Missing or blank => skipped.
+ * - `ALERT_RUN_ATTEMPT`     also read by `restriction`: only attempt 1 acts.
  * - `GH_TOKEN`              `issue` only, consumed by `gh`.
  * - `GITHUB_REPOSITORY`, `GITHUB_SERVER_URL`, `GITHUB_RUN_ID`, `GITHUB_WORKFLOW`, `GITHUB_ACTOR`,
  *   `GITHUB_REPOSITORY_OWNER`, `GITHUB_OUTPUT`, `GITHUB_STEP_SUMMARY`: set by the runner.
@@ -52,6 +63,7 @@
 import {
   AlertFailure,
   blobUrl,
+  emitNotify,
   issueUrl,
   oneOf,
   parseAttempt,
@@ -76,6 +88,7 @@ import {
   type Plan,
   type RunContext,
 } from './alert-issue'
+import {sendDiscordMessage} from './deploy-gate-notify'
 
 // The shared issue-and-Discord types stay importable from here, where they began.
 export {AlertFailure}
@@ -103,11 +116,12 @@ const REAL_TITLE = 'OpenCode Go privacy refresh is failing'
 const REHEARSAL_TITLE = '[Rehearsal] OpenCode Go privacy refresh alert'
 const RUNBOOK_PATH = 'docs/runbooks/cliproxy-opencode-go.md'
 const RUNBOOK_ANCHOR = 'the-scheduled-refresh-is-failing'
+const RESTRICTION_RUNBOOK_ANCHOR = 'snapshot-refresh-pr-review'
 const REHEARSAL_RESULT_NOTE = 'rehearsal; no refresh ran'
 const ALERT_NAME = 'OpenCode Go privacy alert'
 
 const REFRESH_RESULTS = ['success', 'failure', 'cancelled', 'skipped'] as const
-const REHEARSALS = ['none', 'fail', 'clear'] as const
+const REHEARSALS = ['none', 'fail', 'clear', 'restrict'] as const
 
 export type RefreshResult = (typeof REFRESH_RESULTS)[number]
 export type Rehearse = (typeof REHEARSALS)[number]
@@ -150,6 +164,8 @@ export function readAlertEnv(environment: Readonly<Record<string, string | undef
  * running (any ref but main) and does nothing. A rehearsal ignores the real result and uses its own identity.
  */
 export function planAlert(input: {readonly refreshResult: RefreshResult; readonly rehearse: Rehearse}): Plan {
+  // The restriction rehearsal exercises the Discord message only; the issue path has nothing to do.
+  if (input.rehearse === 'restrict') return {kind: 'none'}
   const rehearsal = rehearsalPlan(input.rehearse)
   if (rehearsal !== null) return rehearsal
   switch (input.refreshResult) {
@@ -284,6 +300,130 @@ export async function runNotifyStep(
   })
 }
 
+// ─── Restriction notice ──────────────────────────────────────────────────────
+
+const MAX_PR_NUMBER_DIGITS = 10
+
+export interface RestrictionEnv extends AlertEnv {
+  /** How many models the snapshot PR would restrict; 0 when the refresh reported none. */
+  readonly restricted: number
+  /** The refresh job's `pr-url` output as given, unvalidated; empty when no PR was opened or updated. */
+  readonly prUrl: string
+}
+
+export type RestrictionSkip = 'rerun' | 'rehearsal' | 'refresh-not-successful' | 'nothing-restricted' | 'no-pr'
+
+export type RestrictionPlan =
+  | {readonly kind: 'skip'; readonly reason: RestrictionSkip}
+  | {
+      readonly kind: 'send'
+      readonly identity: Identity
+      readonly count: number
+      /** This repository's pull URL, or the repository's PR list when the value given was anything else. */
+      readonly link: string
+    }
+
+/** Parse, don't guess: empty is 0 (the refresh did not change the snapshot), a short decimal is a count, the rest throws. */
+function parseRestricted(value: string): number {
+  if (value === '') return 0
+  if (!/^\d{1,4}$/.test(value)) throw new AlertFailure('invalid-restricted')
+  return Number(value)
+}
+
+export function readRestrictionEnv(environment: Readonly<Record<string, string | undefined>>): RestrictionEnv {
+  const read = (name: string): string => environment[name]?.trim() ?? ''
+  return {
+    ...readAlertEnv(environment),
+    restricted: parseRestricted(read('ALERT_RESTRICTED')),
+    prUrl: read('ALERT_PR_URL'),
+  }
+}
+
+/** Exactly `<server>/<owner>/<repo>/pull/<digits>`: compared as text, never rendered from a pattern built from input. */
+function isOwnPullUrl(env: RestrictionEnv): boolean {
+  const prefix = `${env.serverUrl}/${env.repository}/pull/`
+  if (!env.prUrl.startsWith(prefix)) return false
+  const number = env.prUrl.slice(prefix.length)
+  return number.length <= MAX_PR_NUMBER_DIGITS && /^[1-9]\d*$/.test(number)
+}
+
+function pullsUrl(env: RestrictionEnv): string {
+  return `${env.serverUrl}/${env.repository}/pulls`
+}
+
+/**
+ * Decision table, first match wins. Only the first attempt acts: a re-run replays an old refresh result. A rehearsal
+ * replaces the real inputs and is owner-only. A real notice needs a successful refresh, a count above zero and a PR
+ * that this run opened or updated (an empty `pr-url` means the refresh found main already carrying the snapshot).
+ *
+ * Dedupe: none, on purpose. The refresh updates the same PR every day while it differs from main, so a still-open
+ * restricting PR posts once a day. The models stay served until the PR merges and the deploy is approved, so a daily
+ * reminder is the right cost, and it needs no stored state.
+ */
+export function planRestriction(env: RestrictionEnv): RestrictionPlan {
+  if (env.attempt !== 'first') return {kind: 'skip', reason: 'rerun'}
+  if (env.rehearse === 'restrict') {
+    if (env.actor === '' || env.actor !== env.owner) throw new AlertFailure('rehearsal-not-owner')
+    return {kind: 'send', identity: 'rehearsal', count: 1, link: pullsUrl(env)}
+  }
+  if (env.rehearse !== 'none') return {kind: 'skip', reason: 'rehearsal'}
+  if (env.refreshResult !== 'success') return {kind: 'skip', reason: 'refresh-not-successful'}
+  if (env.restricted === 0) return {kind: 'skip', reason: 'nothing-restricted'}
+  if (env.prUrl === '') return {kind: 'skip', reason: 'no-pr'}
+  return {kind: 'send', identity: 'real', count: env.restricted, link: isOwnPullUrl(env) ? env.prUrl : pullsUrl(env)}
+}
+
+/** Fixed text, the count, and links built from the github context or validated as this repository's own. */
+export function buildRestrictionContent(env: RestrictionEnv, plan: Extract<RestrictionPlan, {kind: 'send'}>): string {
+  const rehearsal = plan.identity === 'rehearsal'
+  const [workflow, run] = detailLines(env, '')
+  return [
+    `**${rehearsal ? '[REHEARSAL] ' : ''}OpenCode Go privacy refresh PR restricts models**`,
+    `${plan.count} model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. Until the deploy is approved the proxy keeps serving them.`,
+    ...(rehearsal ? ['Rehearsal: no refresh ran, no PR was opened and nothing is restricted.'] : []),
+    `PR: ${plan.link}`,
+    workflow,
+    run,
+    `Runbook: ${blobUrl(env, RUNBOOK_PATH, RESTRICTION_RUNBOOK_ANCHOR)}`,
+  ].join('\n')
+}
+
+/** Never throws and never fails the job: a missed Discord post is logged, the PR itself is the record. */
+export async function runRestrictionStep(
+  environment: Readonly<Record<string, string | undefined>>,
+  deps: NotifyStepDeps,
+): Promise<NotifySummary> {
+  let summary: NotifySummary
+  try {
+    const env = readRestrictionEnv(environment)
+    const plan = planRestriction(env)
+    const webhook = environment.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK?.trim() ?? ''
+    if (plan.kind === 'skip') {
+      summary = {outcome: 'skipped', attempts: 0, status: null, reason: plan.reason}
+    } else if (webhook === '') {
+      summary = {outcome: 'skipped', attempts: 0, status: null, reason: 'webhook-unset'}
+    } else {
+      const result = await sendDiscordMessage({
+        webhook,
+        content: buildRestrictionContent(env, plan),
+        fetch: deps.fetch,
+        sleep: deps.sleep,
+        timeoutMs: deps.timeoutMs,
+      })
+      summary = {outcome: result.outcome, attempts: result.attempts, status: result.status, reason: result.reason}
+    }
+  } catch (error) {
+    summary = {
+      outcome: 'failed',
+      attempts: 0,
+      status: null,
+      reason: error instanceof AlertFailure ? error.reason : 'internal-error',
+    }
+  }
+  emitNotify(`${ALERT_NAME} restriction`, summary, deps)
+  return summary
+}
+
 // ─── Entrypoint ──────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -299,7 +439,12 @@ async function main(): Promise<void> {
     process.exitCode = 0
     return
   }
-  printLine('::error::Usage: go-privacy-alert.ts <issue|notify>')
+  if (command === 'restriction') {
+    await runRestrictionStep(process.env, realNotifyDeps())
+    process.exitCode = 0
+    return
+  }
+  printLine('::error::Usage: go-privacy-alert.ts <issue|notify|restriction>')
   process.exitCode = 2
 }
 
@@ -309,6 +454,6 @@ if (import.meta.main) {
   } catch {
     // Fixed text only: nothing thrown here may carry a token, a webhook or a response body.
     process.stdout.write('::error::Alert script failed unexpectedly\n')
-    process.exitCode = process.argv[2] === 'notify' ? 0 : 1
+    process.exitCode = process.argv[2] === 'notify' || process.argv[2] === 'restriction' ? 0 : 1
   }
 }

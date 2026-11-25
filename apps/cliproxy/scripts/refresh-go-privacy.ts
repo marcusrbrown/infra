@@ -89,12 +89,16 @@ export interface RunIdentity {
   readonly runAttempt: string
 }
 
-export interface RefreshResult {
-  readonly changed: boolean
-  readonly sourceCommit: string
-  /** The bare name of the changeset written into the target directory; absent when none was written. */
-  readonly changesetFile?: string
-}
+export type RefreshResult =
+  | {readonly changed: false; readonly sourceCommit: string; readonly changesetFile?: undefined}
+  | {
+      readonly changed: true
+      readonly sourceCommit: string
+      /** How many models the previous snapshot made eligible and this one does not (see `restrictedModels`). */
+      readonly restricted: number
+      /** The bare name of the changeset written into the target directory; absent when none was written. */
+      readonly changesetFile?: string
+    }
 
 export interface SnapshotDiff {
   readonly added: readonly string[]
@@ -153,9 +157,14 @@ export function renderChangeset(sha: string): string {
   return `---\n'${CHANGESET_PACKAGE}': patch\n---\n\nRefresh the bundled OpenCode Go privacy snapshot to upstream commit \`${sha.slice(0, 7)}\` of \`${SNAPSHOT_SOURCE_REPO}\`.\n`
 }
 
-/** The `$GITHUB_OUTPUT` lines for one run. `changeset` is a bare file name, present only when one was written. */
+/**
+ * The `$GITHUB_OUTPUT` lines for one run. `changeset` is a bare file name, present only when one was written.
+ * `restricted` is a count and nothing else: model ids are upstream text and never reach the workflow.
+ */
 export function workflowOutputs(result: RefreshResult): string {
-  return `changed=${result.changed}\n${result.changesetFile === undefined ? '' : `changeset=${result.changesetFile}\n`}`
+  if (!result.changed) return 'changed=false\n'
+  const changeset = result.changesetFile === undefined ? '' : `changeset=${result.changesetFile}\n`
+  return `changed=true\n${changeset}restricted=${result.restricted}\n`
 }
 
 /** The exact bytes the file holds: two-space JSON, parser key order, one trailing newline. */
@@ -223,6 +232,21 @@ const describeEntry = (entry: ModelEntry): string =>
 function describeBefore(entry: unknown): string {
   const parsed = modelEntrySchema.safeParse(entry)
   return parsed.success ? describeEntry(parsed.data) : 'invalid entry'
+}
+
+/**
+ * Models the previous snapshot made eligible that `next` does not: what the gated deploy would stop serving once the
+ * PR merges. Covers zero retention lost, training on, newly region-gated, an expired agreement and removal. A model
+ * that was already ineligible, or that is added or relaxed, is not restricted. Same eligibility rule as the deploy.
+ */
+export function restrictedModels(
+  previouslyEligible: ReadonlySet<string>,
+  next: PrivacySnapshot,
+  liveIds: readonly string[],
+  todayUtc: string,
+): string[] {
+  const stillEligible = new Set(computeEligibility({...next, invalid: []}, liveIds, todayUtc).eligible)
+  return [...previouslyEligible].filter(id => !stillEligible.has(id)).sort()
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
@@ -369,10 +393,13 @@ export async function refreshGoPrivacy({
     return {changed: false, sourceCommit: sha}
   }
 
+  // Real exposure: what the previous snapshot would serve today against the list upstream publishes now.
+  const liveIds = [...liveModels.map(model => model.id), ...noPrivacy.map(item => item.id)]
+  const today = now().toISOString().slice(0, 10)
+  const previouslyEligible = new Set(computeEligibility(previous, liveIds, today).eligible)
+  const restricted = restrictedModels(previouslyEligible, next, liveIds, today).length
+
   if (bodyPath !== undefined) {
-    // Real exposure: what the previous snapshot would serve today against the list upstream publishes now.
-    const liveIds = [...liveModels.map(model => model.id), ...noPrivacy.map(item => item.id)]
-    const previouslyEligible = new Set(computeEligibility(previous, liveIds, now().toISOString().slice(0, 10)).eligible)
     writeAtomic(
       bodyPath,
       renderPrBody(previous.source.commit, next, diff, beforeModels, disagreements, unmatched, previouslyEligible),
@@ -387,8 +414,8 @@ export async function refreshGoPrivacy({
   }
   writeAtomic(snapshotPath, content)
   return changesetFile === undefined
-    ? {changed: true, sourceCommit: sha}
-    : {changed: true, sourceCommit: sha, changesetFile}
+    ? {changed: true, sourceCommit: sha, restricted}
+    : {changed: true, sourceCommit: sha, restricted, changesetFile}
 }
 
 if (import.meta.main) {

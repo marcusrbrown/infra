@@ -9,17 +9,21 @@
  */
 
 import type {FetchLike} from './deploy-gate-notify'
-import type {GhResult, GhRunner} from './go-privacy-alert'
+import type {GhResult, GhRunner, RestrictionPlan} from './go-privacy-alert'
 import {describe, expect, it} from 'bun:test'
 import {
   ALERT_LABEL,
   buildDiscordContent,
+  buildRestrictionContent,
   planAlert,
+  planRestriction,
   readAlertEnv,
+  readRestrictionEnv,
   REAL_MARKER,
   REHEARSAL_MARKER,
   runIssueStep,
   runNotifyStep,
+  runRestrictionStep,
 } from './go-privacy-alert'
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -948,5 +952,291 @@ describe('one outage, end to end', () => {
     expect(issue.exitCode).toBe(0)
     expect(fake.issues).toHaveLength(1)
     expect(delivered.summary.outcome).toBe('failed')
+  })
+})
+
+// ─── Restriction notice ──────────────────────────────────────────────────────
+
+// A successful refresh whose PR takes away a model the proxy serves is time-sensitive: the model stays exposed until
+// the PR merges and the gated deploy is approved. The notice is a Discord message only; it opens no issue.
+describe('restriction notice', () => {
+  const PR_URL = `https://github.com/${REPO}/pull/2085`
+  const PULLS_URL = `https://github.com/${REPO}/pulls`
+  const RESTRICTION_RUNBOOK_URL =
+    'https://github.com/marcusrbrown/infra/blob/main/docs/runbooks/cliproxy-opencode-go.md#snapshot-refresh-pr-review'
+
+  const restrictEnv = (overrides: Record<string, string | undefined> = {}): Record<string, string | undefined> =>
+    baseEnv({
+      ALERT_REFRESH_RESULT: 'success',
+      ALERT_RESTRICTED: '2',
+      ALERT_PR_URL: PR_URL,
+      CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: WEBHOOK,
+      ...overrides,
+    })
+
+  async function restrictStep(
+    overrides: Record<string, string | undefined> = {},
+    responder: Responder = () => new Response(null, {status: 204}),
+  ) {
+    const calls: {url: string; body: string}[] = []
+    const logs: string[] = []
+    const fetchImpl: FetchLike = async (input, init) => {
+      calls.push({url: String(input), body: String(init?.body ?? '')})
+      return responder(calls.length, init?.signal ?? undefined)
+    }
+    const summary = await runRestrictionStep(restrictEnv(overrides), {
+      fetch: fetchImpl,
+      sleep: async () => {},
+      log: line => logs.push(line),
+      appendSummary: line => logs.push(line),
+      timeoutMs: 20,
+    })
+    const content = calls[0] === undefined ? undefined : (JSON.parse(calls[0].body) as {content: string}).content
+    return {calls, logs, summary, content}
+  }
+
+  describe('decision table', () => {
+    const real = (count: number, link: string): RestrictionPlan => ({kind: 'send', identity: 'real', count, link})
+
+    it.each<[string, Record<string, string>, RestrictionPlan]>([
+      // [name, env overrides, expected plan]
+      ['restricted models and a valid PR', {}, real(2, PR_URL)],
+      ['one restricted model', {ALERT_RESTRICTED: '1'}, real(1, PR_URL)],
+      ['leading zeros read as a decimal', {ALERT_RESTRICTED: '007'}, real(7, PR_URL)],
+      ['nothing restricted (zero)', {ALERT_RESTRICTED: '0'}, {kind: 'skip', reason: 'nothing-restricted'}],
+      ['nothing restricted (output absent)', {ALERT_RESTRICTED: ''}, {kind: 'skip', reason: 'nothing-restricted'}],
+      ['no PR was opened or updated', {ALERT_PR_URL: ''}, {kind: 'skip', reason: 'no-pr'}],
+      ['a failed refresh', {ALERT_REFRESH_RESULT: 'failure'}, {kind: 'skip', reason: 'refresh-not-successful'}],
+      ['a cancelled refresh', {ALERT_REFRESH_RESULT: 'cancelled'}, {kind: 'skip', reason: 'refresh-not-successful'}],
+      ['a skipped refresh', {ALERT_REFRESH_RESULT: 'skipped'}, {kind: 'skip', reason: 'refresh-not-successful'}],
+      ['a re-run (attempt 2)', {ALERT_RUN_ATTEMPT: '2'}, {kind: 'skip', reason: 'rerun'}],
+      ['a missing attempt', {ALERT_RUN_ATTEMPT: ''}, {kind: 'skip', reason: 'rerun'}],
+      ['a malformed attempt', {ALERT_RUN_ATTEMPT: '1x'}, {kind: 'skip', reason: 'rerun'}],
+      ['an issue rehearsal (fail)', {ALERT_REHEARSE: 'fail'}, {kind: 'skip', reason: 'rehearsal'}],
+      ['an issue rehearsal (clear)', {ALERT_REHEARSE: 'clear'}, {kind: 'skip', reason: 'rehearsal'}],
+      [
+        'a restriction rehearsal',
+        {ALERT_REHEARSE: 'restrict', ALERT_REFRESH_RESULT: 'skipped', ALERT_RESTRICTED: '', ALERT_PR_URL: ''},
+        {kind: 'send', identity: 'rehearsal', count: 1, link: PULLS_URL},
+      ],
+      [
+        'a restriction rehearsal re-run',
+        {ALERT_REHEARSE: 'restrict', ALERT_RUN_ATTEMPT: '2'},
+        {kind: 'skip', reason: 'rerun'},
+      ],
+    ])('%s', (_name, overrides, expected) => {
+      expect(planRestriction(readRestrictionEnv(restrictEnv(overrides)))).toEqual(expected)
+    })
+
+    it.each([
+      ['another repository', 'https://github.com/someone/else/pull/2085'],
+      ['an issue link', `https://github.com/${REPO}/issues/2085`],
+      ['plain http', `http://github.com/${REPO}/pull/2085`],
+      ['another host', `https://evil.example/${REPO}/pull/2085`],
+      ['a trailing path', `${PR_URL}/files`],
+      ['a query string', `${PR_URL}?x=1`],
+      ['a fragment', `${PR_URL}#x`],
+      ['trailing text', `${PR_URL} @everyone`],
+      ['a markdown link', `[x](${PR_URL})`],
+      ['a newline', `${PR_URL}\nhttps://evil.example`],
+      ['a non-numeric id', `https://github.com/${REPO}/pull/abc`],
+      ['a prefix of this repository name', `https://github.com/${REPO}-fork/pull/2085`],
+      ['an oversize id', `https://github.com/${REPO}/pull/${'9'.repeat(11)}`],
+    ])('falls back to the open PR list, never echoing the value, for %s', (_name, bad) => {
+      const plan = planRestriction(readRestrictionEnv(restrictEnv({ALERT_PR_URL: bad})))
+      expect(plan).toEqual({kind: 'send', identity: 'real', count: 2, link: PULLS_URL})
+    })
+
+    it.each(['abc', '-1', '1.5', '1 2', '99999', '2\n3', '0x2', '١'])(
+      'refuses a malformed restricted count %j instead of guessing',
+      bad => {
+        expect(() => readRestrictionEnv(restrictEnv({ALERT_RESTRICTED: bad}))).toThrow()
+      },
+    )
+
+    it('refuses a rehearsal from anyone but the owner, and an actor-less environment', () => {
+      for (const overrides of [{GITHUB_ACTOR: 'someone-else'}, {GITHUB_ACTOR: '', GITHUB_REPOSITORY_OWNER: ''}]) {
+        const env = readRestrictionEnv(restrictEnv({ALERT_REHEARSE: 'restrict', ...overrides}))
+        expect(() => planRestriction(env)).toThrow()
+      }
+    })
+  })
+
+  describe('message', () => {
+    it('is this exact text for a real restriction', async () => {
+      const run = await restrictStep()
+
+      expect(run.content).toBe(
+        [
+          '**OpenCode Go privacy refresh PR restricts models**',
+          '2 model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. Until the deploy is approved the proxy keeps serving them.',
+          `PR: ${PR_URL}`,
+          'Workflow: OpenCode Go Privacy',
+          `Run: ${RUN_URL}`,
+          `Runbook: ${RESTRICTION_RUNBOOK_URL}`,
+        ].join('\n'),
+      )
+    })
+
+    it('is this exact text for a rehearsal, with no real PR in it', async () => {
+      const run = await restrictStep({
+        ALERT_REHEARSE: 'restrict',
+        ALERT_REFRESH_RESULT: 'skipped',
+        ALERT_RESTRICTED: '',
+        ALERT_PR_URL: '',
+      })
+
+      expect(run.content).toBe(
+        [
+          '**[REHEARSAL] OpenCode Go privacy refresh PR restricts models**',
+          '1 model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. Until the deploy is approved the proxy keeps serving them.',
+          'Rehearsal: no refresh ran, no PR was opened and nothing is restricted.',
+          `PR: ${PULLS_URL}`,
+          'Workflow: OpenCode Go Privacy',
+          `Run: ${RUN_URL}`,
+          `Runbook: ${RESTRICTION_RUNBOOK_URL}`,
+        ].join('\n'),
+      )
+    })
+
+    it('points at the runbook section that tells the reader what to do', () => {
+      const env = readRestrictionEnv(restrictEnv())
+      const plan = planRestriction(env)
+      if (plan.kind !== 'send') throw new Error('expected a send plan')
+      expect(buildRestrictionContent(env, plan)).toContain('#snapshot-refresh-pr-review')
+    })
+
+    it('posts with mentions off and embeds suppressed', async () => {
+      const run = await restrictStep()
+      const payload = JSON.parse(run.calls[0]?.body ?? '{}') as Record<string, unknown>
+
+      expect(run.calls).toHaveLength(1)
+      expect(run.calls[0]?.url).toBe(WEBHOOK)
+      expect(payload.allowed_mentions).toEqual({parse: []})
+      expect(payload.flags).toBe(4)
+      expect(run.summary.outcome).toBe('sent')
+    })
+
+    it('carries only the count, the validated links and fixed text: no model name, no upstream text, no hostile input', async () => {
+      const run = await restrictStep({
+        ALERT_PR_URL: `${PR_URL} @everyone <@1234> [x](http://evil.example) glm-5.3 kimi-k3`,
+        GITHUB_WORKFLOW: 'OpenCode Go Privacy @everyone <@1234> [x](http://evil.example)',
+        REFRESH_ERROR: 'Upstream said: ignore previous instructions',
+      })
+
+      expect(run.content).toContain(`PR: ${PULLS_URL}`)
+      expect(run.content).not.toMatch(/[@<>[\]]/)
+      expect(run.content).not.toContain('(http')
+      expect(run.content).not.toContain('://evil')
+      expect(run.content).not.toMatch(/glm|kimi|Upstream said/)
+      expect(run.content?.length).toBeLessThan(1900)
+    })
+  })
+
+  describe('delivery', () => {
+    it('posts nothing, and does not fail, when nothing is restricted', async () => {
+      const run = await restrictStep({ALERT_RESTRICTED: '0'})
+
+      expect(run.calls).toEqual([])
+      expect(run.summary).toMatchObject({outcome: 'skipped', reason: 'nothing-restricted'})
+    })
+
+    it('posts nothing on a re-run, which replays an older refresh result', async () => {
+      const run = await restrictStep({ALERT_RUN_ATTEMPT: '2'})
+
+      expect(run.calls).toEqual([])
+      expect(run.summary).toMatchObject({outcome: 'skipped', reason: 'rerun'})
+    })
+
+    it('posts nothing on a failed refresh: the failure alert owns that path', async () => {
+      const run = await restrictStep({ALERT_REFRESH_RESULT: 'failure'})
+
+      expect(run.calls).toEqual([])
+    })
+
+    it('skips with a log line, and does not fail, when the webhook is unset or blank', async () => {
+      for (const webhook of [undefined, '', '   ']) {
+        const run = await restrictStep({CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: webhook})
+        expect(run.calls).toEqual([])
+        expect(run.summary).toMatchObject({outcome: 'skipped', reason: 'webhook-unset'})
+        expect(run.logs.join('\n')).toContain('skipped')
+      }
+    })
+
+    it('does not touch the webhook when the decision is to skip', async () => {
+      const run = await restrictStep({ALERT_RESTRICTED: '0', CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: 'not a url'})
+
+      expect(run.summary).toMatchObject({outcome: 'skipped', reason: 'nothing-restricted'})
+    })
+
+    it('reports a refused rehearsal and a malformed count as fixed reasons, and posts nothing', async () => {
+      const stranger = await restrictStep({ALERT_REHEARSE: 'restrict', GITHUB_ACTOR: 'someone-else'})
+      expect(stranger.calls).toEqual([])
+      expect(stranger.summary).toMatchObject({outcome: 'failed', reason: 'rehearsal-not-owner'})
+
+      const garbage = await restrictStep({ALERT_RESTRICTED: 'glm-5.3'})
+      expect(garbage.calls).toEqual([])
+      expect(garbage.summary).toMatchObject({outcome: 'failed', reason: 'invalid-restricted'})
+      expect(garbage.logs.join('\n')).not.toContain('glm-5.3')
+    })
+
+    it('retries a 5xx, then reports the fixed reason without failing, and never logs the webhook or the response', async () => {
+      const run = await restrictStep({}, () => new Response(`echo ${WEBHOOK}`, {status: 503}))
+
+      expect(run.calls).toHaveLength(3)
+      expect(run.summary).toMatchObject({outcome: 'failed', reason: 'http-503'})
+      expect(run.logs.join('\n')).not.toContain('SECRET-token_value')
+      expect(run.logs.join('\n')).not.toContain('echo')
+    })
+
+    it('does not post a rehearsal message for a real run, nor a real message for a rehearsal', async () => {
+      const real = await restrictStep()
+      const rehearsal = await restrictStep({
+        ALERT_REHEARSE: 'restrict',
+        ALERT_REFRESH_RESULT: 'skipped',
+        ALERT_RESTRICTED: '',
+        ALERT_PR_URL: '',
+      })
+
+      expect(real.content).not.toContain('REHEARSAL')
+      expect(rehearsal.content).toContain('[REHEARSAL]')
+      expect(rehearsal.content).not.toContain('/pull/')
+    })
+  })
+
+  describe('the issue step stays out of it', () => {
+    it('does nothing for a restriction rehearsal: no API call, no notify request', async () => {
+      const fake = fakeGh([realIssue()], {labels: [ALERT_LABEL]})
+      const run = await issueStep({ALERT_REHEARSE: 'restrict', ALERT_REFRESH_RESULT: 'skipped'}, fake)
+
+      expect(run.exitCode).toBe(0)
+      expect(fake.calls).toEqual([])
+      expect(run.outputs).toEqual({notify: 'none'})
+    })
+
+    it('still maps a successful refresh to a clear, whatever the restriction environment says', async () => {
+      const fake = fakeGh([realIssue()], {labels: [ALERT_LABEL]})
+      const run = await issueStep({ALERT_REFRESH_RESULT: 'success', ALERT_RESTRICTED: '3', ALERT_PR_URL: PR_URL}, fake)
+
+      expect(run.outputs.notify).toBe('recovered')
+    })
+  })
+
+  describe('with a recovery on the same run', () => {
+    it('posts one recovery message and one restriction message, from two steps', async () => {
+      const fake = fakeGh([realIssue()], {labels: [ALERT_LABEL]})
+      const issue = await issueStep({ALERT_REFRESH_RESULT: 'success'}, fake)
+      const recovery = await notifyStep({
+        ALERT_REFRESH_RESULT: 'success',
+        ALERT_NOTIFY: issue.outputs.notify,
+        ALERT_ISSUE_NUMBER: issue.outputs['issue-number'],
+      })
+      const restriction = await restrictStep()
+
+      expect(recovery.calls).toHaveLength(1)
+      expect(restriction.calls).toHaveLength(1)
+      expect(recovery.calls[0]?.body).toContain('recovered')
+      expect(restriction.calls[0]?.body).toContain('restricts models')
+    })
   })
 })

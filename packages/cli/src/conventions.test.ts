@@ -6287,6 +6287,31 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     expect(existsSync(resolve(REPO_ROOT, SNAPSHOT_PATH))).toBe(true)
   })
 
+  it('reports the restricted count and a validated PR URL to the alert job, and nothing else about the models', async () => {
+    const {steps, workflow} = await load()
+    const job = workflowJob(workflow, 'refresh')
+    const pr = steps.find(step => step.name === 'Open snapshot PR')
+    const script = String(pr?.run)
+
+    expect(job.outputs).toEqual({
+      restricted: ghaExpression('steps.refresh.outputs.restricted'),
+      'pr-url': ghaExpression('steps.open-pr.outputs.pr-url'),
+    })
+    expect(pr?.id).toBe('open-pr')
+    // The URL is built from the runner's own repository and a numeric id, never from text gh printed.
+    expect(script).toContain(`pr-url=${'$'}{GITHUB_SERVER_URL}/${'$'}{GITHUB_REPOSITORY}/pull/${'$'}{number}`)
+    expect(script).toContain(`[[ "${'$'}{number}" =~ ^[0-9]{1,10}$ ]]`)
+    expect(script).toContain(`number="${'$'}{existing}"`)
+    expect(script).toContain('created=$(gh pr create')
+    expect(script).toContain(
+      `"${'$'}{created}" != "${'$'}{GITHUB_SERVER_URL}/${'$'}{GITHUB_REPOSITORY}/pull/${'$'}{number}"`,
+    )
+    // Reported only after a PR was created or updated: the early exits and the push come first.
+    expect(script.indexOf('pr-url=')).toBeGreaterThan(script.indexOf('gh pr create'))
+    expect(script.indexOf('pr-url=')).toBeGreaterThan(script.indexOf('gh pr edit'))
+    expect(script.slice(0, script.indexOf('git commit'))).not.toContain('pr-url')
+  })
+
   it('stages the one changeset the refresh reported, validated by name, and keeps it across the branch reset', async () => {
     const {steps} = await load()
     const refresh = steps[stepIndex(steps, 'refresh')]
@@ -6448,6 +6473,7 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
   describe('failure alert job', () => {
     const WEBHOOK_SECRET = 'CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK'
     const ALERT_SCRIPT = 'packages/cli/scripts/go-privacy-alert.ts'
+    const RESTRICTION_STEP = 'Notify Discord of restricted models'
 
     const stepNamed = (steps: Record<string, unknown>[], name: string): Record<string, unknown> | undefined =>
       steps.find(step => step.name === name)
@@ -6485,16 +6511,21 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
       expect(Object.keys(isRecord(job.permissions) ? job.permissions : {}).sort()).toEqual(['contents', 'issues'])
     })
 
-    it('reads the webhook secret in the Discord step alone, through env, never in a script body', async () => {
+    it('reads the webhook secret in the two Discord steps alone, through env, never in a script body', async () => {
       const {steps} = await loadAlert()
       const readers = steps.filter(step => JSON.stringify(step).includes('secrets.'))
 
-      expect(readers.map(step => step.name)).toEqual(['Notify Discord'])
-      const env = isRecord(readers[0]?.env) ? readers[0].env : {}
-      expect(env[WEBHOOK_SECRET]).toBe(ghaExpression(`secrets.${WEBHOOK_SECRET}`))
-      expect(Object.values(env).filter(value => String(value).includes('secrets.'))).toHaveLength(1)
-      expect(String(readers[0]?.run)).not.toContain('${{')
-      expect(String(readers[0]?.run)).toBe(`bun run ${ALERT_SCRIPT} notify`)
+      expect(readers.map(step => step.name)).toEqual(['Notify Discord', RESTRICTION_STEP])
+      for (const [reader, command] of [
+        [readers[0], 'notify'],
+        [readers[1], 'restriction'],
+      ] as const) {
+        const env = isRecord(reader?.env) ? reader.env : {}
+        expect(env[WEBHOOK_SECRET]).toBe(ghaExpression(`secrets.${WEBHOOK_SECRET}`))
+        expect(Object.values(env).filter(value => String(value).includes('secrets.'))).toHaveLength(1)
+        expect(String(reader?.run)).not.toContain('${{')
+        expect(String(reader?.run)).toBe(`bun run ${ALERT_SCRIPT} ${command}`)
+      }
     })
 
     it('keeps the write-capable workflow token out of the Discord step and the webhook out of the issue step', async () => {
@@ -6511,6 +6542,49 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
       expect(notify?.['continue-on-error']).toBeUndefined()
       expect(steps.indexOf(notify ?? {})).toBeGreaterThan(steps.indexOf(issue ?? {}))
       expect(issue?.id).toBe('issue')
+    })
+
+    describe('restriction notice step', () => {
+      const restriction = async (): Promise<Record<string, unknown> | undefined> =>
+        stepNamed((await loadAlert()).steps, RESTRICTION_STEP)
+
+      it('holds the webhook and no token, and the issue step never holds the webhook', async () => {
+        const {steps} = await loadAlert()
+        const step = stepNamed(steps, RESTRICTION_STEP)
+        const issue = stepNamed(steps, 'Update alert issue')
+
+        expect(JSON.stringify(step)).not.toContain('github.token')
+        expect(JSON.stringify(step)).not.toContain('GH_TOKEN')
+        expect(JSON.stringify(issue)).not.toContain(WEBHOOK_SECRET)
+        expect(JSON.stringify(issue)).not.toContain('needs.refresh.outputs')
+      })
+
+      it('runs after the issue step even when it failed, and never on a cancelled run', async () => {
+        const step = await restriction()
+
+        expect(step?.if).toBe(
+          "(inputs.rehearse-alert == 'restrict' || (needs.refresh.result == 'success' && needs.refresh.outputs.restricted != '' && needs.refresh.outputs.restricted != '0')) && !cancelled()",
+        )
+        expect(step?.['continue-on-error']).toBeUndefined()
+        const {steps} = await loadAlert()
+        const issue = steps.findIndex(candidate => candidate.id === 'issue')
+        expect(issue).toBeGreaterThanOrEqual(0)
+        expect(steps.findIndex(candidate => candidate.name === RESTRICTION_STEP)).toBeGreaterThan(issue)
+      })
+
+      it('passes the result, rehearsal, attempt, count and PR URL through env, and nothing else about the models', async () => {
+        const step = await restriction()
+        const env = isRecord(step?.env) ? step.env : {}
+
+        expect(env).toEqual({
+          ALERT_REFRESH_RESULT: ghaExpression('needs.refresh.result'),
+          ALERT_REHEARSE: ghaExpression('inputs.rehearse-alert'),
+          ALERT_RUN_ATTEMPT: ghaExpression('github.run_attempt'),
+          ALERT_RESTRICTED: ghaExpression('needs.refresh.outputs.restricted'),
+          ALERT_PR_URL: ghaExpression('needs.refresh.outputs.pr-url'),
+          [WEBHOOK_SECRET]: ghaExpression(`secrets.${WEBHOOK_SECRET}`),
+        })
+      })
     })
 
     it('never receives the App token or the App credentials', async () => {
@@ -6533,6 +6607,8 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
           'github.token',
           'github.run_attempt',
           'needs.refresh.result',
+          'needs.refresh.outputs.restricted',
+          'needs.refresh.outputs.pr-url',
           'inputs.rehearse-alert',
           'steps.issue.outputs.notify',
           'steps.issue.outputs.issue-number',
@@ -6581,7 +6657,7 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
       expect(inputs['rehearse-alert']).toMatchObject({
         type: 'choice',
         default: 'none',
-        options: ['none', 'fail', 'clear'],
+        options: ['none', 'fail', 'clear', 'restrict'],
       })
     })
 

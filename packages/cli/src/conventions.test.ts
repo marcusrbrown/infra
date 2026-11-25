@@ -3925,6 +3925,57 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     })
   })
 
+  describe('Deploy Pipeline Health: traces section', () => {
+    it('evaluates the latest deploy attempt across the router and a direct deploy-traces.yaml dispatch', async () => {
+      const {sections} = await loadHealthCategory()
+      const section = sections.traces ?? ''
+      expect(section).toContain(
+        '`deploy.yaml` (jobs `deploy-traces / build-collector` and `deploy-traces / deploy-traces`)',
+      )
+      expect(section).toContain('direct dispatch of `deploy-traces.yaml` (jobs `build-collector` and `deploy-traces`)')
+      expect(section).toContain('LAST DEPLOY EVIDENCE')
+    })
+
+    it('opens an issue for a failed build-collector in either workflow without a later successful deploy job', async () => {
+      const {sections} = await loadHealthCategory()
+      expect(sections.traces ?? '').toMatch(
+        /A failed `build-collector` in either workflow, with no later successful deploy job, is an issue/,
+      )
+    })
+
+    it('lets freshness win: an old successful run is missing delivery, not healthy', async () => {
+      const {sections} = await loadHealthCategory()
+      expect(sections.traces ?? '').toMatch(
+        /older than 120 minutes \(monitor\) or 36 hours \(backup\) is Missing scheduled delivery even if it succeeded/,
+      )
+    })
+
+    it('reports the not-configured notice as a no-op, never Healthy', async () => {
+      const {sections} = await loadHealthCategory()
+      const section = sections.traces ?? ''
+      expect(section).toContain('No-op (not configured)')
+      expect(section).toContain(
+        'TRACES_DOMAIN is not set, so the trace collection stack is treated as not deployed yet. Nothing was probed.',
+      )
+      expect(section).toContain(
+        'TRACES_DOMAIN not set, so the trace stack is treated as not deployed yet. No snapshot was taken.',
+      )
+      expect(section).toMatch(/Report Healthy only for a fresh successful run whose log has no such notice/)
+    })
+
+    it('matches the real alert issue by label and real marker, and ignores rehearsal issues', async () => {
+      const {sections} = await loadHealthCategory()
+      const section = sections.traces ?? ''
+      expect(section).toContain('<!-- traces-monitor-alert:v1 -->')
+      expect(section).toContain('<!-- traces-backup-alert:v1 -->')
+      expect(section).toContain('Trace collection stack is unhealthy')
+      expect(section).toContain('Trace data backup is failing')
+      expect(section).toContain('traces-monitor-alert-rehearsal:v1')
+      expect(section).toContain('traces-backup-alert-rehearsal:v1')
+      expect(section).toMatch(/a labelled issue without the real marker is not the alert/i)
+    })
+  })
+
   describe('Deploy Pipeline Health: status snapshot age row', () => {
     const SNAPSHOT_ROW = /^\s*\|\s*docs\s*\|\s*Status snapshot age\s*\|/
     const LAST_DEPLOY_ROW = /\|\s*Last deploy-[\w-]+ run\s*\|/

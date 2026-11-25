@@ -42,6 +42,8 @@ These are targets, not guarantees. A delayed database merge or a failed snapshot
 
 After a restore from a snapshot, any Tempo data block that was caught half-written is moved into a quarantine folder on the same volume instead of being deleted. That folder is outside the 30-day retention, and the operator deletes it by hand.
 
+Langfuse also keeps a usage ledger with one row per span, trace and score. A row holds the trace and span IDs, the project and timestamps, and no trace content. The ledger has no expiry, so these rows are kept indefinitely.
+
 ## Deleting data
 
 The operator can delete a trace from Langfuse on request. Tempo has no way to delete one trace. Its copy (structure, names, error text and link attributes) expires with the 30-day retention, unless the operator wipes the whole Tempo store. A quarantined Tempo block (see above) does not expire by itself; the operator deletes it. A snapshot that contains the data ages out within 8 days of the deletion.

@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.30.4
+
+### Patch Changes
+
+- Refresh the bundled OpenCode Go privacy snapshot to upstream commit `13d601e` of `anomalyco/opencode`. ([#2085](https://github.com/marcusrbrown/infra/pull/2085))
+
 ## 0.30.3
 
 ### Patch Changes

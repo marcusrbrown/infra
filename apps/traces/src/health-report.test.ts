@@ -9,9 +9,12 @@ import {
   assembleVerdict,
   blockEndMs,
   buildCanary,
+  CANARY_CHECK_IDS,
   CANARY_ENVIRONMENT,
   CANARY_GROUP,
+  CANARY_ONCE_FLAG,
   CANARY_PLACES,
+  canaryOnceOutput,
   CLICKHOUSE_READER_USER,
   combineLangfuse,
   createReporter,
@@ -40,6 +43,7 @@ import {
   rawBatchKey,
   readTempoBlockMetasFrom,
   REQUIRED_CHECKS,
+  runCanary,
   SENTINEL_CONTENT,
   TEMPO_DROPPED_PLACES,
   TEMPO_KEPT_PLACES,
@@ -366,6 +370,18 @@ async function runOnce(overrides: Partial<Behaviour> = {}) {
   const reporter = createReporter(world.deps)
   await reporter.runOnce()
   return {...world, reporter, detail: reporter.detail()}
+}
+
+/** The canary alone, through the same function `--canary-once` runs. */
+async function canaryRun(overrides: Partial<Behaviour> = {}) {
+  const world = harness(overrides)
+  const checks = await runCanary(world.deps)
+  const byId = (id: string): CheckResult => {
+    const found = checks.find(entry => entry.id === id)
+    if (found === undefined) throw new Error(`no check ${id}`)
+    return found
+  }
+  return {...world, checks, byId}
 }
 
 // ─── Prometheus text ──────────────────────────────────────────────────────────
@@ -1089,11 +1105,30 @@ describe('a passing run', () => {
     expect(out.reporter.health().status).toBe(200)
   })
 
-  it('sends the canary to the private receiver as JSON and reads Langfuse with the read-only user', async () => {
+  it('sends no canary and requires none: the verdict carries no canary check', async () => {
+    const out = await runOnce()
+    const ids = (record(JSON.parse(out.detail), 'detail').checks as CheckResult[]).map(entry => entry.id)
+    expect(ids.filter(id => id.startsWith('canary'))).toEqual([])
+    expect(REQUIRED_CHECKS.filter(id => id.startsWith('canary'))).toEqual([])
+    expect(out.requests.some(entry => entry.url === ENDPOINTS.canaryReceiver)).toBe(false)
+    expect(out.requests.some(entry => entry.url.startsWith(ENDPOINTS.tempoTraceBase))).toBe(false)
+    expect(out.requests.some(entry => entry.url === 'object-store-read')).toBe(false)
+    expect(out.requests.some(entry => entry.body.includes('trace_id = {tid'))).toBe(false)
+  })
+
+  it('stays passing and sends no canary on later runs, and never sleeps for one', async () => {
+    const world = harness()
+    const reporter = createReporter(world.deps)
+    await reporter.runOnce()
+    world.state.now += THRESHOLDS.intervalMs
+    await reporter.runOnce()
+    expect(reporter.health().status).toBe(200)
+    expect(world.requests.filter(entry => entry.url === ENDPOINTS.canaryReceiver)).toHaveLength(0)
+    expect(world.state.now).toBe(NOW + THRESHOLDS.intervalMs)
+  })
+
+  it('reads ClickHouse with the read-only user for the age check', async () => {
     const {requests} = await runOnce()
-    const post = requests.find(entry => entry.url === ENDPOINTS.canaryReceiver)
-    expect(post?.method).toBe('POST')
-    expect(post?.headers['content-type']).toBe('application/json')
     const reads = requests.filter(entry => entry.url.startsWith(ENDPOINTS.clickhouse))
     expect(reads.length).toBeGreaterThan(0)
     for (const read of reads) {
@@ -1122,54 +1157,12 @@ describe('a passing run', () => {
 })
 
 describe('error paths name the failing check and fail the verdict', () => {
-  it('canary missing from Langfuse: the Langfuse branch fails, Tempo stays healthy', async () => {
-    const out = await runOnce({rowMissing: 'all'})
-    expect(check(out.detail, 'canary-langfuse')).toMatchObject({status: 'fail'})
-    expect(check(out.detail, 'canary-langfuse').detail).toContain('Langfuse')
-    expect(check(out.detail, 'canary-tempo').status).toBe('pass')
-    expect(check(out.detail, 'canary-send').status).toBe('pass')
-    expect(out.reporter.health().status).toBe(503)
-  })
-
-  it('materialised markers missing from the Langfuse row: names them and the column', async () => {
-    const out = await runOnce({rowMissing: ['status-message', 'scope-attribute']})
-    const entry = check(out.detail, 'canary-langfuse')
-    expect(entry.status).toBe('fail')
-    expect(entry.detail).toContain('status-message')
-    expect(entry.detail).toContain('status_message')
-    expect(entry.detail).toContain('scope-attribute')
-    expect(out.reporter.health().status).toBe(503)
-  })
-
   it('worker health fails while web answers: the verdict fails and names the worker', async () => {
     const out = await runOnce({langfuseWorker: 503})
     expect(check(out.detail, 'langfuse-worker')).toMatchObject({status: 'fail'})
     expect(check(out.detail, 'langfuse-worker').detail).toContain('worker')
     expect(check(out.detail, 'langfuse-web').status).toBe('pass')
     expect(out.reporter.health().status).toBe(503)
-  })
-
-  it.each(TEMPO_DROPPED_PLACES)('a %s marker found in Tempo fails the verdict and names the place', async place => {
-    const out = await runOnce({tempoPlaces: [...TEMPO_KEPT_PLACES, place]})
-    const entry = check(out.detail, 'canary-tempo')
-    expect(entry.status).toBe('fail')
-    expect(entry.detail).toContain(place)
-    expect(check(out.detail, 'canary-langfuse').status).toBe('pass')
-    expect(out.reporter.health().status).toBe(503)
-  })
-
-  it('canary never reaches Tempo: fails after the deadline, with the clock advancing only by sleeping', async () => {
-    const out = await runOnce({tempoPlaces: 'none'})
-    expect(check(out.detail, 'canary-tempo').status).toBe('fail')
-    expect(out.state.now - NOW).toBeGreaterThanOrEqual(THRESHOLDS.canaryDeadlineMs)
-  })
-
-  it('the collector will not take the canary: send fails and the readbacks are unknown, not passing', async () => {
-    const out = await runOnce({canaryPost: 503})
-    expect(check(out.detail, 'canary-send').status).toBe('fail')
-    expect(check(out.detail, 'canary-langfuse').status).toBe('unknown')
-    expect(check(out.detail, 'canary-tempo').status).toBe('unknown')
-    expect(out.requests.some(entry => entry.url.startsWith(ENDPOINTS.tempoTraceBase))).toBe(false)
   })
 
   it('the oldest ClickHouse span is 32 days old: the verdict fails', async () => {
@@ -1188,7 +1181,6 @@ describe('error paths name the failing check and fail the verdict', () => {
   it('a table that cannot be read fails the age check rather than being skipped', async () => {
     const out = await runOnce({clickhouseStatus: 404})
     expect(check(out.detail, 'data-age-clickhouse').status).toBe('unknown')
-    expect(check(out.detail, 'canary-langfuse').status).not.toBe('pass')
     expect(out.reporter.health().status).toBe(503)
   })
 
@@ -1216,7 +1208,6 @@ describe('error paths name the failing check and fail the verdict', () => {
     const out = await runOnce({secretsMissing: true})
     expect(check(out.detail, 'data-age-clickhouse').status).toBe('unknown')
     expect(check(out.detail, 'data-age-object-store').status).toBe('unknown')
-    expect(check(out.detail, 'canary-langfuse').status).toBe('unknown')
     expect(out.reporter.health().status).toBe(503)
   })
 
@@ -1228,11 +1219,166 @@ describe('error paths name the failing check and fail the verdict', () => {
   })
 })
 
-describe('the Langfuse half of a whole run', () => {
+// The canary is the deploy gate's proof, run on demand through `--canary-once`. These tests run `runCanary`
+// directly: the same code, with the same injected fetch and object store.
+describe('the canary check results', () => {
+  it('sends one canary to the private receiver as JSON and reads Langfuse with the read-only user', async () => {
+    const out = await canaryRun()
+    expect(out.checks.map(entry => entry.id)).toEqual(['canary-send', 'canary-langfuse', 'canary-tempo'])
+    for (const entry of out.checks) expect(entry.status).toBe('pass')
+    const posts = out.requests.filter(entry => entry.url === ENDPOINTS.canaryReceiver)
+    expect(posts).toHaveLength(1)
+    expect(posts[0]?.method).toBe('POST')
+    expect(posts[0]?.headers['content-type']).toBe('application/json')
+    const reads = out.requests.filter(entry => entry.url.startsWith(ENDPOINTS.clickhouse))
+    expect(reads.length).toBeGreaterThan(0)
+    for (const read of reads) {
+      expect(read.headers['x-clickhouse-user']).toBe(CLICKHOUSE_READER_USER)
+      expect(read.headers['x-clickhouse-key']).toBe(CLICKHOUSE_PASSWORD)
+    }
+  })
+
+  it('canary missing from Langfuse: the Langfuse branch fails, Tempo stays healthy', async () => {
+    const out = await canaryRun({rowMissing: 'all'})
+    expect(out.byId('canary-langfuse')).toMatchObject({status: 'fail'})
+    expect(out.byId('canary-langfuse').detail).toContain('Langfuse')
+    expect(out.byId('canary-tempo').status).toBe('pass')
+    expect(out.byId('canary-send').status).toBe('pass')
+  })
+
+  it('materialised markers missing from the Langfuse row: names them and the column', async () => {
+    const out = await canaryRun({rowMissing: ['status-message', 'scope-attribute']})
+    const entry = out.byId('canary-langfuse')
+    expect(entry.status).toBe('fail')
+    expect(entry.detail).toContain('status-message')
+    expect(entry.detail).toContain('status_message')
+    expect(entry.detail).toContain('scope-attribute')
+  })
+
+  it.each(TEMPO_DROPPED_PLACES)('a %s marker found in Tempo fails and names the place', async place => {
+    const out = await canaryRun({tempoPlaces: [...TEMPO_KEPT_PLACES, place]})
+    const entry = out.byId('canary-tempo')
+    expect(entry.status).toBe('fail')
+    expect(entry.detail).toContain(place)
+    expect(out.byId('canary-langfuse').status).toBe('pass')
+  })
+
+  it('canary never reaches Tempo: fails after the deadline, with the clock advancing only by sleeping', async () => {
+    const out = await canaryRun({tempoPlaces: 'none'})
+    expect(out.byId('canary-tempo').status).toBe('fail')
+    expect(out.state.now - NOW).toBeGreaterThanOrEqual(THRESHOLDS.canaryDeadlineMs)
+  })
+
+  it('the collector will not take the canary: send fails and the readbacks are unknown, not passing', async () => {
+    const out = await canaryRun({canaryPost: 503})
+    expect(out.byId('canary-send').status).toBe('fail')
+    expect(out.byId('canary-langfuse').status).toBe('unknown')
+    expect(out.byId('canary-tempo').status).toBe('unknown')
+    expect(out.requests.some(entry => entry.url.startsWith(ENDPOINTS.tempoTraceBase))).toBe(false)
+  })
+
+  it('a canary post that cannot connect fails the send', async () => {
+    expect((await canaryRun({canaryPost: 'throw'})).byId('canary-send').status).toBe('fail')
+  })
+
+  it.each([
+    ['tempo trace read 500', {tempoTrace: 500}],
+    ['tempo trace read unparsable', {tempoTrace: 'garbage'}],
+  ] as const)('%s never passes the Tempo check', async (_label, overrides) => {
+    expect((await canaryRun(overrides)).byId('canary-tempo').status).not.toBe('pass')
+  })
+
+  it('a missing secret file makes the Langfuse readback unknown, never passing', async () => {
+    expect((await canaryRun({secretsMissing: true})).byId('canary-langfuse').status).toBe('unknown')
+  })
+
+  it('a ClickHouse that answers 404 never passes the Langfuse readback', async () => {
+    expect((await canaryRun({clickhouseStatus: 404})).byId('canary-langfuse').status).not.toBe('pass')
+  })
+
+  // Each row hangs one dependency and names the check that must not be passing afterwards.
+  const hangs: [string, (url: string, body: string) => boolean, string][] = [
+    ['the canary post', url => url === ENDPOINTS.canaryReceiver, 'canary-send'],
+    [
+      'the ClickHouse canary read',
+      (url, body) => url.startsWith(ENDPOINTS.clickhouse) && body.includes('trace_id = {tid'),
+      'canary-langfuse',
+    ],
+    ['the Tempo trace read', url => url.startsWith(ENDPOINTS.tempoTraceBase), 'canary-tempo'],
+  ]
+
+  it.each(hangs)('%s that never settles fails its check within the bound', async (_label, matches, id) => {
+    const world = harness()
+    const deps: ReporterDeps = {
+      ...world.deps,
+      limits: SMALL,
+      fetch: (url, init) =>
+        matches(url, typeof init?.body === 'string' ? init.body : '') ? NEVER : world.deps.fetch(url, init),
+    }
+    const started = performance.now()
+    const checks = await runCanary(deps)
+    expect(performance.now() - started).toBeLessThan(3500)
+    const entry = checks.find(candidate => candidate.id === id)
+    expect(entry?.status).not.toBe('pass')
+    expect(entry?.detail).toContain('timeout')
+  })
+})
+
+describe('the canary-once mode', () => {
+  const parse = (text: string) => record(JSON.parse(text), 'output')
+  const ids = (text: string) => (parse(text).checks as CheckResult[]).map(entry => entry.id)
+
+  it('prints one JSON document with exactly the three canary checks, and sends one canary', async () => {
+    const world = harness()
+    const text = await canaryOnceOutput(world.deps)
+    expect(parse(text).schemaVersion).toBe(1)
+    expect(ids(text)).toEqual([...CANARY_CHECK_IDS])
+    for (const entry of parse(text).checks as CheckResult[]) expect(entry.status).toBe('pass')
+    expect(world.requests.filter(entry => entry.url === ENDPOINTS.canaryReceiver)).toHaveLength(1)
+  })
+
+  it('reports a failing readback as a failing check, in the same document', async () => {
+    const text = await canaryOnceOutput(harness({rowMissing: 'all'}).deps)
+    const checks = parse(text).checks as CheckResult[]
+    expect(checks.find(entry => entry.id === 'canary-langfuse')?.status).toBe('fail')
+    expect(checks.find(entry => entry.id === 'canary-tempo')?.status).toBe('pass')
+  })
+
+  it('a canary that throws is three unknown checks, never a crash and never a pass', async () => {
+    const world = harness()
+    const deps: ReporterDeps = {
+      ...world.deps,
+      randomHex: () => {
+        throw new Error('no entropy')
+      },
+    }
+    const checks = parse(await canaryOnceOutput(deps)).checks as CheckResult[]
+    expect(checks.map(entry => [entry.id, entry.status])).toEqual(CANARY_CHECK_IDS.map(id => [id, 'unknown']))
+  })
+
+  it('a canary that overruns the run deadline is three unknown checks', async () => {
+    const world = harness()
+    const deps: ReporterDeps = {
+      ...world.deps,
+      limits: {probeTimeoutMs: 1000, runDeadlineMs: 40},
+      fetch: () => NEVER,
+    }
+    const started = performance.now()
+    const checks = parse(await canaryOnceOutput(deps)).checks as CheckResult[]
+    expect(performance.now() - started).toBeLessThan(1500)
+    expect(checks.map(entry => entry.status)).toEqual(['unknown', 'unknown', 'unknown'])
+  })
+
+  it('the mode flag and the check ids are the ones the deploy gate relies on', () => {
+    expect(CANARY_ONCE_FLAG).toBe('--canary-once')
+    expect([...CANARY_CHECK_IDS]).toEqual(['canary-send', 'canary-langfuse', 'canary-tempo'])
+  })
+})
+
+describe('the Langfuse half of the canary', () => {
   it('a correctly delivered trace passes: the row holds only the materialised markers, the raw batch all nine', async () => {
-    const out = await runOnce()
-    expect(check(out.detail, 'canary-langfuse').status).toBe('pass')
-    expect(out.reporter.health().status).toBe(200)
+    const out = await canaryRun()
+    expect(out.byId('canary-langfuse').status).toBe('pass')
   })
 
   it('reads exactly the object the row names, with a size cap, and never lists the bucket for it', async () => {
@@ -1255,71 +1401,64 @@ describe('the Langfuse half of a whole run', () => {
         }
       },
     }
-    const reporter = createReporter(deps)
-    await reporter.runOnce()
+    const checks = await runCanary(deps)
     const reads = world.requests.filter(entry => entry.url === 'object-store-read')
     expect(reads.length).toBeGreaterThan(0)
     for (const read of reads) {
       expect(read.headers.key).toBe(RAW_KEY)
       expect(Number(read.headers.maxBytes)).toBe(RAW_BATCH_LIMITS.maxBytes)
     }
-    // The only listing is the age check's: one call for the project prefixes, none for a first key (no projects).
-    expect(calls).toEqual({childPrefixes: 1, firstKey: 0})
-    expect(check(reporter.detail(), 'canary-langfuse').status).toBe('pass')
+    expect(calls).toEqual({childPrefixes: 0, firstKey: 0})
+    expect(checks.find(entry => entry.id === 'canary-langfuse')?.status).toBe('pass')
   })
 
-  it.each(CANARY_PLACES)('a raw batch without the %s marker fails the verdict and names the place', async place => {
-    const out = await runOnce({rawMissing: [place]})
-    const entry = check(out.detail, 'canary-langfuse')
+  it.each(CANARY_PLACES)('a raw batch without the %s marker fails and names the place', async place => {
+    const out = await canaryRun({rawMissing: [place]})
+    const entry = out.byId('canary-langfuse')
     expect(entry.status).toBe('fail')
     expect(entry.detail).toContain(place)
     expect(entry.detail).toContain('raw batch')
-    expect(check(out.detail, 'canary-tempo').status).toBe('pass')
-    expect(out.reporter.health().status).toBe(503)
+    expect(out.byId('canary-tempo').status).toBe('pass')
   })
 
   it('link, event and exception markers that Langfuse never copies into a row do not fail the row part', async () => {
-    const out = await runOnce({rowMissing: [], rawMissing: []})
-    const entry = check(out.detail, 'canary-langfuse')
+    const out = await canaryRun({rowMissing: [], rawMissing: []})
+    const entry = out.byId('canary-langfuse')
     expect(entry.status).toBe('pass')
     expect(entry.detail).not.toContain('link-attribute')
   })
 
   it('a raw batch that is not in the object store fails after the deadline, not at the first try', async () => {
-    const out = await runOnce({rawObject: 'absent'})
-    const entry = check(out.detail, 'canary-langfuse')
+    const out = await canaryRun({rawObject: 'absent'})
+    const entry = out.byId('canary-langfuse')
     expect(entry.status).toBe('fail')
     expect(entry.detail).toContain('raw batch')
     expect(out.state.now - NOW).toBeGreaterThanOrEqual(THRESHOLDS.canaryDeadlineMs)
-    expect(out.reporter.health().status).toBe(503)
   })
 
   it.each(['not-json', 'not-array', 'gzip', 'oversize'] as const)(
     'a raw batch that is %s fails closed and never passes',
     async rawObject => {
-      const out = await runOnce({rawObject})
-      expect(check(out.detail, 'canary-langfuse').status).toBe('fail')
-      expect(out.reporter.health().status).toBe(503)
+      const out = await canaryRun({rawObject})
+      expect(out.byId('canary-langfuse').status).toBe('fail')
     },
   )
 
-  it('an object store that refuses the read is unknown, never a pass, and its error text stays out of the detail', async () => {
-    const out = await runOnce({rawObject: 'throw'})
-    expect(check(out.detail, 'canary-langfuse').status).toBe('unknown')
-    expect(out.detail).not.toContain('ECONNREFUSED')
-    expect(out.detail).not.toContain('minio-internal')
-    expect(out.reporter.health().status).toBe(503)
+  it('an object store that refuses the read is unknown, never a pass, and its error text stays out of the checks', async () => {
+    const out = await canaryRun({rawObject: 'throw'})
+    expect(out.byId('canary-langfuse').status).toBe('unknown')
+    expect(JSON.stringify(out.checks)).not.toContain('ECONNREFUSED')
+    expect(JSON.stringify(out.checks)).not.toContain('minio-internal')
   })
 
   it.each(['empty', 'malformed', 'other-prefix'] as const)(
     'a row whose raw batch key is %s fails without reading any object',
     async blobPath => {
-      const out = await runOnce({blobPath})
-      const entry = check(out.detail, 'canary-langfuse')
+      const out = await canaryRun({blobPath})
+      const entry = out.byId('canary-langfuse')
       expect(entry.status).toBe('fail')
       expect(entry.detail).toContain('raw batch')
       expect(out.requests.some(request => request.url === 'object-store-read')).toBe(false)
-      expect(out.reporter.health().status).toBe(503)
     },
   )
 
@@ -1330,14 +1469,12 @@ describe('the Langfuse half of a whole run', () => {
       limits: SMALL,
       objectStore: password => ({...world.deps.objectStore(password), read: () => NEVER}),
     }
-    const reporter = createReporter(deps)
     const started = performance.now()
-    await reporter.runOnce()
+    const checks = await runCanary(deps)
     expect(performance.now() - started).toBeLessThan(3500)
-    const entry = check(reporter.detail(), 'canary-langfuse')
-    expect(entry.status).not.toBe('pass')
-    expect(entry.detail).toContain('timeout')
-    expect(reporter.health().status).toBe(503)
+    const entry = checks.find(candidate => candidate.id === 'canary-langfuse')
+    expect(entry?.status).not.toBe('pass')
+    expect(entry?.detail).toContain('timeout')
   })
 })
 
@@ -1358,9 +1495,6 @@ describe('every probe fails closed', () => {
     ['tempo metrics unparsable', {tempoMetrics: 'garbage'}],
     ['langfuse web down', {langfuseWeb: 'throw'}],
     ['langfuse worker 500', {langfuseWorker: 500}],
-    ['canary post unreachable', {canaryPost: 'throw'}],
-    ['tempo trace read 500', {tempoTrace: 500}],
-    ['tempo trace read unparsable', {tempoTrace: 'garbage'}],
     ['clickhouse 500', {clickhouseStatus: 500}],
   ]
 
@@ -1448,18 +1582,11 @@ describe('every probe has a deadline', () => {
     ['the Tempo readiness read', url => url === ENDPOINTS.tempoReady, ['tempo-ready']],
     ['the Langfuse web read', url => url === ENDPOINTS.langfuseWeb, ['langfuse-web']],
     ['the Langfuse worker read', url => url === ENDPOINTS.langfuseWorker, ['langfuse-worker']],
-    ['the canary post', url => url === ENDPOINTS.canaryReceiver, ['canary-send']],
     [
       'the ClickHouse age query',
       (url, body) => url.startsWith(ENDPOINTS.clickhouse) && body.includes('count() AS n'),
       ['data-age-clickhouse'],
     ],
-    [
-      'the ClickHouse canary read',
-      (url, body) => url.startsWith(ENDPOINTS.clickhouse) && body.includes('trace_id = {tid'),
-      ['canary-langfuse'],
-    ],
-    ['the Tempo trace read', url => url.startsWith(ENDPOINTS.tempoTraceBase), ['canary-tempo']],
   ]
 
   it.each(hangs)('%s that never settles fails its check within the bound', async (_label, matches, ids) => {
@@ -1512,14 +1639,14 @@ describe('every probe has a deadline', () => {
 
 describe('a run has an overall deadline', () => {
   it('a stuck run is cut off with a failing verdict, and the next scheduled run starts and recovers', async () => {
-    const world = harness({tempoPlaces: 'none'})
+    const world = harness()
     let stuck = true
-    // The canary waits on `sleep` while Tempo has no trace. No per-probe deadline covers a hung sleep, so only
-    // the run deadline can free the single-flight guard.
+    // The collector health read hangs for longer than the run deadline, so no per-probe deadline covers it: only the
+    // run deadline can free the single-flight guard.
     const deps: ReporterDeps = {
       ...world.deps,
       limits: {probeTimeoutMs: 1000, runDeadlineMs: 60},
-      sleep: ms => (stuck ? NEVER : world.deps.sleep(ms)),
+      fetch: (url, init) => (stuck && url === ENDPOINTS.collectorHealth ? NEVER : world.deps.fetch(url, init)),
     }
     const reporter = createReporter(deps)
 
@@ -1535,7 +1662,6 @@ describe('a run has an overall deadline', () => {
     // The guard is free: the next run starts a fresh probe round and the verdict recovers.
     const before = world.requests.length
     stuck = false
-    world.behaviour.tempoPlaces = TEMPO_KEPT_PLACES
     await reporter.runOnce()
     expect(world.requests.length).toBeGreaterThan(before)
     expect(reporter.health().status).toBe(200)
@@ -1697,7 +1823,7 @@ describe('/healthz', () => {
     const world = harness()
     const reporter = createReporter(world.deps)
     await Promise.all([reporter.runOnce(), reporter.runOnce(), reporter.runOnce()])
-    expect(world.requests.filter(entry => entry.url === ENDPOINTS.canaryReceiver)).toHaveLength(1)
+    expect(world.requests.filter(entry => entry.url === ENDPOINTS.collectorHealth)).toHaveLength(1)
   })
 })
 

@@ -9,7 +9,7 @@ import type {DeployDeps, DeployInputs, IngestState} from './deploy'
 import {chmodSync, writeFileSync} from 'node:fs'
 import {join} from 'node:path'
 
-import {GATED_SERVICES, generateVoidTokenLine, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
+import {CANARY_COMMAND, GATED_SERVICES, generateVoidTokenLine, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
 import {SENDER_GROUPS, TRACES_DEPLOY_MARKER, TRACES_VOID_TOKEN_PREFIX} from './host'
 import {OBJECT_STORE_PREFIXES, RETENTION_TABLES} from './retention'
 
@@ -54,6 +54,7 @@ const READ_ONLY_STEPS: readonly RegExp[] = [
   /^probe-ingest$/,
   /^retention-read-/,
   /^raw:reporter-detail$/,
+  /^raw:reporter-canary$/,
 ]
 
 /** True for a step that changes nothing on the host. Everything else must carry the ownership prelude. */
@@ -103,6 +104,8 @@ export interface FakeOptions {
   verdict?: {ok?: boolean; ran?: boolean; stale?: boolean}
   /** The reporter cannot be read at all. */
   reporterUnreadable?: boolean
+  /** The canary command fails (exec error, or output that is not the expected document). */
+  canaryUnreadable?: boolean | 'garbled'
   /** Probe answers per route state, instead of the simulation's. */
   probeOverride?: (served: IngestState | 'none') => Record<string, number> | undefined
   /** ClickHouse tables that exist at the start (name -> ttl text as ClickHouse echoes it). */
@@ -298,6 +301,11 @@ export class FakeHost {
     if (step === 'raw:reporter-detail') {
       if (this.options.reporterUnreadable) return fail('exec failed')
       return ok(`${JSON.stringify(this.reporterDetail())}\nTRACES_DETAIL_END\n`)
+    }
+    if (step === 'raw:reporter-canary') {
+      if (this.options.canaryUnreadable === 'garbled') return ok('not json\nTRACES_CANARY_END\n')
+      if (this.options.canaryUnreadable) return fail('exec failed')
+      return ok(`${JSON.stringify({schemaVersion: 1, checks: this.canaryChecks()})}\nTRACES_CANARY_END\n`)
     }
 
     switch (true) {
@@ -560,15 +568,8 @@ export class FakeHost {
       'data-age-clickhouse',
       'data-age-object-store',
       'data-age-tempo',
-      'canary-send',
-      'canary-langfuse',
-      'canary-tempo',
     ]
-    const checks = required.map(id => ({
-      id,
-      status: this.options.checkStatus?.[id] ?? 'pass',
-      detail: this.options.checkStatus?.[id] === undefined ? 'fine' : `${id} was made to fail`,
-    }))
+    const checks = this.checksFor(required)
     const allPass = checks.every(check => check.status === 'pass' || check.status === 'warn')
     return {
       schemaVersion: 1,
@@ -580,6 +581,19 @@ export class FakeHost {
       at: new Date(this.reporterAt * 1000).toISOString(),
       checks,
     }
+  }
+
+  /** What the one-shot canary prints: the three canary checks, mutated by `checkStatus` like the verdict's. */
+  canaryChecks(): Record<string, unknown>[] {
+    return this.checksFor(['canary-send', 'canary-langfuse', 'canary-tempo'])
+  }
+
+  private checksFor(ids: readonly string[]): {id: string; status: string; detail: string}[] {
+    return ids.map(id => ({
+      id,
+      status: this.options.checkStatus?.[id] ?? 'pass',
+      detail: this.options.checkStatus?.[id] === undefined ? 'fine' : `${id} was made to fail`,
+    }))
   }
 
   private retention(step: string, command: string, stdin: string): RunResult {
@@ -657,6 +671,7 @@ export function installFlockStandIn(directory: string): boolean {
 export function stepOf(command: string): string {
   if (command.includes('TRACES_INGEST_STATE_SET=')) return 'raw:set-state'
   if (command === REPORTER_DETAIL_COMMAND) return 'raw:reporter-detail'
+  if (command === CANARY_COMMAND) return 'raw:reporter-canary'
   const marker = /# traces-step:([^\n]+)\n/.exec(command)?.[1]
   return marker ?? 'unknown'
 }

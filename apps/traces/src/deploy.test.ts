@@ -1,5 +1,5 @@
 import type {RunResult} from '../server/provision'
-import type {DeployDeps, DeployResult, GateInputs, IngestState} from './deploy'
+import type {CanaryState, DeployDeps, DeployResult, GateInputs, IngestState} from './deploy'
 
 import {Buffer} from 'node:buffer'
 import {
@@ -24,6 +24,7 @@ import {
   bootstrapProbeScript,
   buildEnvFile,
   buildSecretFiles,
+  CANARY_COMMAND,
   closeMasterArgv,
   compareFileScript,
   createCollectorScript,
@@ -45,6 +46,7 @@ import {
   mayOpen,
   OperatorSurfaceError,
   ownershipPrelude,
+  parseCanaryChecks,
   parseDrift,
   parseGrafanaProbe,
   parseHostState,
@@ -86,7 +88,7 @@ import {
   stepOf,
   testDeps,
 } from './deploy.fixture'
-import {PATHS} from './health-report'
+import {CANARY_ONCE_FLAG, PATHS} from './health-report'
 import {
   GRAFANA_USER_ID,
   SENDER_GROUPS,
@@ -517,7 +519,12 @@ describe('remote scripts', () => {
   })
 
   it('never redirect to the null device and never delete outside the app directory or /tmp', () => {
-    const everything = {...scripts, setState: setIngestStateCommand('held', ID_A), detail: REPORTER_DETAIL_COMMAND}
+    const everything = {
+      ...scripts,
+      setState: setIngestStateCommand('held', ID_A),
+      detail: REPORTER_DETAIL_COMMAND,
+      canary: CANARY_COMMAND,
+    }
     for (const [name, script] of Object.entries(everything)) {
       expect({name, nullDevice: script.includes('/dev/null')}).toEqual({name, nullDevice: false})
       for (const line of script.split('\n')) {
@@ -775,6 +782,15 @@ describe('remote scripts', () => {
       `docker compose --project-directory ${TRACES_APP_DIR} exec -T health-reporter wget -q -O - http://127.0.0.1:8081/detail && echo && echo TRACES_DETAIL_END`,
     )
   })
+
+  // The deploy's canary: the reporter script run once in its own container. No new service, port or route.
+  it('runs the canary through exec in the reporter container, with the flag the script reads', async () => {
+    expect(CANARY_COMMAND).toBe(
+      `docker compose --project-directory ${TRACES_APP_DIR} exec -T health-reporter bun run --no-install /app/health-report.ts ${CANARY_ONCE_FLAG} && echo && echo TRACES_CANARY_END`,
+    )
+    const compose = await Bun.file(join(APP, 'docker-compose.yaml')).text()
+    expect(compose).toContain('command: [bun, run, --no-install, /app/health-report.ts]')
+  })
 })
 
 // ─── SSH ──────────────────────────────────────────────────────────────────────
@@ -919,12 +935,37 @@ describe('probes', () => {
     const bad = {...host.reporterDetail(), checks: [{id: 'x', status: 'great', detail: 'y'}]}
     expect(parseReporterDetail(ok(`${JSON.stringify(bad)}\nTRACES_DETAIL_END\n`))).toBeUndefined()
   })
+
+  it('reads the canary checks only from a complete, well-formed answer', () => {
+    const host = new FakeHost()
+    const body = JSON.stringify({schemaVersion: 1, checks: host.canaryChecks()})
+    const good = ok(`${body}\nTRACES_CANARY_END\n`)
+    expect(parseCanaryChecks(good)?.map(check => check.id)).toEqual(['canary-send', 'canary-langfuse', 'canary-tempo'])
+    expect(parseCanaryChecks({...good, exitCode: 1})).toBeUndefined()
+    expect(parseCanaryChecks(ok(body))).toBeUndefined()
+    expect(parseCanaryChecks(ok(`${body}\nTRACES_DETAIL_END\n`))).toBeUndefined()
+    expect(parseCanaryChecks(ok('not json\nTRACES_CANARY_END\n'))).toBeUndefined()
+    expect(parseCanaryChecks(ok('{"schemaVersion":2,"checks":[]}\nTRACES_CANARY_END\n'))).toBeUndefined()
+    expect(parseCanaryChecks(ok('{"schemaVersion":1}\nTRACES_CANARY_END\n'))).toBeUndefined()
+    const bad = {schemaVersion: 1, checks: [{id: 'canary-send', status: 'great', detail: 'y'}]}
+    expect(parseCanaryChecks(ok(`${JSON.stringify(bad)}\nTRACES_CANARY_END\n`))).toBeUndefined()
+  })
 })
 
 // ─── Gates ────────────────────────────────────────────────────────────────────
 
 describe('gates', () => {
   const detail = new FakeHost().reporterDetail()
+  const canaryChecks = (change: Record<string, unknown>[] = []): CanaryState => ({
+    state: 'ran',
+    checks: parseCanaryChecks(
+      ok(`${JSON.stringify({schemaVersion: 1, checks: change})}\nTRACES_CANARY_END\n`),
+    ) as never,
+  })
+  const passingCanary = (): CanaryState => ({
+    state: 'ran',
+    checks: new FakeHost().canaryChecks() as never,
+  })
   const passing = (): GateInputs => ({
     keyPairSet: true,
     ingestVariableTrue: true,
@@ -934,6 +975,7 @@ describe('gates', () => {
       state: 'fresh',
       detail: parseReporterDetail(ok(`${JSON.stringify(detail)}\nTRACES_DETAIL_END\n`)) as never,
     },
+    canary: passingCanary(),
     bootstrap: {supplied: false, probe: 'dead', hygiene: {envFile: 0, running: 0}},
   })
 
@@ -954,6 +996,9 @@ describe('gates', () => {
       ['reporter-verdict', input => ({...input, verdict: {state: 'unreadable'}})],
       ['reporter-verdict', input => ({...input, verdict: {state: 'timeout', detail: undefined}})],
       ['canary', input => ({...input, verdict: {state: 'unreadable'}})],
+      ['canary', input => ({...input, canary: {state: 'unreadable'}})],
+      ['canary', input => ({...input, canary: {state: 'skipped'}})],
+      ['canary', input => ({...input, canary: canaryChecks()})],
       ['bootstrap-key', input => ({...input, bootstrap: {...input.bootstrap, probe: 'live'}})],
       ['bootstrap-key', input => ({...input, bootstrap: {...input.bootstrap, probe: 'inconclusive'}})],
       ['bootstrap-key', input => ({...input, bootstrap: {...input.bootstrap, supplied: true, probe: 'dead'}})],
@@ -977,7 +1022,7 @@ describe('gates', () => {
     }
   })
 
-  it('fails the reporter verdict when it is stale, has not run or is not ok, and the canary when one check fails', () => {
+  it('fails the reporter verdict when it is stale, has not run or is not ok', () => {
     const mutate = (change: Record<string, unknown>): GateInputs => ({
       ...passing(),
       verdict: {
@@ -988,16 +1033,66 @@ describe('gates', () => {
     for (const change of [{stale: true}, {ran: false}, {ok: false}]) {
       expect(mayOpen(evaluateGates(mutate(change)))).toBe(false)
     }
-    const checks = (detail.checks as {id: string; status: string; detail: string}[]).map(check =>
-      check.id === 'canary-langfuse' ? {...check, status: 'fail', detail: 'canary trace not found in Langfuse'} : check,
-    )
-    const gates = evaluateGates(mutate({checks, ok: true}))
-    expect(gates.find(gate => gate.id === 'canary')).toMatchObject({status: 'fail'})
-    expect(gates.find(gate => gate.id === 'canary')?.detail).toContain('canary-langfuse')
+  })
+
+  describe('canary', () => {
+    const failing = (id: string, status: string): CanaryState => ({
+      state: 'ran',
+      checks: (new FakeHost().canaryChecks() as {id: string; status: string; detail: string}[]).map(check =>
+        check.id === id ? {...check, status, detail: `${id} did not pass`} : check,
+      ) as never,
+    })
+
+    it.each(['canary-send', 'canary-langfuse', 'canary-tempo'])('fails and names %s when it fails', id => {
+      const gates = evaluateGates({...passing(), canary: failing(id, 'fail')})
+      expect(gates.find(gate => gate.id === 'canary')).toMatchObject({status: 'fail', kind: 'safety'})
+      expect(gates.find(gate => gate.id === 'canary')?.detail).toContain(id)
+      expect(gates.find(gate => gate.id === 'reporter-verdict')?.status).toBe('pass')
+      expect(mayOpen(gates)).toBe(false)
+      expect(failedSafetyGates(gates).map(gate => gate.id)).toEqual(['canary'])
+    })
+
+    it.each(['unknown', 'warn'])('does not pass a canary check that is %s', status => {
+      const gates = evaluateGates({...passing(), canary: failing('canary-tempo', status)})
+      expect(gates.find(gate => gate.id === 'canary')?.status).toBe('fail')
+    })
+
+    it('names a canary check that is missing from the answer', () => {
+      const gates = evaluateGates({...passing(), canary: canaryChecks()})
+      expect(gates.find(gate => gate.id === 'canary')?.detail).toContain('canary-send: missing')
+    })
+
+    it('reads the canary result and not the verdict: the periodic verdict carries no canary check', () => {
+      expect((detail.checks as {id: string}[]).some(check => check.id.startsWith('canary'))).toBe(false)
+      const gates = evaluateGates(passing())
+      expect(gates.find(gate => gate.id === 'canary')).toMatchObject({status: 'pass'})
+      expect(gates.find(gate => gate.id === 'reporter-verdict')).toMatchObject({status: 'pass'})
+    })
+
+    it('does not let a canary-shaped check in the verdict stand in for the canary result', () => {
+      const withFailing = parseReporterDetail(
+        ok(
+          `${JSON.stringify({...detail, checks: [...(detail.checks as unknown[]), {id: 'canary-langfuse', status: 'fail', detail: 'x'}]})}\nTRACES_DETAIL_END\n`,
+        ),
+      ) as never
+      const gates = evaluateGates({...passing(), verdict: {state: 'fresh', detail: withFailing}})
+      expect(gates.find(gate => gate.id === 'canary')?.status).toBe('pass')
+    })
+
+    it('explains an unreadable or missing canary', () => {
+      const gate = (canary: CanaryState) => evaluateGates({...passing(), canary}).find(entry => entry.id === 'canary')
+      expect(gate({state: 'unreadable'})).toMatchObject({status: 'fail', detail: 'the canary could not be run'})
+      expect(gate({state: 'skipped'})).toMatchObject({status: 'fail', detail: 'the canary was not run'})
+    })
   })
 
   it('skips everything that needs a delivering stack when there is no key pair, and counts a skip as not open', () => {
-    const gates = evaluateGates({...passing(), keyPairSet: false, verdict: {state: 'skipped'}})
+    const gates = evaluateGates({
+      ...passing(),
+      keyPairSet: false,
+      verdict: {state: 'skipped'},
+      canary: {state: 'skipped'},
+    })
     expect(gates.filter(gate => gate.status === 'skipped').map(gate => gate.id)).toEqual([
       'reporter-verdict',
       'canary',
@@ -1115,6 +1210,7 @@ describe('first deploy', () => {
     expect(logs.join('\n')).toContain('Ingest is OFF')
     expect(logs.join('\n')).toContain('TRACES_LANGFUSE_PUBLIC_KEY')
     expect(host.count('raw:reporter-detail')).toBe(0)
+    expect(host.count('raw:reporter-canary')).toBe(0)
   })
 
   it('with a key pair and ingest not asked for ends with ingest off and a message naming the missing gate', async () => {
@@ -1161,6 +1257,7 @@ describe('first deploy', () => {
       'up-caddy',
       'token-dirs',
       'raw:reporter-detail',
+      'raw:reporter-canary',
       'bootstrap-hygiene',
       'raw:set-state:open',
       'remove:.deploy-in-progress',
@@ -1193,14 +1290,60 @@ describe('first deploy', () => {
     expect(host.indexOf('raw:reporter-detail')).toBeGreaterThan(host.indexOf('up-reporter'))
   })
 
-  it('does not accept a verdict older than the restart', async () => {
+  it('does not accept a verdict older than the restart, and then does not run the canary', async () => {
     const host = new FakeHost({verdictOffset: -5})
     const error = await failure(host)
     expect(error).toBeInstanceOf(AppliedButUnverifiedError)
     expect(error.message).toContain('no fresh reporter verdict')
+    expect(error.message).toContain('canary')
+    expect(host.count('raw:reporter-canary')).toBe(0)
     expect(host.setStates()).toEqual([])
     expect(host.served).toBe('off')
   })
+
+  it('runs the canary exactly once per deploy, after the fresh verdict and before the route changes', async () => {
+    const host = new FakeHost()
+    await run(host)
+    expect(host.count('raw:reporter-canary')).toBe(1)
+    expect(host.indexOf('raw:reporter-canary')).toBeGreaterThan(host.steps.lastIndexOf('raw:reporter-detail'))
+    expect(host.indexOf('raw:reporter-canary')).toBeLessThan(host.indexOf('raw:set-state:open'))
+  })
+
+  it('runs the canary once even when the verdict took several reads to arrive', async () => {
+    let reads = 0
+    const host = new FakeHost({
+      override: step => {
+        if (step !== 'raw:reporter-detail') return undefined
+        reads += 1
+        return reads < 2 ? ok('not the document\n') : undefined
+      },
+    })
+    await run(host)
+    expect(host.count('raw:reporter-detail')).toBe(2)
+    expect(host.count('raw:reporter-canary')).toBe(1)
+  })
+
+  it('runs the canary on a redeploy too, since the config or image may have changed', async () => {
+    const host = new FakeHost()
+    await run(host)
+    await run(host)
+    expect(host.count('raw:reporter-canary')).toBe(2)
+  })
+
+  it.each([
+    ['exec fails', true],
+    ['prints a garbled document', 'garbled'],
+  ] as const)(
+    'a canary command that %s fails the canary gate and keeps ingest off',
+    async (_label, canaryUnreadable) => {
+      const host = new FakeHost({canaryUnreadable})
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(AppliedButUnverifiedError)
+      expect(error.message).toContain('canary')
+      expect(host.setStates()).toEqual([])
+      expect(host.served).toBe('off')
+    },
+  )
 
   it('shuts the shared connection and removes the key file whether or not the deploy succeeds', async () => {
     const host = new FakeHost({storageAnswer: ok('nope\n')})

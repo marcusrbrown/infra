@@ -44,7 +44,7 @@
       "id": "reporter",
       "type": "backend",
       "label": "Health reporter",
-      "sublabel": "canary + one verdict",
+      "sublabel": "one verdict",
       "pos": [540, 400],
       "size": [170, 60]
     },
@@ -146,8 +146,8 @@
     {"id": "traceql", "from": "grafana", "to": "tempo", "label": "TraceQL"},
     {"id": "tunnel-web", "from": "operator", "to": "web", "label": "SSH tunnel", "variant": "security"},
     {"id": "tunnel-grafana", "from": "operator", "to": "grafana", "label": "SSH tunnel", "variant": "security"},
-    {"id": "canary", "from": "reporter", "to": "collector", "label": "canary", "variant": "dashed"},
-    {"id": "readback", "from": "reporter", "to": "tempo", "label": "readback", "variant": "dashed"},
+    {"id": "canary", "from": "reporter", "to": "collector", "label": "deploy canary", "variant": "dashed"},
+    {"id": "readback", "from": "reporter", "to": "tempo", "label": "deploy readback", "variant": "dashed"},
     {"id": "verdict", "from": "caddy", "to": "reporter", "label": "health path", "variant": "dashed"}
   ],
   "cards": [
@@ -174,7 +174,7 @@
       "title": "Retention and opening",
       "items": [
         "30 days live and up to 8 more in volume snapshots, as targets",
-        "Ingest stays off until the stores, retention and the canary pass",
+        "Ingest stays off until the stores, retention and the deploy canary pass",
         "A deploy holds ingest while it changes a backend and reopens it only if the gates pass"
       ]
     }

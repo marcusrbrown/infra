@@ -66,7 +66,7 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
    curl -fsS https://traces.fro.bot/healthz
    ```
 
-   Success: HTTP 200 and `{"ok": true, "at": "<timestamp>"}`. The reporter recomputes every five minutes, so `at` is recent.
+   Success: HTTP 200 and `{"ok": true, "at": "<timestamp>"}`. The reporter recomputes every five minutes, so `at` is recent. It sends no trace: the verdict rests on the containers and ready endpoints, the collector's send and enqueue failures and queue fill, 503s on ingest, Tempo's discards, disk space and data age. Delivery to both backends is proven by the deploy's canary, not by `/healthz`.
 
 3. Compare the route's configured state with what the outside world sees:
 
@@ -132,17 +132,19 @@ The alert text carries nothing the endpoint said. The exact reason is in the pro
 
 ### The gates
 
-| Gate                  | Passes when                                                                              |
-| --------------------- | ---------------------------------------------------------------------------------------- |
-| `langfuse-key`        | the Application-role key pair is set                                                     |
-| `ingest-variable`     | `TRACES_INGEST_OPEN` is exactly `true`                                                   |
-| `retention`           | the 30-day TTLs and lifecycle rules were asserted and read back                          |
-| `token-directories`   | every group has a non-empty token file (a deny-all file passes)                          |
-| `reporter-verdict`    | a verdict produced after the reporter restarted is fresh and passing                     |
-| `canary`              | the canary trace reached the collector, Langfuse and Tempo, and the Tempo keep-list held |
-| `bootstrap-key`       | the bootstrap pair is not supplied and Langfuse answers 401 to it                        |
-| `bootstrap-variables` | no `LANGFUSE_INIT_PROJECT_*KEY` value is in the host `.env` or in a running container    |
-| `grafana-signin`      | after the route is final, Grafana accepts the admin password file (200)                  |
+| Gate | Passes when |
+| --- | --- |
+| `langfuse-key` | the Application-role key pair is set |
+| `ingest-variable` | `TRACES_INGEST_OPEN` is exactly `true` |
+| `retention` | the 30-day TTLs and lifecycle rules were asserted and read back |
+| `token-directories` | every group has a non-empty token file (a deny-all file passes) |
+| `reporter-verdict` | a verdict produced after the reporter restarted is fresh and passing |
+| `canary` | the deploy's one canary trace reached the collector, Langfuse and Tempo, and the Tempo keep-list held |
+| `bootstrap-key` | the bootstrap pair is not supplied and Langfuse answers 401 to it |
+| `bootstrap-variables` | no `LANGFUSE_INIT_PROJECT_*KEY` value is in the host `.env` or in a running container |
+| `grafana-signin` | after the route is final, Grafana accepts the admin password file (200) |
+
+The canary is the only synthetic trace. The deploy sends it once, after the reporter's verdict is fresh, by running `health-report.ts --canary-once` inside the reporter's container; it lands in the Langfuse environment `canary`. The reporter's periodic run sends none, so a quiet stack holds no routine synthetic traces. If the canary command fails, prints something unreadable or any canary check is not `pass`, the `canary` gate fails and the route stays closed (an open route is held).
 
 The route opens only when every gate passes, except `grafana-signin`: Grafana is an operator UI and does not decide the route. A failing `grafana-signin` leaves the route as the other gates set it and fails the run afterwards (see [Grafana sign-in check fails](#grafana-sign-in-check-fails)). Gate design is in [Holding, gates and the route](../../apps/traces/AGENTS.md#holding-gates-and-the-route).
 

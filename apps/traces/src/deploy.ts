@@ -16,7 +16,8 @@
 //   8. start the stores and Langfuse, assert and read back retention, start Tempo, Grafana, the collector and
 //      the reporter, verify the collector's image digest
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
-//      `true`; otherwise off (first bring-up) or held (it was open before)
+//      `true`; otherwise off (first bring-up) or held (it was open before). The canary gate sends the deploy's one
+//      canary (the reporter's `--canary-once` mode, by exec) once the reporter's verdict is fresh
 //  10. remove the deploy marker, which ends the route's work. Only then check Grafana's sign-in (the password file
 //      works): read-only, after the route is final, and a failure fails the run (`OperatorSurfaceError`) without
 //      touching the route
@@ -1393,31 +1394,42 @@ const CHECK_STATUSES: readonly string[] = ['pass', 'warn', 'fail', 'unknown']
  * command ran to its end, and a body of the expected shape. Anything else is `undefined`, never a pass.
  */
 export function parseReporterDetail(result: RunResult): ReporterDetail | undefined {
+  const body = readSentinelDocument(result, REPORTER_DETAIL_SENTINEL)
+  if (
+    body === undefined ||
+    body.schemaVersion !== 1 ||
+    typeof body.ran !== 'boolean' ||
+    typeof body.stale !== 'boolean' ||
+    typeof body.ok !== 'boolean' ||
+    !(typeof body.at === 'string' || body.at === null)
+  ) {
+    return undefined
+  }
+  const checks = readChecks(body.checks)
+  if (checks === undefined) return undefined
+  return {ran: body.ran, stale: body.stale, ok: body.ok, at: body.at, checks}
+}
+
+/** The JSON object before the sentinel line, from a command that exited 0. Anything else is `undefined`. */
+function readSentinelDocument(result: RunResult, sentinel: string): Record<string, unknown> | undefined {
   if (result.exitCode !== 0) return undefined
   const lines = result.stdout.split('\n')
-  const end = lines.findIndex(line => line.trim() === REPORTER_DETAIL_SENTINEL)
+  const end = lines.findIndex(line => line.trim() === sentinel)
   if (end === -1) return undefined
-
   let json: unknown
   try {
     json = JSON.parse(lines.slice(0, end).join('\n'))
   } catch {
     return undefined
   }
-  if (typeof json !== 'object' || json === null) return undefined
-  const body = json as Record<string, unknown>
-  if (
-    body.schemaVersion !== 1 ||
-    typeof body.ran !== 'boolean' ||
-    typeof body.stale !== 'boolean' ||
-    typeof body.ok !== 'boolean' ||
-    !(typeof body.at === 'string' || body.at === null) ||
-    !Array.isArray(body.checks)
-  ) {
-    return undefined
-  }
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) return undefined
+  return json as Record<string, unknown>
+}
+
+function readChecks(value: unknown): ReporterCheck[] | undefined {
+  if (!Array.isArray(value)) return undefined
   const checks: ReporterCheck[] = []
-  for (const entry of body.checks as unknown[]) {
+  for (const entry of value as unknown[]) {
     if (typeof entry !== 'object' || entry === null) return undefined
     const check = entry as Record<string, unknown>
     if (typeof check.id !== 'string' || typeof check.detail !== 'string' || typeof check.status !== 'string') {
@@ -1426,11 +1438,29 @@ export function parseReporterDetail(result: RunResult): ReporterDetail | undefin
     if (!CHECK_STATUSES.includes(check.status)) return undefined
     checks.push({id: check.id, status: check.status as ReporterCheck['status'], detail: check.detail})
   }
-  return {ran: body.ran, stale: body.stale, ok: body.ok, at: body.at, checks}
+  return checks
 }
 
 /** The three checks that prove a trace reached both backends and that the keep-list held. */
 export const CANARY_CHECKS = ['canary-send', 'canary-langfuse', 'canary-tempo'] as const
+
+/**
+ * The deploy's one canary: the reporter script run once more inside its own container, in `--canary-once` mode (the
+ * flag is pinned to `CANARY_ONCE_FLAG` in `health-report.ts` by a test). It prints the three canary checks and exits 0
+ * whatever they say.
+ */
+export const CANARY_SENTINEL = 'TRACES_CANARY_END'
+export const CANARY_COMMAND = `${COMPOSE} exec -T health-reporter bun run --no-install /app/health-report.ts --canary-once && echo && echo ${CANARY_SENTINEL}`
+
+/** The canary checks, from a complete answer only (exit 0, the sentinel, a body of the expected shape). */
+export function parseCanaryChecks(result: RunResult): ReporterCheck[] | undefined {
+  const body = readSentinelDocument(result, CANARY_SENTINEL)
+  if (body === undefined || body.schemaVersion !== 1) return undefined
+  return readChecks(body.checks)
+}
+
+/** What the deploy knows about its canary: it was not run, it could not be read, or these are its checks. */
+export type CanaryState = {state: 'skipped'} | {state: 'unreadable'} | {state: 'ran'; checks: ReporterCheck[]}
 
 // ─── Gates ────────────────────────────────────────────────────────────────────
 
@@ -1475,6 +1505,7 @@ export interface GateInputs {
   /** Per group: does its token file exist. */
   tokenFiles: Record<string, TokenFileState> | undefined
   verdict: VerdictState
+  canary: CanaryState
   bootstrap: {
     /** The pair is still among the deploy's inputs. */
     supplied: boolean
@@ -1591,15 +1622,19 @@ export function evaluateGates(input: GateInputs): GateResult[] {
         detail.ran && !detail.stale && detail.ok,
         detail.ran && !detail.stale && detail.ok ? 'the reporter verdict is fresh and passing' : failingChecks(detail),
       )
-      const canary = CANARY_CHECKS.map(id => detail.checks.find(check => check.id === id))
-      const bad = CANARY_CHECKS.filter((_id, index) => canary[index]?.status !== 'pass')
-      gate(
-        'canary',
-        bad.length === 0,
-        bad.length === 0
-          ? 'the canary reached both backends and the keep-list held'
-          : bad.map(id => `${id}: ${detail.checks.find(check => check.id === id)?.detail ?? 'missing'}`).join('; '),
-      )
+      const {canary} = input
+      if (canary.state === 'ran') {
+        const bad = CANARY_CHECKS.filter(id => canary.checks.find(check => check.id === id)?.status !== 'pass')
+        gate(
+          'canary',
+          bad.length === 0,
+          bad.length === 0
+            ? 'the canary reached both backends and the keep-list held'
+            : bad.map(id => `${id}: ${canary.checks.find(check => check.id === id)?.detail ?? 'missing'}`).join('; '),
+        )
+      } else {
+        gate('canary', false, canary.state === 'unreadable' ? 'the canary could not be run' : 'the canary was not run')
+      }
       break
     }
     case 'timeout': {
@@ -2074,6 +2109,11 @@ async function awaitGrafanaSignIn(exec: RemoteExec, deps: DeployDeps): Promise<G
   return last
 }
 
+async function runCanaryOnce(exec: RemoteExec): Promise<CanaryState> {
+  const checks = parseCanaryChecks(await exec(CANARY_COMMAND))
+  return checks === undefined ? {state: 'unreadable'} : {state: 'ran', checks}
+}
+
 function parseEpoch(result: RunResult): number {
   const epoch = Number(/^epoch=(\d+)$/m.exec(result.stdout)?.[1])
   if (!Number.isInteger(epoch) || epoch <= 0) throw new Error('The host did not report its clock')
@@ -2438,10 +2478,17 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
 
     const keyPairSet = inputs.langfuseKey !== undefined
     let verdict: VerdictState = {state: 'skipped'}
+    let canary: CanaryState = {state: 'skipped'}
     let probe: BootstrapProbe = 'none-on-record'
     let hygiene: {envFile: number; running: number} | undefined
     if (keyPairSet) {
       verdict = await awaitFreshVerdict(exec, deps, sinceEpoch)
+      if (verdict.state === 'fresh') {
+        // The one canary of this deploy, sent only now that the reporter's own checks are fresh. The periodic verdict
+        // sends none.
+        log('==> Running the canary')
+        canary = await runCanaryOnce(exec)
+      }
 
       const pair = inputs.bootstrapKey ?? host.envBootstrap ?? host.pendingBootstrap
       if (pair !== undefined) {
@@ -2474,6 +2521,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       retentionDetail: `30-day TTL on ${retention.tables.join(', ')}; 30-day expiry on ${retention.prefixes.join(', ')}`,
       tokenFiles,
       verdict,
+      canary,
       bootstrap: {supplied: inputs.bootstrapKey !== undefined, probe, hygiene},
     })
     for (const line of describeGates(gates)) log(`  ${line}`)

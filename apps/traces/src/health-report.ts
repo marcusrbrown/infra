@@ -1,7 +1,8 @@
 // ─── Health reporter ──────────────────────────────────────────────────────────
 //
 // One verdict for the whole trace stack, produced on the host. A timer runs every check, then publishes
-// the result. Two listeners serve it:
+// the result. The verdict sends no trace: it rests on the ready endpoints, the collector and Tempo metrics, disk
+// space and data age. Two listeners serve it:
 //
 //   0.0.0.0:8080   GET /healthz   200 or 503, and a body of `{ok, at}`: one boolean and one timestamp.
 //                                 Caddy routes this path publicly, so nothing else may ever be in it.
@@ -17,6 +18,10 @@
 //     load the stack.
 //   - A verdict older than two intervals reads as failing, so a reporter whose timer has stopped cannot
 //     keep reporting its last good answer.
+//
+// `bun health-report.ts --canary-once` is the one other mode: it sends a synthetic trace through the collector's
+// private receiver, reads it back from Langfuse and Tempo, prints the three canary checks as JSON and exits 0. The
+// deploy gate runs it by `docker compose exec`, once per deploy. Nothing else runs it.
 //
 // The checks are pure functions over fetched inputs. All I/O goes through `ReporterDeps`, so the tests run
 // without a network, a clock or a disk. The file imports only Node and Bun built-ins: it runs from a bind
@@ -157,9 +162,6 @@ export const REQUIRED_CHECKS = [
   'data-age-clickhouse',
   'data-age-object-store',
   'data-age-tempo',
-  'canary-send',
-  'canary-langfuse',
-  'canary-tempo',
 ] as const
 
 export type Probe<T> = {ok: true; value: T} | {ok: false; reason: string}
@@ -1318,7 +1320,8 @@ async function readTempoCanary(deps: ReporterDeps, canary: Canary): Promise<Prob
 /**
  * Send the canary through the collector's private receiver, then wait for it in both backends. The send, the
  * Langfuse readback and the Tempo readback are three checks, so one failing backend is named and the other
- * stays green. A canary that cannot be confirmed in both by the deadline fails.
+ * stays green. A canary that cannot be confirmed in both by the deadline fails. The periodic run never calls this:
+ * the deploy gate runs it once per deploy through `--canary-once`.
  */
 export async function runCanary(deps: ReporterDeps): Promise<CheckResult[]> {
   const canary = buildCanary(deps.now(), deps.randomHex)
@@ -1382,6 +1385,22 @@ async function guarded(ids: readonly string[], run: () => Promise<CheckResult[]>
   }
 }
 
+/** The argument that makes the script run the canary once and print the result, instead of serving. */
+export const CANARY_ONCE_FLAG = '--canary-once'
+
+/** The checks `runCanary` returns, in order. The deploy gate reads exactly these. */
+export const CANARY_CHECK_IDS = ['canary-send', 'canary-langfuse', 'canary-tempo'] as const
+
+/**
+ * The deploy gate's canary: one run of `runCanary`, bounded by the run deadline, as one JSON document. A canary that
+ * throws or overruns is three `unknown` checks, never a pass. The document carries check ids, statuses and short
+ * details only.
+ */
+export async function canaryOnceOutput(deps: ReporterDeps): Promise<string> {
+  const checks = await guarded(CANARY_CHECK_IDS, () => bounded(() => runCanary(deps), runLimit(deps)))
+  return JSON.stringify({schemaVersion: 1, checks})
+}
+
 export interface RunOutcome {
   verdict: Verdict
   counters: CounterState
@@ -1439,7 +1458,7 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
   let tempoState = counters
   let ingest: IngestCounts | null = null
 
-  const [collector, tempo, langfuse, disk, ages, canary] = await Promise.all([
+  const [collector, tempo, langfuse, disk, ages] = await Promise.all([
     guarded(['collector-health', 'collector-queues', 'collector-failures', 'collector-refused'], async () => {
       const [health, metrics] = await Promise.all([
         checkCollectorHealth(deps),
@@ -1497,11 +1516,10 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
         evaluateAge('data-age-tempo', 'Tempo', blocks, now),
       ]
     }),
-    guarded(['canary-send', 'canary-langfuse', 'canary-tempo'], () => runCanary(deps)),
   ])
 
   return {
-    verdict: assembleVerdict([...collector, ...tempo, ...langfuse, ...disk, ...ages, ...canary], deps.now()),
+    verdict: assembleVerdict([...collector, ...tempo, ...langfuse, ...disk, ...ages], deps.now()),
     counters: mergeCounters(counters, collectorState, tempoState),
     ingest,
   }
@@ -1714,6 +1732,17 @@ export function start(deps: ReporterDeps = realDeps()): void {
   setInterval(tick, THRESHOLDS.intervalMs)
 }
 
+/** Run the canary once, print the document on stdout and exit. Exit 0 whatever the checks say; they are in the document. */
+async function canaryOnce(): Promise<void> {
+  const text = await canaryOnceOutput(realDeps())
+  await Bun.write(Bun.stdout, `${text}\n`)
+  process.exit(0)
+}
+
 if (import.meta.main) {
-  start()
+  if (process.argv.includes(CANARY_ONCE_FLAG)) {
+    await canaryOnce()
+  } else {
+    start()
+  }
 }

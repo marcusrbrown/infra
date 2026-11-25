@@ -103,6 +103,8 @@ export interface FakeOptions {
   verdict?: {ok?: boolean; ran?: boolean; stale?: boolean}
   /** The reporter cannot be read at all. */
   reporterUnreadable?: boolean
+  /** The canary command fails (exec error, or output that is not the expected document). */
+  canaryUnreadable?: boolean | 'garbled'
   /** Probe answers per route state, instead of the simulation's. */
   probeOverride?: (served: IngestState | 'none') => Record<string, number> | undefined
   /** ClickHouse tables that exist at the start (name -> ttl text as ClickHouse echoes it). */
@@ -162,6 +164,8 @@ export class FakeHost {
   /** The image the running collector was started from. */
   runningImage: string | undefined
   reporterAt = EPOCH - 100
+  /** How many times the canary command actually ran (a refused step does not count). */
+  canaryRuns = 0
   tables: Map<string, string | undefined>
   rules: {Prefix: string; Days: number}[] = []
   clock = EPOCH
@@ -298,6 +302,12 @@ export class FakeHost {
     if (step === 'raw:reporter-detail') {
       if (this.options.reporterUnreadable) return fail('exec failed')
       return ok(`${JSON.stringify(this.reporterDetail())}\nTRACES_DETAIL_END\n`)
+    }
+    if (step === 'reporter-canary') {
+      this.canaryRuns += 1
+      if (this.options.canaryUnreadable === 'garbled') return ok('not json\nTRACES_CANARY_END\n')
+      if (this.options.canaryUnreadable) return fail('exec failed')
+      return ok(`${JSON.stringify({schemaVersion: 1, checks: this.canaryChecks()})}\nTRACES_CANARY_END\n`)
     }
 
     switch (true) {
@@ -560,15 +570,8 @@ export class FakeHost {
       'data-age-clickhouse',
       'data-age-object-store',
       'data-age-tempo',
-      'canary-send',
-      'canary-langfuse',
-      'canary-tempo',
     ]
-    const checks = required.map(id => ({
-      id,
-      status: this.options.checkStatus?.[id] ?? 'pass',
-      detail: this.options.checkStatus?.[id] === undefined ? 'fine' : `${id} was made to fail`,
-    }))
+    const checks = this.checksFor(required)
     const allPass = checks.every(check => check.status === 'pass' || check.status === 'warn')
     return {
       schemaVersion: 1,
@@ -580,6 +583,19 @@ export class FakeHost {
       at: new Date(this.reporterAt * 1000).toISOString(),
       checks,
     }
+  }
+
+  /** What the one-shot canary prints: the three canary checks, mutated by `checkStatus` like the verdict's. */
+  canaryChecks(): Record<string, unknown>[] {
+    return this.checksFor(['canary-send', 'canary-langfuse', 'canary-tempo'])
+  }
+
+  private checksFor(ids: readonly string[]): {id: string; status: string; detail: string}[] {
+    return ids.map(id => ({
+      id,
+      status: this.options.checkStatus?.[id] ?? 'pass',
+      detail: this.options.checkStatus?.[id] === undefined ? 'fine' : `${id} was made to fail`,
+    }))
   }
 
   private retention(step: string, command: string, stdin: string): RunResult {

@@ -45,7 +45,8 @@ export interface RetentionTable {
  *
  * Not listed on purpose: `observations_batch_staging` (carries its own TTL), `audit_logs`, `topics`,
  * `topic_assignments`, `topic_facet_summaries`, `dataset_run_items_rmt` and `blob_storage_file_log` (settings,
- * datasets and bookkeeping an operator creates in the UI; no sender can write into them).
+ * datasets and bookkeeping an operator creates in the UI; no sender can write into them), and `billable_events`
+ * (usage metadata without trace content; kept with no expiry, as the trace privacy page discloses).
  */
 export const RETENTION_TABLES: readonly RetentionTable[] = [
   {name: 'events_full', column: 'start_time', required: true},

@@ -517,8 +517,11 @@ env:
             Nothing was probed.` Backup: `TRACES_DOMAIN not set, so the
             trace stack is treated as not deployed yet. No snapshot was
             taken.` A run that logged it is No-op (not configured): a
-            finding, never Healthy. Report Healthy only for a fresh
-            successful run whose log has no such notice.
+            finding, never Healthy. If the log cannot be retrieved,
+            report Unknown (log unreadable), never Healthy: a failed
+            lookup does not show the notice is absent. Report Healthy
+            only for a fresh successful run whose log was read and has no
+            such notice.
          Alert issue: match the real one by label AND body marker, never
          the label alone. Monitor: label `traces-unhealthy`, marker
          `<!-- traces-monitor-alert:v1 -->`, title `Trace collection stack
@@ -528,9 +531,13 @@ env:
          `traces-monitor-alert-rehearsal:v1` /
          `traces-backup-alert-rehearsal:v1` and titles starting
          `[Rehearsal]`; ignore them, and a labelled issue without the real
-         marker is not the alert. A failing run should have the real
-         issue open (the monitor opens it after two unhealthy runs in a
-         row, the backup after one failed run); flag it if absent. A fresh
+         marker is not the alert. A missing real issue is a finding only
+         when the workflow's own policy calls for one: monitor, after two
+         unhealthy scheduled runs in a row, or at once for an urgent
+         ingest-state mismatch (`ingest-open-unexpected`: 401 or 2xx
+         while ingest is not meant to be open, summary `alert at once`);
+         backup, after one failed run. A single ordinary unhealthy
+         monitor run with no issue is expected, not a finding. A fresh
          healthy run should have none open; flag a stale open one as
          reconciliation drift.
        - Never print or request a sender token, and never SSH to the
@@ -918,8 +925,8 @@ env:
     | traces | Ingest route | ✅ As expected / ❌ Unexpected | [HTTP status, TRACES_INGEST_OPEN] |
     | traces | Env secrets | ✅ Set / ⚠️ Missing / ❌ Bootstrap keys present | [details] |
     | traces | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | traces | Monitor scheduled run | ✅ Healthy / ⚠️ Pending / ❌ Failing / ⚠️ No-op (not configured) / — Missing | [run link] |
-    | traces | Backup scheduled run | ✅ Healthy / ⚠️ Pending / ❌ Failing / ⚠️ No-op (not configured) / — Missing | [run link] |
+    | traces | Monitor scheduled run | ✅ Healthy / ⚠️ Pending / ❌ Failing / ⚠️ No-op (not configured) / ⚠️ Unknown (log unreadable) / — Missing | [run link] |
+    | traces | Backup scheduled run | ✅ Healthy / ⚠️ Pending / ❌ Failing / ⚠️ No-op (not configured) / ⚠️ Unknown (log unreadable) / — Missing | [run link] |
     | docs | Status snapshot age | ✅ Fresh / ⚠️ Stale (> 90 min) / ⚠️ Not bootstrapped / — Missing | [artifact time] |
 
     ### Live Site Review

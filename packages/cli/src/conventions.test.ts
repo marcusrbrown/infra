@@ -3960,7 +3960,28 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
       expect(section).toContain(
         'TRACES_DOMAIN not set, so the trace stack is treated as not deployed yet. No snapshot was taken.',
       )
-      expect(section).toMatch(/Report Healthy only for a fresh successful run whose log has no such notice/)
+    })
+
+    it('reports an unreadable job log as Unknown, never Healthy, on the step and both template rows', async () => {
+      const {parsed} = await loadFroBotWorkflow()
+      const prompt = parsed.env?.SCHEDULE_PROMPT ?? ''
+      const section = extractDeployHealthCategory(prompt).sections.traces ?? ''
+      expect(section).toMatch(/If the log cannot be retrieved, report Unknown \(log unreadable\), never Healthy/)
+      expect(section).toMatch(/Healthy only for a fresh successful run whose log was read and has no such notice/)
+      for (const label of ['Monitor scheduled run', 'Backup scheduled run']) {
+        const row = prompt.split('\n').find(line => line.includes(`| traces | ${label} |`))
+        expect(row, `${label} row`).toContain('Unknown (log unreadable)')
+      }
+    })
+
+    it('flags a missing alert issue only when the workflow policy calls for one', async () => {
+      const {sections} = await loadHealthCategory()
+      const section = sections.traces ?? ''
+      expect(section).toMatch(/A missing real issue is a finding only when the workflow's own policy calls for one/)
+      expect(section).toMatch(/monitor, after two unhealthy scheduled runs in a row, or at once for an urgent/)
+      expect(section).toContain('`ingest-open-unexpected`')
+      expect(section).toMatch(/backup, after one failed run/)
+      expect(section).toMatch(/A single ordinary unhealthy monitor run with no issue is expected, not a finding/)
     })
 
     it('matches the real alert issue by label and real marker, and ignores rehearsal issues', async () => {

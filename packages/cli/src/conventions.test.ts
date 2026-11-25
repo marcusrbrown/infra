@@ -1,6 +1,6 @@
 import {existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs'
 import {tmpdir} from 'node:os'
-import {join, relative, resolve} from 'node:path'
+import {dirname, join, relative, resolve} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 import {goke} from 'goke'
 import {parse as parseYaml} from 'yaml'
@@ -6310,6 +6310,192 @@ describe('opencode-go-privacy.yaml: snapshot refresh workflow contract', () => {
     expect(script.indexOf('pr-url=')).toBeGreaterThan(script.indexOf('gh pr create'))
     expect(script.indexOf('pr-url=')).toBeGreaterThan(script.indexOf('gh pr edit'))
     expect(script.slice(0, script.indexOf('git commit'))).not.toContain('pr-url')
+  })
+
+  describe('picks the existing snapshot PR by head repository, not only by branch name', () => {
+    const LOOKUP_JQ = '[.[] | select(.isCrossRepository | not)] | .[0].number // empty'
+    const openPrScript = async (): Promise<string> =>
+      String((await load()).steps.find(step => step.name === 'Open snapshot PR')?.run)
+    const existingLookup = (script: string): string => {
+      const line = script.split('\n').find(candidate => candidate.includes('existing=$(gh pr list'))
+      expect(line, 'no existing-PR lookup').toBeDefined()
+      return line ?? ''
+    }
+
+    it('asks gh for isCrossRepository and drops cross-repository PRs, in the stale-PR lookup shape', async () => {
+      const {steps} = await load()
+      const script = await openPrScript()
+      const lookup = existingLookup(script)
+      const stale = String(steps.find(step => step.id === 'stale-pr')?.run)
+      const staleLine = stale.split('\n').find(candidate => candidate.includes('number=$(gh pr list')) ?? ''
+
+      expect(lookup).toContain('--json number,isCrossRepository')
+      expect(lookup).toContain(`--jq '${LOOKUP_JQ}'`)
+      expect(staleLine).toContain(`--jq '${LOOKUP_JQ}'`)
+      expect(lookup).toContain(`--head "${'$'}{branch}" --base main`)
+    })
+
+    // A fake gh and git run the real step text. The fake gh projects the fixture to the fields asked for with
+    // `--json` and applies the step's own `--jq` with the real jq, so a dropped field or filter changes the outcome.
+    interface Pr {
+      readonly number: number
+      readonly isCrossRepository: boolean
+    }
+    interface StepRun {
+      readonly exitCode: number
+      readonly calls: readonly string[]
+      readonly outputs: string
+      readonly stderr: string
+    }
+
+    function runOpenPrStep(script: string, prs: readonly Pr[]): StepRun {
+      const dir = mkdtempSync(join(tmpdir(), 'open-pr-step-'))
+      try {
+        const binDir = join(dir, 'bin')
+        const work = join(dir, 'work')
+        mkdirSync(binDir)
+        mkdirSync(join(work, 'packages/shared/opencode-go'), {recursive: true})
+        mkdirSync(join(work, '.changeset'))
+        const changeset = 'opencode-go-privacy-abcdef0-1-1.md'
+        writeFileSync(join(work, 'packages/shared/opencode-go/privacy-snapshot.json'), '{}\n')
+        writeFileSync(join(work, '.changeset', changeset), 'x\n')
+        writeFileSync(join(dir, 'prs.json'), JSON.stringify(prs))
+        writeFileSync(
+          join(binDir, 'gh'),
+          [
+            '#!/bin/sh',
+            'echo "gh $*" >> "$CALLS"',
+            'case "$1 $2" in',
+            '  "api /users/"*) echo 1; exit 0;;',
+            '  "pr create") echo "https://github.com/marcusrbrown/infra/pull/2100"; exit 0;;',
+            '  "pr edit") echo "https://github.com/marcusrbrown/infra/pull/$3"; exit 0;;',
+            'esac',
+            'if [ "$1 $2" = "pr list" ]; then',
+            '  json=; jqf=',
+            '  while [ $# -gt 0 ]; do',
+            '    case "$1" in --json) json=$2; shift;; --jq) jqf=$2; shift;; esac',
+            '    shift',
+            '  done',
+            '  jq -c --arg f "$json" \'map(with_entries(select(.key as $k | ($f | split(",") | index($k)) != null)))\' "$PRS" | jq -r "$jqf"',
+            '  exit $?',
+            'fi',
+            'exit 0',
+            '',
+          ].join('\n'),
+          {mode: 0o755},
+        )
+        writeFileSync(
+          join(binDir, 'git'),
+          [
+            '#!/bin/sh',
+            'echo "git $*" >> "$CALLS"',
+            'case "$1" in',
+            '  ls-remote) exit 1;;',
+            '  diff)',
+            '    case "$*" in',
+            '      *--quiet*) exit 1;;',
+            '      *--diff-filter=A*) echo ".changeset/$CHANGESET_FILE";;',
+            '    esac;;',
+            'esac',
+            'exit 0',
+            '',
+          ].join('\n'),
+          {mode: 0o755},
+        )
+        const result = Bun.spawnSync(['bash', '--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script], {
+          cwd: work,
+          env: {
+            PATH: `${binDir}:/usr/bin:/bin:${dirname(Bun.which('jq') ?? '/usr/bin/jq')}`,
+            CALLS: join(dir, 'calls.txt'),
+            PRS: join(dir, 'prs.json'),
+            GH_TOKEN: 'test-token',
+            GIT_USER_NAME: 'test[bot]',
+            CHANGESET_FILE: changeset,
+            GITHUB_OUTPUT: join(dir, 'output.txt'),
+            GITHUB_REPOSITORY: 'marcusrbrown/infra',
+            GITHUB_SERVER_URL: 'https://github.com',
+            RUNNER_TEMP: dir,
+          },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        })
+        const read = (name: string): string =>
+          existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : ''
+        return {
+          exitCode: result.exitCode,
+          calls: read('calls.txt').split('\n').filter(Boolean),
+          outputs: read('output.txt'),
+          stderr: result.stderr.toString(),
+        }
+      } finally {
+        rmSync(dir, {recursive: true, force: true})
+      }
+    }
+
+    const FORK = {number: 3001, isCrossRepository: true}
+    const OWN = {number: 2085, isCrossRepository: false}
+    const edits = (run: StepRun): string[] => run.calls.filter(call => call.startsWith('gh pr edit'))
+    const creates = (run: StepRun): string[] => run.calls.filter(call => call.startsWith('gh pr create'))
+    const URL_BASE = 'https://github.com/marcusrbrown/infra/pull'
+    const dropFilter = (script: string): string =>
+      script
+        .replace('--json number,isCrossRepository', '--json number')
+        .replace(`--jq '${LOOKUP_JQ}'`, "--jq '.[0].number // empty'")
+
+    it.skipIf(!Bun.which('jq'))(
+      'a newer fork PR with the same head and a same-repository PR: edits the same-repository PR',
+      async () => {
+        const run = runOpenPrStep(await openPrScript(), [FORK, OWN])
+
+        expect(run.exitCode, run.stderr).toBe(0)
+        expect(edits(run)).toHaveLength(1)
+        expect(edits(run)[0]?.startsWith('gh pr edit 2085 ')).toBe(true)
+        expect(creates(run)).toEqual([])
+        expect(run.outputs).toBe(`pr-url=${URL_BASE}/2085\n`)
+      },
+    )
+
+    it.skipIf(!Bun.which('jq'))(
+      'only a fork PR: creates the real PR, never edits the fork PR, and names the new one',
+      async () => {
+        const run = runOpenPrStep(await openPrScript(), [FORK])
+
+        expect(run.exitCode, run.stderr).toBe(0)
+        expect(edits(run)).toEqual([])
+        expect(creates(run)).toHaveLength(1)
+        expect(run.outputs).toBe(`pr-url=${URL_BASE}/2100\n`)
+      },
+    )
+
+    it.skipIf(!Bun.which('jq'))('no PR creates one, and only a same-repository PR is edited', async () => {
+      const none = runOpenPrStep(await openPrScript(), [])
+      expect(creates(none)).toHaveLength(1)
+      expect(edits(none)).toEqual([])
+
+      const own = runOpenPrStep(await openPrScript(), [OWN])
+      expect(edits(own)).toHaveLength(1)
+      expect(creates(own)).toEqual([])
+      expect(own.outputs).toBe(`pr-url=${URL_BASE}/2085\n`)
+    })
+
+    // The checks above must fail if the filter goes: prove the harness and the static assertions bite.
+    it.skipIf(!Bun.which('jq'))(
+      'a step that drops the cross-repository filter edits the fork PR, and the checks catch it',
+      async () => {
+        const mutated = dropFilter(await openPrScript())
+        expect(mutated).not.toBe(await openPrScript())
+
+        const run = runOpenPrStep(mutated, [FORK, OWN])
+        expect(edits(run)[0]?.startsWith('gh pr edit 3001 ')).toBe(true)
+        expect(run.outputs).toBe(`pr-url=${URL_BASE}/3001\n`)
+        const fork = runOpenPrStep(mutated, [FORK])
+        expect(creates(fork)).toEqual([])
+
+        const lookup = existingLookup(mutated)
+        expect(lookup).not.toContain('--json number,isCrossRepository')
+        expect(lookup).not.toContain(`--jq '${LOOKUP_JQ}'`)
+      },
+    )
   })
 
   it('stages the one changeset the refresh reported, validated by name, and keeps it across the branch reset', async () => {

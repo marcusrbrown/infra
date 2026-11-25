@@ -203,7 +203,9 @@ jobs:
           git commit -m "${title}"
           git push origin "${branch}" --force-with-lease
 
-          if ! existing=$(gh pr list --state open --head "${branch}" --base main --json number --jq '.[0].number // empty'); then
+          # A same-repository PR only, like the stale-PR lookup: a fork's PR from a branch of the same name is not ours
+          # to edit, and the alert must never point operators at it.
+          if ! existing=$(gh pr list --state open --head "${branch}" --base main --json number,isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | .[0].number // empty'); then
             echo "Unable to look up the stable snapshot PR." >&2
             exit 1
           fi

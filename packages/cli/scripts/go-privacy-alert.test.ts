@@ -964,6 +964,8 @@ describe('restriction notice', () => {
   const PULLS_URL = `https://github.com/${REPO}/pulls`
   const RESTRICTION_RUNBOOK_URL =
     'https://github.com/marcusrbrown/infra/blob/main/docs/runbooks/cliproxy-opencode-go.md#snapshot-refresh-pr-review'
+  const EMERGENCY_DISABLE_URL =
+    'https://github.com/marcusrbrown/infra/blob/main/docs/runbooks/cliproxy-opencode-go.md#emergency-disable-without-a-deploy'
 
   const restrictEnv = (overrides: Record<string, string | undefined> = {}): Record<string, string | undefined> =>
     baseEnv({
@@ -1069,11 +1071,12 @@ describe('restriction notice', () => {
       expect(run.content).toBe(
         [
           '**OpenCode Go privacy refresh PR restricts models**',
-          '2 model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. Until the deploy is approved the proxy keeps serving them.',
+          '2 model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. The models stay served until a deploy succeeds. If the PR leaves no eligible Go model, the deploy fails its preflight and changes nothing: disable the route instead.',
           `PR: ${PR_URL}`,
           'Workflow: OpenCode Go Privacy',
           `Run: ${RUN_URL}`,
           `Runbook: ${RESTRICTION_RUNBOOK_URL}`,
+          `Emergency disable: ${EMERGENCY_DISABLE_URL}`,
         ].join('\n'),
       )
     })
@@ -1089,14 +1092,41 @@ describe('restriction notice', () => {
       expect(run.content).toBe(
         [
           '**[REHEARSAL] OpenCode Go privacy refresh PR restricts models**',
-          '1 model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. Until the deploy is approved the proxy keeps serving them.',
+          '1 model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. The models stay served until a deploy succeeds. If the PR leaves no eligible Go model, the deploy fails its preflight and changes nothing: disable the route instead.',
           'Rehearsal: no refresh ran, no PR was opened and nothing is restricted.',
           `PR: ${PULLS_URL}`,
           'Workflow: OpenCode Go Privacy',
           `Run: ${RUN_URL}`,
           `Runbook: ${RESTRICTION_RUNBOOK_URL}`,
+          `Emergency disable: ${EMERGENCY_DISABLE_URL}`,
         ].join('\n'),
       )
+    })
+
+    it('links runbook sections that exist, and the zero-eligible case points at emergency disable', async () => {
+      const runbook = await Bun.file(
+        new URL('../../../docs/runbooks/cliproxy-opencode-go.md', import.meta.url).pathname,
+      ).text()
+      // GitHub's heading anchor: lower case, punctuation dropped, spaces to hyphens.
+      const anchors = runbook
+        .split('\n')
+        .filter(line => /^#{1,6} /.test(line))
+        .map(line =>
+          line
+            .replace(/^#+ /, '')
+            .toLowerCase()
+            .replaceAll(/[^\w\s-]/g, '')
+            .replaceAll(' ', '-'),
+        )
+      const run = await restrictStep()
+      const linked = [...(run.content ?? '').matchAll(/cliproxy-opencode-go\.md#([\w-]+)/g)].map(
+        match => match[1] ?? '',
+      )
+
+      expect(linked).toEqual(['snapshot-refresh-pr-review', 'emergency-disable-without-a-deploy'])
+      for (const anchor of linked) expect(anchors).toContain(anchor)
+      expect(run.content).toContain('no eligible Go model')
+      expect(run.content).toContain('The models stay served until a deploy succeeds')
     })
 
     it('points at the runbook section that tells the reader what to do', () => {

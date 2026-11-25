@@ -117,6 +117,7 @@ const REHEARSAL_TITLE = '[Rehearsal] OpenCode Go privacy refresh alert'
 const RUNBOOK_PATH = 'docs/runbooks/cliproxy-opencode-go.md'
 const RUNBOOK_ANCHOR = 'the-scheduled-refresh-is-failing'
 const RESTRICTION_RUNBOOK_ANCHOR = 'snapshot-refresh-pr-review'
+const EMERGENCY_DISABLE_ANCHOR = 'emergency-disable-without-a-deploy'
 const REHEARSAL_RESULT_NOTE = 'rehearsal; no refresh ran'
 const ALERT_NAME = 'OpenCode Go privacy alert'
 
@@ -379,12 +380,13 @@ export function buildRestrictionContent(env: RestrictionEnv, plan: Extract<Restr
   const [workflow, run] = detailLines(env, '')
   return [
     `**${rehearsal ? '[REHEARSAL] ' : ''}OpenCode Go privacy refresh PR restricts models**`,
-    `${plan.count} model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. Until the deploy is approved the proxy keeps serving them.`,
+    `${plan.count} model(s) the proxy serves would be restricted. Review the PR, then merge it and approve the cliproxy deploy. The models stay served until a deploy succeeds. If the PR leaves no eligible Go model, the deploy fails its preflight and changes nothing: disable the route instead.`,
     ...(rehearsal ? ['Rehearsal: no refresh ran, no PR was opened and nothing is restricted.'] : []),
     `PR: ${plan.link}`,
     workflow,
     run,
     `Runbook: ${blobUrl(env, RUNBOOK_PATH, RESTRICTION_RUNBOOK_ANCHOR)}`,
+    `Emergency disable: ${blobUrl(env, RUNBOOK_PATH, EMERGENCY_DISABLE_ANCHOR)}`,
   ].join('\n')
 }
 

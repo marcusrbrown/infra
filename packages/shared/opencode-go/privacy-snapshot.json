@@ -3,7 +3,7 @@
   "source": {
     "repo": "anomalyco/opencode",
     "path": "services/site/src/docs/content/console/go.mdx",
-    "commit": "2720b4b20cdf59b5cf7c86ff04c41115e1b51d06"
+    "commit": "13d601e31f9b6a7b7bbd581fe5d6d7e9ef656898"
   },
   "models": {
     "beam-free": {
@@ -103,13 +103,13 @@
       "agreementExpiry": null
     },
     "kimi-k3": {
-      "zeroRetention": true,
+      "zeroRetention": false,
       "trainsOnData": false,
       "regionGated": false,
       "agreementExpiry": null
     },
     "kimi-k3.1-pro": {
-      "zeroRetention": true,
+      "zeroRetention": false,
       "trainsOnData": false,
       "regionGated": false,
       "agreementExpiry": null

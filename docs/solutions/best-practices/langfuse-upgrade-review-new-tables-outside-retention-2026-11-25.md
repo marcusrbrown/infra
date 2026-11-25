@@ -23,7 +23,7 @@ Langfuse 4.84.0 added a usage ledger, `billable_events`. It has no TTL and no se
 2. **Decide each new table's retention.** The retention gate lists its tables in `RETENTION_TABLES` (`apps/traces/src/retention.ts:41-57`), with deliberate exclusions in the comment above it. Either add the table to the gate, or document why it is excluded.
 3. **Check the age alert.** The data-age check reads only `TRACE_TABLES` (`apps/traces/src/health-report.ts:89-93`). Decide whether a new table belongs there.
 4. **Disclose before the upgrade.** Check the migration SQL against `apps/docs/src/content/docs/trace-privacy.md`. Then confirm that the Site run succeeded and the updated page is live before you merge the upgrade.
-5. **Take a snapshot before approving the gate.** Follow the pre-upgrade snapshot procedure in `docs/runbooks/trace-collection.md`. Do not assume a down migration restores the earlier state: the ledger's down migration drops its views but keeps the table and its rows.
+5. **Take a snapshot before approving the gate.** Dispatch the Traces Backup workflow (`docs/runbooks/trace-collection.md`, "Dispatch a backup by hand") and confirm the new snapshot is listed. Do not assume a down migration restores the earlier state: the ledger's down migration drops its views but keeps the table and its rows.
 
 ## Why This Matters
 

@@ -30,7 +30,7 @@ import {validateDoc} from '@marcusrbrown/infra-shared/docs/frontmatter'
 ## NOTES
 
 - This package is `private: true` — it is never published to npm.
-- Tests are colocated under `server/`, `cliproxy/`, and `opencode-go/`.
+- Tests are colocated under `server/`, `cliproxy/`, `opencode-go/`, and `status/`. The frontmatter tests live in `packages/cli/src/docs-frontmatter.test.ts`.
 - `getSshFingerprint(name)` matches by key name (not first-key). Callers must pass the key name explicitly.
 - `validateDoctl({checkAuth: true})` runs `doctl account get`; the no-arg form only checks PATH.
 - `pinHostKeys` requires an explicit `opts.marker` for idempotency — callers control the marker string.

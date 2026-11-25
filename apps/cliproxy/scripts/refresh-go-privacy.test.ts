@@ -139,12 +139,15 @@ describe('refreshGoPrivacy: unchanged table', () => {
 
 describe('refreshGoPrivacy: changed table', () => {
   it('rewrites the snapshot with the new source commit and the parsed models', async () => {
-    const {snapshot} = staleSnapshot()
+    const {snapshot, changed} = staleSnapshot()
     const h = harness(snapshot)
 
     const result = await run(h)
 
-    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA})
+    // The one restriction: the stale snapshot wrongly clears `changed`; the refresh puts its zero-retention flag right.
+    expect(snapshot.models[changed]?.zeroRetention).toBe(true)
+    expect(tableAt(NEW_SHA).models[changed]?.zeroRetention).toBe(false)
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA, restricted: 1})
     const written = readFileSync(h.snapshotPath, 'utf8')
     expect(written).toBe(serializeSnapshot(tableAt(NEW_SHA)))
     expect(parseSnapshot(JSON.parse(written)).source.commit).toBe(NEW_SHA)
@@ -317,6 +320,7 @@ describe('refreshGoPrivacy: the release changeset', () => {
     expect(result).toEqual({
       changed: true,
       sourceCommit: NEW_SHA,
+      restricted: 1,
       changesetFile: 'opencode-go-privacy-aaaaaaa-1001-1.md',
     })
     expect(listing(dir)).toEqual(['opencode-go-privacy-aaaaaaa-1001-1.md'])
@@ -417,7 +421,8 @@ describe('refreshGoPrivacy: the release changeset', () => {
     expect(changesetsIn(dir)).toEqual([name1, name2, name3])
     expect(read(name1)).toBe(text1)
     expect(read(name2)).toBe(text2)
-    expect(workflowOutputs(r3)).toBe(`changed=true\nchangeset=${name3}\n`)
+    // Run 3 relaxes glm-5.3 again, which restricts nothing.
+    expect(workflowOutputs(r3)).toBe(`changed=true\nchangeset=${name3}\nrestricted=0\n`)
   })
 
   describe('a run identity that could reach a path wrongly is refused before anything is written or fetched', () => {
@@ -496,9 +501,9 @@ describe('refreshGoPrivacy: the release changeset', () => {
   it('reports the changeset to the workflow as a bare file name, and only when one was written', () => {
     const name = changesetFileName(NEW_SHA, runAt(1))
     expect(workflowOutputs({changed: false, sourceCommit: NEW_SHA})).toBe('changed=false\n')
-    expect(workflowOutputs({changed: true, sourceCommit: NEW_SHA})).toBe('changed=true\n')
-    expect(workflowOutputs({changed: true, sourceCommit: NEW_SHA, changesetFile: name})).toBe(
-      `changed=true\nchangeset=${name}\n`,
+    expect(workflowOutputs({changed: true, sourceCommit: NEW_SHA, restricted: 0})).toBe('changed=true\nrestricted=0\n')
+    expect(workflowOutputs({changed: true, sourceCommit: NEW_SHA, restricted: 0, changesetFile: name})).toBe(
+      `changed=true\nchangeset=${name}\nrestricted=0\n`,
     )
   })
 })
@@ -655,7 +660,7 @@ describe('refreshGoPrivacy: a live model with no privacy fields is left out and 
 
     const result = await run(h)
 
-    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA})
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA, restricted: 1})
     expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['glm-5.3']).toBeUndefined()
     const body = readFileSync(h.bodyPath, 'utf8')
     expect(body).toContain('### Removed (1)')
@@ -767,7 +772,7 @@ describe('refreshGoPrivacy: a live model with no privacy fields is left out and 
 
     const result = await done
 
-    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA})
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA, restricted: 2})
     const written = JSON.parse(readFileSync(h.snapshotPath, 'utf8')) as PrivacySnapshot
     expect(written.models['glm-5.3']).toBeUndefined()
     expect(written.models['kimi-k3']).toMatchObject({zeroRetention: false, regionGated: true})
@@ -892,7 +897,7 @@ describe('refreshGoPrivacy: a model one source does not know is left out and rep
 
     const result = await run(h)
 
-    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA})
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA, restricted: 1})
     expect(JSON.parse(readFileSync(h.snapshotPath, 'utf8')).models['glm-5.3']).toBeUndefined()
     const body = readFileSync(h.bodyPath, 'utf8')
     expect(body).toContain('### Removed (1)')
@@ -1171,5 +1176,118 @@ describe('diffSnapshots', () => {
   it('ignores key order inside an entry', () => {
     const reordered = {agreementExpiry: null, regionGated: false, trainsOnData: false, zeroRetention: true}
     expect(diffSnapshots({m: entry}, {m: reordered})).toEqual({added: [], removed: [], changed: []})
+  })
+})
+
+// A refresh that takes away a model the previous snapshot made eligible is time-sensitive: the proxy keeps serving it
+// until the PR merges and the gated deploy is approved. The count feeds the alert job.
+describe('refreshGoPrivacy: models the PR would restrict', () => {
+  const TODAY = new Date('2026-11-19T00:00:00Z')
+  const withGo = (id: string, change: (go: Record<string, unknown>) => void): string =>
+    liveWith(id, entry => change(entry.go as Record<string, unknown>))
+  const withoutGo = (...ids: string[]): string => {
+    const body = JSON.parse(LIVE_JSON) as {data: Record<string, unknown>[]}
+    for (const entry of body.data) if (ids.includes(String(entry.id))) delete entry.go
+    return JSON.stringify(body)
+  }
+  const restrictedOf = async (h: Harness, now = TODAY) => {
+    const result = await refreshGoPrivacy({
+      snapshotPath: h.snapshotPath,
+      bodyPath: h.bodyPath,
+      fetch: h.fetch,
+      now: () => now,
+    })
+    if (!result.changed) throw new Error('expected a changed snapshot')
+    return result.restricted
+  }
+
+  it.each([
+    ['zero retention lost', (go: Record<string, unknown>) => (go.zdr = false)],
+    ['training turned on', (go: Record<string, unknown>) => (go.training = true)],
+    ['newly region-gated', (go: Record<string, unknown>) => (go.limited_regions = true)],
+  ])('counts a model eligible before and not after: %s', async (_why, change) => {
+    const committed = tableAt(OLD_SHA)
+    expect(committed.models['glm-5.3']).toMatchObject({zeroRetention: true, trainsOnData: false, regionGated: false})
+    const h = harness(committed, {live: withGo('glm-5.3', change)})
+
+    expect(await restrictedOf(h)).toBe(1)
+  })
+
+  it('counts a model removed while it was exposed, once for each such model', async () => {
+    expect(await restrictedOf(harness(tableAt(OLD_SHA), {live: withoutGo('glm-5.3')}))).toBe(1)
+    expect(await restrictedOf(harness(tableAt(OLD_SHA), {live: withoutGo('glm-5.3', 'kimi-k3')}))).toBe(2)
+  })
+
+  it('does not count a model the previous snapshot already kept out', async () => {
+    // beam-free, gemini-4-argon and iceman-contributor-free are not eligible in the committed table.
+    for (const id of ['beam-free', 'gemini-4-argon', 'iceman-contributor-free']) {
+      const committed = tableAt(OLD_SHA)
+      expect(committed.models[id]).toBeDefined()
+      expect(await restrictedOf(harness(committed, {live: withoutGo(id)}))).toBe(0)
+    }
+  })
+
+  it('does not count a relaxation or an addition: only a model that loses exposure counts', async () => {
+    const committed = tableAt(OLD_SHA)
+    const glm = committed.models['glm-5.3']
+    if (glm === undefined) throw new Error('fixture has no glm-5.3')
+    // The previous snapshot excluded glm-5.3 and had one extra model; the refresh restores and drops them.
+    const previous: PrivacySnapshot = {
+      ...committed,
+      models: {...committed.models, 'glm-5.3': {...glm, zeroRetention: false}, 'retired-model': glm},
+    }
+    expect(await restrictedOf(harness(previous))).toBe(0)
+
+    const {'kimi-k3': _dropped, ...rest} = committed.models
+    expect(await restrictedOf(harness({...committed, models: rest}))).toBe(0)
+  })
+
+  it('does not count a model that was not on the live list, so the proxy was not serving it', async () => {
+    const body = JSON.parse(LIVE_JSON) as {data: {id: string}[]}
+    body.data = body.data.filter(entry => entry.id !== 'glm-5.3')
+    expect(await restrictedOf(harness(tableAt(OLD_SHA), {live: JSON.stringify(body)}))).toBe(0)
+  })
+
+  it('does not count a model whose agreement had expired under the previous snapshot', async () => {
+    const committed = tableAt(OLD_SHA)
+    const glm = committed.models['glm-5.3']
+    if (glm === undefined) throw new Error('fixture has no glm-5.3')
+    const previous = {...committed, models: {...committed.models, 'glm-5.3': {...glm, agreementExpiry: '2026-11-01'}}}
+    expect(await restrictedOf(harness(previous, {live: withoutGo('glm-5.3')}))).toBe(0)
+  })
+
+  it('counts a model whose agreement was valid on the run date and the next snapshot drops', async () => {
+    const committed = tableAt(OLD_SHA)
+    const glm = committed.models['glm-5.3']
+    if (glm === undefined) throw new Error('fixture has no glm-5.3')
+    const previous = {...committed, models: {...committed.models, 'glm-5.3': {...glm, agreementExpiry: '2026-11-19'}}}
+    expect(await restrictedOf(harness(previous, {live: withoutGo('glm-5.3')}))).toBe(1)
+  })
+
+  it('is computed without a PR body path, so the count never depends on a side output', async () => {
+    const h = harness(tableAt(OLD_SHA), {live: withGo('glm-5.3', go => (go.zdr = false))})
+    const result = await refreshGoPrivacy({snapshotPath: h.snapshotPath, fetch: h.fetch, now: () => TODAY})
+    expect(result).toEqual({changed: true, sourceCommit: NEW_SHA, restricted: 1})
+  })
+
+  it('reports no count when the snapshot did not change', async () => {
+    const result = await refreshGoPrivacy({
+      snapshotPath: harness(tableAt(OLD_SHA)).snapshotPath,
+      fetch: harness(tableAt(OLD_SHA)).fetch,
+    })
+    expect(result).toEqual({changed: false, sourceCommit: NEW_SHA})
+    expect(workflowOutputs(result)).toBe('changed=false\n')
+  })
+
+  it('reports the count to the workflow as a bare decimal and nothing else about the models', async () => {
+    const h = harness(tableAt(OLD_SHA), {live: withoutGo('glm-5.3', 'kimi-k3')})
+    const result = await refreshGoPrivacy({
+      snapshotPath: h.snapshotPath,
+      fetch: h.fetch,
+      now: () => TODAY,
+      changeset: {dir: tempDir(), runId: '77', runAttempt: '1'},
+    })
+    expect(workflowOutputs(result)).toBe('changed=true\nchangeset=opencode-go-privacy-aaaaaaa-77-1.md\nrestricted=2\n')
+    expect(workflowOutputs(result)).not.toMatch(/glm|kimi/)
   })
 })

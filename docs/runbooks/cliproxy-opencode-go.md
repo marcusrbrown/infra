@@ -165,6 +165,8 @@ The Go issue closes on the next healthy probe.
 
 The `OpenCode Go Privacy` workflow runs daily and on dispatch. It opens or updates one PR on the branch `opencode-go-privacy` when a model's privacy terms change. A change to the source commit alone opens no PR.
 
+A PR that restricts models is time-sensitive. The deploy applies the committed snapshot, so a model the new snapshot would drop stays served until you merge the PR and approve the gated cliproxy deploy. When a successful run opens or updates the PR and the new snapshot makes ineligible a model that the committed one made eligible, the `alert` job posts one Discord message to `CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK` with the count and a link to the PR. Eligible-to-ineligible covers zero retention lost, training turned on, a new region requirement, an agreement that expires, and a model removed from the snapshot. The message carries no model names: open the PR for them. The refresh updates the same PR every day while it differs from `main`, and the message repeats each day until the PR merges or closes. Treat a repeat as a reminder, not a new event. A re-run of the workflow posts nothing. Review and merge the same day, then approve the deploy. If the new snapshot leaves no eligible Go model, approving the deploy does not apply it: the preflight fails with `no eligible OpenCode Go models` before it writes anything, and the old list stays live, so the models stay exposed. Use [Emergency disable](#emergency-disable-without-a-deploy) instead; the Discord message links it for that case. If the **Warning** line says upstream published no privacy fields, check that the live list is not degraded first.
+
 Review the PR before you merge:
 
 1. Open the compare link in the PR body. It spans the old and new source commits of the OpenCode docs repository.
@@ -243,6 +245,8 @@ gh workflow run opencode-go-privacy.yaml --ref main -f rehearse-alert=fail
 ```
 
 The run opens one issue titled `[Rehearsal] OpenCode Go privacy refresh alert`, with the label `opencode-go-privacy-failure`, and posts one Discord message that starts with `[REHEARSAL]`. The rehearsal issue has its own marker, so it never absorbs a real failure. Dispatching `fail` again adds a comment and posts nothing. Close the rehearsal with `-f rehearse-alert=clear` (one more Discord message). Only `clear` closes it; a real refresh never touches it.
+
+To rehearse the restriction message alone, dispatch the same way with `-f rehearse-alert=restrict`. It posts one Discord message that starts with `[REHEARSAL]`, claims one restricted model, links the repository's PR list and says that nothing is restricted. It opens no issue and needs no clearing. It is owner-only like the others; each dispatch posts once. A real message links the PR and carries the count from the refresh. Only a real run can show the real count and link: the first real restriction is the proof.
 
 ---
 

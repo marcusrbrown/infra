@@ -22,6 +22,12 @@
 # once more. Nothing from the refresh log or upstream reaches the issue or Discord. The alert job has `issues: write` and
 # the workflow token only; the App token is never available to it. The `rehearse-alert` dispatch input exercises the
 # alert under a separate marker and skips the refresh. A refresh that never starts (a disabled schedule) is not alerted.
+#
+# Restriction notice: a refresh that succeeds and opens or updates the PR also reports to the alert job how many models
+# the PR would restrict (eligible under the committed snapshot, not under the new one) and the PR's URL. The alert job
+# then posts one Discord message naming the PR. The models stay exposed until the PR merges and the gated deploy is
+# approved, so the message repeats daily while the PR stays open. Only a count and a URL built from this repository
+# cross the job boundary; model ids are upstream text and do not.
 name: OpenCode Go Privacy
 
 on:
@@ -30,13 +36,14 @@ on:
   workflow_dispatch:
     inputs:
       rehearse-alert:
-        description: 'Owner only. fail: open a marked rehearsal issue and post to Discord. clear: close it. The refresh does not run.'
+        description: 'Owner only. fail: open a marked rehearsal issue and post to Discord. clear: close it. restrict: post the restriction message. The refresh does not run.'
         required: true
         type: choice
         options:
           - none
           - fail
           - clear
+          - restrict
         default: none
 
 permissions:
@@ -58,6 +65,11 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    # For the alert job: a count and this repository's PR URL, nothing from the models. Both are empty when the
+    # snapshot did not change or no PR was opened or updated.
+    outputs:
+      restricted: ${{ steps.refresh.outputs.restricted }}
+      pr-url: ${{ steps.open-pr.outputs.pr-url }}
     steps:
       - name: Checkout default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -121,6 +133,7 @@ jobs:
           permission-pull-requests: write
 
       - name: Open snapshot PR
+        id: open-pr
         if: steps.refresh.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ steps.get-app-token.outputs.token }}
@@ -190,15 +203,32 @@ jobs:
           git commit -m "${title}"
           git push origin "${branch}" --force-with-lease
 
-          if ! existing=$(gh pr list --state open --head "${branch}" --base main --json number --jq '.[0].number // empty'); then
+          # A same-repository PR only, like the stale-PR lookup: a fork's PR from a branch of the same name is not ours
+          # to edit, and the alert must never point operators at it.
+          if ! existing=$(gh pr list --state open --head "${branch}" --base main --json number,isCrossRepository --jq '[.[] | select(.isCrossRepository | not)] | .[0].number // empty'); then
             echo "Unable to look up the stable snapshot PR." >&2
             exit 1
           fi
           if [[ -n "${existing}" ]]; then
             echo "Updating snapshot PR #${existing}."
             gh pr edit "${existing}" --title "${title}" --body-file "${body_file}"
+            number="${existing}"
           else
-            gh pr create --title "${title}" --body-file "${body_file}" --head "${branch}" --base main
+            created=$(gh pr create --title "${title}" --body-file "${body_file}" --head "${branch}" --base main)
+            echo "${created}"
+            number="${created##*/}"
+            # gh prints the new PR's URL. Take its number only when the URL is this repository's pull URL.
+            if [[ "${created}" != "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${number}" ]]; then
+              number=""
+            fi
+          fi
+
+          # Tell the alert job which PR to name. The URL is built here from the runner's own repository and a numeric
+          # id, never copied from gh output.
+          if [[ "${number}" =~ ^[0-9]{1,10}$ ]]; then
+            echo "pr-url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${number}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::warning::Could not read the snapshot PR number, so a restriction notice would carry no PR link."
           fi
 
       # Close before deleting the branch: deleting the head branch first would close the PR without the comment.
@@ -217,8 +247,8 @@ jobs:
 
   # Runs after refresh whatever its result (always()), on main only like refresh. It acts on the refresh result:
   # failure or cancelled alerts, success clears, skipped (a rehearsal, which skips the refresh) does nothing unless
-  # rehearsing. Two steps keep the credentials apart: the issue step holds the workflow token and no webhook, the
-  # Discord step holds the webhook and no token. Every value reaches the script through env, never the script body.
+  # rehearsing. The issue step holds the workflow token and no webhook; the two Discord steps (outage transitions,
+  # restriction notice) hold the webhook and no token. Every value reaches the script through env, never the script body.
   alert:
     name: Alert on refresh failure
     needs: refresh
@@ -262,3 +292,17 @@ jobs:
           ALERT_ISSUE_NUMBER: ${{ steps.issue.outputs.issue-number }}
           CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: ${{ secrets.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK }}
         run: bun run packages/cli/scripts/go-privacy-alert.ts notify
+
+      # A successful refresh whose PR would restrict models the proxy serves. Runs even when the issue step failed, so
+      # a broken issue path never hides it. The script decides: only attempt 1 acts, and it always exits 0. It holds
+      # the webhook and no token.
+      - name: Notify Discord of restricted models
+        if: (inputs.rehearse-alert == 'restrict' || (needs.refresh.result == 'success' && needs.refresh.outputs.restricted != '' && needs.refresh.outputs.restricted != '0')) && !cancelled()
+        env:
+          ALERT_REFRESH_RESULT: ${{ needs.refresh.result }}
+          ALERT_REHEARSE: ${{ inputs.rehearse-alert }}
+          ALERT_RUN_ATTEMPT: ${{ github.run_attempt }}
+          ALERT_RESTRICTED: ${{ needs.refresh.outputs.restricted }}
+          ALERT_PR_URL: ${{ needs.refresh.outputs.pr-url }}
+          CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK: ${{ secrets.CLIPROXY_AUTH_MONITOR_DISCORD_WEBHOOK }}
+        run: bun run packages/cli/scripts/go-privacy-alert.ts restriction

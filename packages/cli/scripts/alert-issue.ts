@@ -515,7 +515,7 @@ export async function runDiscordStepWith(options: {
   return summary
 }
 
-function emitNotify(alertName: string, summary: NotifySummary, deps: NotifyStepDeps): void {
+export function emitNotify(alertName: string, summary: NotifySummary, deps: NotifyStepDeps): void {
   const reason = summary.reason ?? 'unknown'
   if (summary.outcome === 'skipped' && summary.reason === 'webhook-unset') {
     safely(() => deps.log('::notice::Discord notification skipped: the webhook secret is not set'))

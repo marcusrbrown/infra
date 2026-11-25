@@ -3080,17 +3080,17 @@ describe('staged image acquisition and publication ordering', () => {
     }
   })
 
-  it('rejects symlink and non-regular final paths before publishing any active file', async () => {
-    const conflicts = [
-      ['env-symlink', 'env', 'symlink'],
-      ['caddyfile-directory', 'caddyfile', 'directory'],
-      ['pem-symlink', 'pem', 'symlink'],
-      ['fro-bot-pem-symlink', 'froBotPem', 'symlink'],
-      ['fro-bot-pem-directory', 'froBotPem', 'directory'],
-      ['compose-directory', 'compose', 'directory'],
-    ] as const
-
-    for (const [name, target, kind] of conflicts) {
+  // One `it` per conflict: each case runs the real bash transaction, so looping inside a single test stacks
+  // every subprocess against one 5000 ms timeout, which flakes under CPU contention.
+  for (const [name, target, kind] of [
+    ['env-symlink', 'env', 'symlink'],
+    ['caddyfile-directory', 'caddyfile', 'directory'],
+    ['pem-symlink', 'pem', 'symlink'],
+    ['fro-bot-pem-symlink', 'froBotPem', 'symlink'],
+    ['fro-bot-pem-directory', 'froBotPem', 'directory'],
+    ['compose-directory', 'compose', 'directory'],
+  ] as const) {
+    it(`rejects symlink and non-regular final paths before publishing any active file: ${name}`, async () => {
       const parent = mkdtempSync(join(tmpdir(), `dashboard-deploy-u4-path-${name}-`))
       const root = realpathSync(parent)
       const runtimeRoot = join(root, 'dashboard-deploy')
@@ -3123,8 +3123,8 @@ describe('staged image acquisition and publication ordering', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    })
+  }
 
   it('leaves old Compose byte-identical when support publication fails before Compose', async () => {
     const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-publication-failure-'))
@@ -3242,10 +3242,10 @@ describe('staged image acquisition and publication ordering', () => {
     }
   })
 
-  it('rejects empty, multiple, and malformed running dashboard container identities', async () => {
-    const identities = ['', 'abcdef123456\n0123456789abcdef', 'ABCDEF123456', 'abc123']
-
-    for (const identity of identities) {
+  // One `it` per identity: each case runs the real bash transaction, so looping inside a single test stacks
+  // every subprocess against one 5000 ms timeout, which flakes under CPU contention.
+  for (const identity of ['', 'abcdef123456\n0123456789abcdef', 'ABCDEF123456', 'abc123']) {
+    it(`rejects empty, multiple, and malformed running dashboard container identities: ${JSON.stringify(identity)}`, async () => {
       const parent = mkdtempSync(join(tmpdir(), 'dashboard-deploy-u4-runtime-container-id-'))
       const root = realpathSync(parent)
       const runtimeRoot = join(root, 'dashboard-deploy')
@@ -3269,8 +3269,8 @@ describe('staged image acquisition and publication ordering', () => {
       } finally {
         rmSync(parent, {recursive: true, force: true})
       }
-    }
-  })
+    })
+  }
 })
 
 describe('dashboard is always force-recreated after the keys are published', () => {

@@ -1,5 +1,15 @@
 # @marcusrbrown/infra
 
+## 0.30.5
+
+### Patch Changes
+
+- Refresh the bundled OpenCode Go privacy snapshot to upstream commit `44344bd` of `anomalyco/opencode`. ([#2104](https://github.com/marcusrbrown/infra/pull/2104))
+
+- `infra traces logs` accepts the new `embedder` service, the local embedding server that Langfuse Topics uses. `infra traces status` shows its `embedder-health` check with the monitoring checks, so a dead embedder fails the health path and never refuses `infra traces ingest open`. ([#2105](https://github.com/marcusrbrown/infra/pull/2105))
+
+- `infra traces logs` accepts the new `prometheus` service, and `infra traces deploy --local` forwards `TRACES_DISCORD_WEBHOOK_URL`, the address the trace stack's Grafana alert rules post to. `infra traces status` now shows the ingest verdict and the monitoring verdict (Grafana and Prometheus) apart, and `infra traces ingest open` reads the ingest verdict only, so a failing monitoring check no longer refuses an open. ([#2101](https://github.com/marcusrbrown/infra/pull/2101))
+
 ## 0.30.4
 
 ### Patch Changes

@@ -1,0 +1,12 @@
+# One Discord contact point. The webhook address is never in this file: Grafana expands the environment variable
+# when it reads the file, and the compose file passes it to Grafana only (from the host `.env`).
+apiVersion: 1
+contactPoints:
+  - orgId: 1
+    name: Traces Discord
+    receivers:
+      - uid: traces-discord
+        type: discord
+        disableResolveMessage: false
+        settings:
+          url: $TRACES_DISCORD_WEBHOOK_URL

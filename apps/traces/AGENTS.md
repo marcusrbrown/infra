@@ -1,13 +1,13 @@
 # apps/traces — trace collection stack
 
-Collector, Langfuse, Tempo and Grafana for agent-run traces, on a dedicated DigitalOcean droplet at `traces.fro.bot`. A collector accepts OTLP over HTTP on that one public hostname, tells three sender groups apart by bearer token, limits each group by bytes, and sends every trace two ways: whole to Langfuse, and reduced to a named list of attributes to Tempo. Langfuse and Grafana have no public hostname; both are reached through an SSH tunnel. Ingest and a health path are the only public routes.
+Collector, Langfuse, Tempo, Grafana and Prometheus for agent-run traces, on a dedicated DigitalOcean droplet at `traces.fro.bot`. A collector accepts OTLP over HTTP on that one public hostname, tells three sender groups apart by bearer token, limits each group by bytes, and sends every trace two ways: whole to Langfuse, and reduced to a named list of attributes to Tempo. Langfuse and Grafana have no public hostname; both are reached through an SSH tunnel. Ingest and a health path are the only public routes.
 
 The decision record is `docs/plans/2026-11-20-001-feat-trace-collection-stack-plan.md`. This file covers the stack definition, the gated deploy and the health reporter. Provisioning is `server/provision.ts`; [`docs/runbooks/trace-collection.md`](../../docs/runbooks/trace-collection.md) is the operator runbook (health, deploy, ingest, sender tokens, backups, restore, rebuild); the CLI group (`traces status|logs|open|ingest|sender`) is in `packages/cli/src/commands/traces/`.
 
 ## Structure
 
 ```text
-├── docker-compose.yaml       Stack: Caddy, collector, Langfuse web + worker, ClickHouse, PostgreSQL, Redis, MinIO, Tempo, Grafana, health reporter
+├── docker-compose.yaml       Stack: Caddy, collector, Langfuse web + worker, ClickHouse, PostgreSQL, Redis, MinIO, Tempo, Grafana, Prometheus, health reporter
 ├── config/
 │   ├── Caddyfile             One site; /healthz; 404 for everything else; imports one ingest state file
 │   ├── ingest/               off.caddy, held.caddy, open.caddy: the three ingest states
@@ -15,7 +15,8 @@ The decision record is `docs/plans/2026-11-20-001-feat-trace-collection-stack-pl
 │   ├── tempo.yaml            Monolithic, local disk, 720 h retention, 20 MB trace limit
 │   ├── clickhouse/           System-log TTLs (config.d). No memory settings
 │   ├── clickhouse-users/     The read-only `traces_reader` user for the health reporter
-│   └── grafana/datasources/  Provisioned Tempo data source
+│   ├── prometheus/           prometheus.yml: four scrape jobs, 30 s, no rules, no Alertmanager
+│   └── grafana/              datasources/ (Tempo, Prometheus) and alerting/ (contact point, policy, alert rules)
 ├── collector/                Builder manifest and Dockerfile for the collector image
 ├── server/provision.ts       Droplet, volume, firewall; exports `checkTracesStorage`, `createRemoteExec`, `Runner`, `RemoteExec`
 └── src/
@@ -28,12 +29,12 @@ The decision record is `docs/plans/2026-11-20-001-feat-trace-collection-stack-pl
 
 ## Networks and exposure
 
-| Network   | Members                                                                                        |
-| --------- | ---------------------------------------------------------------------------------------------- |
-| `edge`    | Caddy, collector, Langfuse web, Tempo, health reporter                                         |
-| `backend` | Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo, health reporter |
+| Network | Members |
+| --- | --- |
+| `edge` | Caddy, collector, Langfuse web, Tempo, Prometheus, health reporter |
+| `backend` | Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo, Prometheus, health reporter |
 
-Only Caddy publishes `80` and `443`. Langfuse web (`127.0.0.1:3000`) and Grafana (`127.0.0.1:3001`) publish to loopback for the SSH tunnel; keep the tunnel's local ports equal to these (Langfuse's `NEXTAUTH_URL` and Grafana's root URL are loopback URLs). No store port is ever published: Docker publishing bypasses the host firewall.
+Prometheus (`9090`) and the reporter's metrics listener (`8082`) are never published and Caddy never routes to them. Only Caddy publishes `80` and `443`. Langfuse web (`127.0.0.1:3000`) and Grafana (`127.0.0.1:3001`) publish to loopback for the SSH tunnel; keep the tunnel's local ports equal to these (Langfuse's `NEXTAUTH_URL` and Grafana's root URL are loopback URLs). No store port is ever published: Docker publishing bypasses the host firewall.
 
 ## Ingest
 
@@ -62,10 +63,20 @@ A 200 from the collector means queued, not stored by both backends. Delivery is 
 
 ## Health reporter
 
-`src/health-report.ts` runs in the `health-reporter` service (`oven/bun`, no install step, read-only root, Tempo's UID 10001, no Docker socket) and produces one verdict every five minutes: the collector, Tempo, both Langfuse services, disk, and the age of the oldest data in each store. The periodic verdict sends no trace: it rests on the ready endpoints, the collector's exporter failure counters, queue fill and ingest 503s, Tempo's discard and truncation counters, disk space and data age. The canary is a separate mode of the same script, `bun run --no-install /app/health-report.ts --canary-once`. The deploy runs it once, by `docker compose exec -T health-reporter`, after the reporter's verdict is fresh, as a guarded step that holds the deploy step lock and checks ownership through the send and readback (`canaryScript` in `src/deploy.ts`). It sends one trace through the collector's private receiver, reads it back from both backends, prints the three canary checks as JSON followed by a sentinel line, and exits 0 whatever the checks say. A canary that throws or overruns the run deadline is three `unknown` checks. In Langfuse the canary is checked two ways: the markers Langfuse stores as fields must be in its ClickHouse row, and all nine must be in the raw batch that row names in the object store (Langfuse does not copy span links, generic span events or exception events into the row; `LANGFUSE_MARKER_LOCATIONS` is the one table to re-check on a Langfuse upgrade). In Tempo only the span name, status message, exception message and link attribute may survive, which is the keep-list check. Every probe has a timeout and each run a deadline, so one stuck dependency cannot stop later runs. It has two listeners:
+`src/health-report.ts` runs in the `health-reporter` service (`oven/bun`, no install step, read-only root, Tempo's UID 10001, no Docker socket) and produces one verdict every five minutes: the collector, Tempo, both Langfuse services, Grafana, disk, and the age of the oldest data in each store. The periodic verdict sends no trace: it rests on the ready endpoints, the collector's exporter failure counters, queue fill and ingest 503s, Tempo's discard and truncation counters, disk space and data age. The canary is a separate mode of the same script, `bun run --no-install /app/health-report.ts --canary-once`. The deploy runs it once, by `docker compose exec -T health-reporter`, after the reporter's verdict is fresh, as a guarded step that holds the deploy step lock and checks ownership through the send and readback (`canaryScript` in `src/deploy.ts`). It sends one trace through the collector's private receiver, reads it back from both backends, prints the three canary checks as JSON followed by a sentinel line, and exits 0 whatever the checks say. A canary that throws or overruns the run deadline is three `unknown` checks. In Langfuse the canary is checked two ways: the markers Langfuse stores as fields must be in its ClickHouse row, and all nine must be in the raw batch that row names in the object store (Langfuse does not copy span links, generic span events or exception events into the row; `LANGFUSE_MARKER_LOCATIONS` is the one table to re-check on a Langfuse upgrade). In Tempo only the span name, status message, exception message and link attribute may survive, which is the keep-list check. Every probe has a timeout and each run a deadline, so one stuck dependency cannot stop later runs. It has three listeners:
 
-- `0.0.0.0:8080` `GET /healthz`: `{ok, at}` and nothing else. Caddy routes this path publicly.
+- `0.0.0.0:8080` `GET /healthz`: `{ok, at}` and nothing else. Caddy routes this path publicly. `/metrics` is refused here.
 - `127.0.0.1:8081` (the container's own loopback; nothing publishes it) `GET /detail` and `/live`. `traces status`, `traces ingest open` and the deploy read `/detail` with `docker compose exec -T health-reporter wget -q -O - http://127.0.0.1:8081/detail`, followed by a sentinel line.
+- `0.0.0.0:8082` `GET /metrics` (the edge and backend networks; nothing publishes it and Caddy never routes it): the gauges below, in the Prometheus text format, from the reporter's latest finished run. A scrape reads the cache and never starts a probe. Before the first run the page is empty.
+
+| Gauge | Labels | Meaning |
+| --- | --- | --- |
+| `traces_probe_up` | `target` = `langfuse-web`, `langfuse-worker`, `grafana` | 1 when the latest probe passed, 0 when not |
+| `traces_disk_used_ratio` | `mount` = `volume`, `root` | used share from 0 to 1, as `df` computes it; the volume's is exported only while its sentinel is the recognised one |
+| `traces_oldest_data_age_seconds` | `store` = `clickhouse`, `object-store`, `tempo` | seconds since the oldest data was written; absent for an empty or unreadable store |
+| `traces_reporter_last_run_timestamp_seconds` | none | when the latest run finished; a run that overran its deadline leaves it, and the other gauges, as they were |
+
+Every label is a fixed name and every value a number: nothing a probe read reaches the page. `grafana-health` (`GET http://grafana:3000/api/health`, backend network) is a required check, so a dead Grafana fails `/healthz`, which the external monitor reports. The collector and Tempo verdict checks are unchanged and still decide `/healthz`; the alert rules below are a second, standard path for the same failures.
 
 `/detail` also carries an `ingest` object (`null` when the metrics scrape fails or cannot be read): per group `acceptedSpans` and `refusedSpans` from the receiver counters, `requests` (HTTP status code to count for the three authenticated receivers, summed over label combinations, the canary route excluded) and a fixed `note`. All are totals since the collector started, not rates, and `refusedSpans` counts both 429 and 503. The 401 total includes the public monitor's unauthenticated probe every 15 minutes and the deploy-gate probes. The block is counts only and is never in `/healthz`; `traces status` prints it (text and `--json`), and the published CLI reads `/detail` as JSON with its own schema (it imports nothing from this app).
 
@@ -75,13 +86,38 @@ A verdict older than two intervals reads as failing. Two files carry the reporte
 
 The reporter runs as Tempo's user on purpose. Tempo creates its data directories (`blocks`, `wal`, `live-store`) with mode 0700, so any other user gets "Permission denied" listing `blocks`, the Tempo age check reads `unknown (blocks-unreadable)`, and a check that is `unknown` fails the verdict, so ingest can never open. `TEMPO_USER_ID` in `src/host.ts` is that one id: the compose file's `health-reporter.user` and the owner deploy gives `secrets/reporter/*` both follow it, and `docker-compose.test.ts` pins both, and pins that Tempo has no `user` of its own. If a Tempo image bump changes the image's user, change the constant. The reporter mounts, all read-only: its source (`./health-reporter`, root-owned, 0644), `secrets/reporter` (its two files), `tempo_data` at `/var/tempo` (owned by 10001; the only mount owned by that user), the volume sentinel file and `/srv` (disk-fullness probes only). It mounts no token directory, no collector, Grafana or bootstrap secret, and no other store.
 
+## Alerts
+
+Ongoing failure alerting uses standard Prometheus metrics and alert rules. One Prometheus container (`prom/prometheus` on the 3.13 line, held there by a Renovate `allowedVersions` rule) scrapes four targets every 30 s: the collector (`otelcol`, `collector:8888`), Tempo (`tempo:3200`), the reporter (`health-reporter:8082`) and itself. It keeps 15 days or 2 GB. It evaluates no rules and has no Alertmanager, no `--web.enable-lifecycle`, no admin API and no remote-write receiver. Grafana queries it (data source uid `prometheus`, not the default) and owns the rules, which are provisioned from `config/grafana/alerting/` (mounted read-only) into one folder, `Traces stack`, in four groups. They post through one Grafana Discord contact point (`traces-discord`), whose URL is `$TRACES_DISCORD_WEBHOOK_URL`. That variable is a deploy secret, written to the host `.env` and passed to Grafana only (`${TRACES_DISCORD_WEBHOOK_URL:?}`, so a stack without it does not start). The one policy sends every alert to that contact point: grouped by folder and alert name, `group_wait` 30 s, `group_interval` 5 m, `repeat_interval` 4 h, resolutions sent.
+
+| Rule | Group | Fires when | Severity | No data | Query error |
+| --- | --- | --- | --- | --- | --- |
+| `TracesTargetDown` | stack | `up == 0`, 5 m | critical | Alerting | Alerting |
+| `LangfuseDown` | stack | `traces_probe_up` of `langfuse-web` or `-worker` is 0, 5 m | critical | OK | KeepLast |
+| `GrafanaDown` | stack | `traces_probe_up{target="grafana"}` is 0, 5 m | critical | OK | KeepLast |
+| `ReporterStale` | stack | the last run finished over 15 m ago, 5 m | warning | Alerting | KeepLast |
+| `CollectorQueueFilling` | collector | queue size over capacity is 0.8 or more, per exporter, 5 m | warning | OK | KeepLast |
+| `CollectorExportFailures` | collector | send or enqueue failed spans rose in 30 m, per exporter | critical | OK | KeepLast |
+| `IngestRefused503` | collector | ingest answered 503 in 30 m, canary route excluded (`http_route=""`) | critical | OK | KeepLast |
+| `TempoDiscards` | tempo | spans discarded in 30 m | critical | OK | KeepLast |
+| `TempoAttributeTruncation` | tempo | attributes truncated in 30 m | info | OK | KeepLast |
+| `VolumeSpaceWarning` / `VolumeSpaceCritical` | storage | volume used share 0.70 or more (10 m) / 0.85 or more (5 m) | warning / critical | OK | KeepLast |
+| `RootSpace` | storage | root used share 0.85 or more, 10 m | critical | OK | KeepLast |
+| `DataOlderThan31d` | storage | a store's oldest data is over 31 days, 10 m | critical | OK | KeepLast |
+
+**Absence is decided per rule.** The loss counters (`otelcol_exporter_send_failed_spans`, `..._enqueue_failed_spans`, Tempo's discard and truncation counters) are not exported until their first increment, so no data means no loss and never alerts (`noDataState: OK`); their queries read both counters through one regex selector inside `sum by (...) (increase(...))`, never a `+` between two vectors, which would drop every series missing from one side. `TracesTargetDown` and `ReporterStale` read series that must always exist, so no data means the monitoring is blind and alerts; `TracesTargetDown` also alerts on a failing query. A query that fails keeps every other rule's last state, so a Prometheus outage neither resolves a firing alert nor starts new ones. The thresholds are the reporter's (`THRESHOLDS`), and a test pins them. The rule `uid`s are fixed (`traces-*`), so a silence or a mute timing made in the Grafana UI stays attached across deploys.
+
+Message templates are fixed text, the rule's own label values (`exporter`, `job`, `instance`, `target`, `mount`, `store`, `reason`) and numbers. A test rejects any other template variable. The webhook address is in no tracked file.
+
+The deploy checks the result in its second operator gate (below). Silencing and the rest of the day-2 procedure are in the runbook.
+
 ## Deploy
 
 `bun run deploy:traces` (root wrapper; loads the root `.env`) or the `deploy-traces` workflow. The inputs are exactly `TRACES_DEPLOY_SECRETS`, `TRACES_DEPLOY_VARS` (`TRACES_DOMAIN`, `TRACES_INGEST_OPEN`) and `TRACES_DEPLOY_BUILD_INPUTS` (`TRACES_COLLECTOR_IMAGE`, from the workflow's build job) in `src/deploy.ts`; a conventions test compares them with the workflow. A sender token, the snapshot token and the DigitalOcean token are never read.
 
 The workflow builds the collector image without a provenance attestation, on purpose. The build is reproducible, and an attestation differs on every run, so with one attached the pushed digest changed for an unchanged image and every deploy restarted the collector (and would hold an open route to do it). The digest now changes only when the image does.
 
-Order: validate every input; DNS preflight; verify the volume mount, sentinel and storage paths (`checkTracesStorage`, fail closed); under the step lock (waiting for any other deploy's step in flight) and then the ingest lock, read the host's state and write the deploy marker (carrying this deploy's id) in one script; compare every file with the host and, on an open route, compare the running services with the files; hold the route if it is open and a gated service is about to change or is not running what the files say; write directories, deny-all token files where none exists, secret files, configs and the reporter source; prune images, check free space, pull; create the collector container and fix its queue volume's owner; start the stores and Langfuse; assert and read back retention; start Tempo, Grafana and the collector; restart the reporter; verify the collector's running image digest; start Caddy; run the gates; set the route; remove the deploy marker; check Grafana's sign-in (read-only, after the route is final).
+Order: validate every input; DNS preflight; verify the volume mount, sentinel and storage paths (`checkTracesStorage`, fail closed); under the step lock (waiting for any other deploy's step in flight) and then the ingest lock, read the host's state and write the deploy marker (carrying this deploy's id) in one script; compare every file with the host and, on an open route, compare the running services with the files; hold the route if it is open and a gated service is about to change or is not running what the files say; write directories, deny-all token files where none exists, secret files, configs and the reporter source; prune images, check free space, pull; create the collector container and fix its queue volume's owner; create the Prometheus container and give its data volume to `nobody` (65534); start the stores and Langfuse; assert and read back retention; start Tempo, Grafana, the collector and Prometheus; restart the reporter; verify the collector's running image digest; start Caddy; run the gates; set the route; remove the deploy marker; check Grafana's sign-in and its provisioned alerting (read-only, after the route is final).
 
 Everything goes over one multiplexed SSH connection with pinned host keys (`StrictHostKeyChecking=yes`). The ssh child's environment is `PATH`, `HOME` and `SSH_AUTH_SOCK` and nothing else; a secret reaches the host on stdin only, written to a temporary file in the destination directory with its owner and mode set first, then renamed over the target.
 
@@ -95,7 +131,7 @@ The CLI follows the same rule. The host rate-limits new SSH connections (`ufw li
 | `secrets/collector/langfuse-basic` | root:65532, 0440 | differs. `base64(public:secret)`, no trailing newline; a placeholder the collector can start with and Langfuse refuses when the key pair is unset |
 | `secrets/grafana/{admin-password,secret-key}` | 472:472, 0400 (directory `root:472`, 0750) | differs |
 | `secrets/reporter/{clickhouse-password,minio-password}` | 10001:10001, 0400 | differs |
-| `config/**`, `docker-compose.yaml` | root, 0644 | differs |
+| `config/**`, `docker-compose.yaml` | root, 0644 | differs. `config/prometheus/prometheus.yml` recreates Prometheus; `config/grafana/{datasources,alerting}/**` recreate Grafana |
 | `health-reporter/health-report.ts` | root, 0644 | differs. Mounted read-only at `/app` |
 | `tokens/<group>/token` | root:65532, 0640 | **never**, once it exists. Created with one void line only when absent (a temporary file hard-linked into place, which fails if the target exists) |
 
@@ -128,8 +164,13 @@ After the stack is up the deploy evaluates the gates (`evaluateGates`; every gat
 | `bootstrap-key` | the bootstrap pair is not supplied, and Langfuse answers 401 to it (or no pair is on record) |
 | `bootstrap-variables` | no `LANGFUSE_INIT_PROJECT_*KEY` has a value in the host `.env` or in any running container |
 | `grafana-signin` (operator) | after the route is final, on the host, `GET http://127.0.0.1:3001/api/user` answers 200 to `admin` with the password in `secrets/grafana/admin-password` |
+| `grafana-alerting` (operator) | after `grafana-signin` passes, on the host, Grafana's provisioning API lists the contact point `traces-discord` with type `discord` and every rule group in `ALERT_RULE_GROUPS` with the rule count its file defines. Two `GET`s with the same credential handling; no test notification, no write |
 
-`grafana-signin` is a third kind of gate, `operator`, and it is not part of `evaluateGates`. Grafana is an operator UI behind the SSH tunnel and has nothing to do with whether traces can be received, so nothing Grafana does may hold, close, open or keep closed the ingest route, or add to the time the route takes. `runDeploy` decides and verifies the route from the route gates alone, removes the deploy marker and returns; only then does `performDeploy` run the Grafana check (`awaitGrafanaSignIn`, over the bare SSH `exec`, never inside `runDeploy`'s failure handler, which would close the route). Every outcome of the check (a 200, a refusal, a timeout, a rejected execution, malformed output) is reported as `OperatorSurfaceError`, which fails the run, names the HTTP code or the cause, and says where the route is; none of them can reach the route. A deploy that already failed never runs the check. `grafanaSignInScript` reads the password from the file on the host and hands it to curl as a config on stdin (`-K -`); the password is in no argv, no SSH command text and no log line, and only the status code is printed (tests run the script for real with a recording curl). It runs `curl -q --noproxy '*'` (`-q` only works as the first argument), so a `.curlrc` or a proxy variable on the host cannot take the request off loopback. It sends one request and none with `admin:admin`: Grafana counts failed Basic Auth logins per username (5 in 5 minutes), so a second request would spend a failed login on the admin account at every deploy. One 200 with the file's password proves the account holds the file's value, and `GRAFANA_ADMIN_PASSWORD_MIN` (16 characters, checked in `readInputs` before any SSH) keeps that value from being Grafana's default, `admin`. It retries only while Grafana has not answered (`000` or 5xx, up to `grafanaAttempts` x `grafanaIntervalMs`); a settled 2xx to 4xx is final, so a wrong password is not tried repeatedly.
+`grafana-signin` and `grafana-alerting` are a third kind of gate, `operator`, and neither is part of `evaluateGates`. Grafana is an operator UI behind the SSH tunnel and has nothing to do with whether traces can be received, so nothing Grafana does may hold, close, open or keep closed the ingest route, or add to the time the route takes. `runDeploy` decides and verifies the route from the route gates alone, removes the deploy marker and returns; only then does `performDeploy` run the Grafana check (`awaitGrafanaSignIn`, over the bare SSH `exec`, never inside `runDeploy`'s failure handler, which would close the route). Every outcome of the check (a 200, a refusal, a timeout, a rejected execution, malformed output) is reported as `OperatorSurfaceError`, which fails the run, names the HTTP code or the cause, and says where the route is; none of them can reach the route. A deploy that already failed never runs the check. `grafanaSignInScript` reads the password from the file on the host and hands it to curl as a config on stdin (`-K -`); the password is in no argv, no SSH command text and no log line, and only the status code is printed (tests run the script for real with a recording curl). It runs `curl -q --noproxy '*'` (`-q` only works as the first argument), so a `.curlrc` or a proxy variable on the host cannot take the request off loopback. It sends one request and none with `admin:admin`: Grafana counts failed Basic Auth logins per username (5 in 5 minutes), so a second request would spend a failed login on the admin account at every deploy. One 200 with the file's password proves the account holds the file's value, and `GRAFANA_ADMIN_PASSWORD_MIN` (16 characters, checked in `readInputs` before any SSH) keeps that value from being Grafana's default, `admin`. It retries only while Grafana has not answered (`000` or 5xx, up to `grafanaAttempts` x `grafanaIntervalMs`); a settled 2xx to 4xx is final, so a wrong password is not tried repeatedly.
+
+`grafana-alerting` proves Grafana read and accepted the provisioning files (it refuses a file it cannot parse, and a contact point needs a valid webhook address); it cannot prove a message reaches Discord, because it sends none. It runs only after the sign-in check passed: one refused password is already a failed login, and a second request would spend another. It cuts every contact point's `settings` out on the host, so the webhook address (which Grafana also redacts) is in no output, and it makes one attempt, with no retry.
+
+Prometheus runs as `65534:65534` (`PROMETHEUS_USER_ID` in `src/host.ts`; `nobody`, the user its image declares), on a read-only root with no capabilities. Its data volume `traces_prometheus_data` is root-owned when Docker creates it, so deploy creates the container, sets the volume directory's owner to 65534 (only a path under Docker's data root) and reads it back (`prometheusVolumeScript`), as for the collector's queue. Prometheus is **not gated**: it is on no trace's path and holds no trace content. Its healthcheck is `wget --spider` on `/-/healthy`, which the image's busybox has.
 
 Grafana runs as `472:472` (`user: '472:472'` in the compose file; `GRAFANA_USER_ID` in `src/host.ts` is the one id, and `docker-compose.test.ts` pins it). The image's own user is 472 with group 0, and deploy makes `secrets/grafana` `root:472`, mode 0750, so a process whose group is 0 cannot enter the directory: Grafana logged `cat: can't open '/run/secrets/grafana/admin-password': Permission denied` for both files and started on its defaults (admin password `admin`, the built-in secret key). Grafana applies the admin password only when it creates its database, so after this fix an existing Grafana volume keeps whatever password it was created with; see the runbook's "Grafana sign-in check fails".
 
@@ -164,7 +205,11 @@ So "no tokens" is one **void line**: `trc_void_<43 base64url characters> void <t
 
 ## Anti-patterns
 
-- **Never publish a store port.** ClickHouse, PostgreSQL, Redis, MinIO and Tempo stay off the host. Only Caddy, Langfuse web (loopback) and Grafana (loopback) have a `ports` entry; a test enforces it.
+- **Never publish a store port.** ClickHouse, PostgreSQL, Redis, MinIO, Tempo and Prometheus stay off the host. Only Caddy, Langfuse web (loopback) and Grafana (loopback) have a `ports` entry; a test enforces it.
+- **Never route `/metrics`, `8082` or Prometheus through Caddy, and never add `/metrics` to the public `8080` listener.** A test refuses it on `8080` and in every Caddy state.
+- **Never turn on Prometheus's lifecycle endpoint, admin API or remote-write receiver, and never add Alertmanager or rule files.** The rules are Grafana's; a test pins the flags.
+- **Never put the Discord webhook address in a tracked file, an argv or a log, and never give it to a service but Grafana.** It travels in the host `.env` and Grafana's environment; the contact point reads `$TRACES_DISCORD_WEBHOOK_URL`.
+- **Never make an alert message read trace content.** A message is fixed text, the rule's own labels and numbers; a test rejects any other template variable.
 - **Never add a processor to the Langfuse branch.** Langfuse gets the whole trace. A processor there (`batch`, `transform`, anything) changes what is stored. No `batch` or `transform` processor anywhere.
 - **Never put a content key in the keep-list.** The six `gen_ai` content keys stay out; a test enforces it.
 - **Never copy a token off the host, and never let deploy touch one.** Sender tokens live in `tokens/` on the encrypted volume and at the senders; `list` shows fingerprints only. Deploy creates a file with one void line when none exists and never writes, replaces, truncates or removes an existing one.
@@ -208,7 +253,7 @@ So "no tokens" is one **void line**: `trc_void_<43 base64url characters> void <t
 
 ## Known outbound calls
 
-Telemetry is off wherever a setting exists. Langfuse web contacts `langfuse.com` for an update check when the UI loads (no setting), and the browser fetches two badge and asset hosts. Grafana makes no outbound call with the plugin pre-installer, update checks, Gravatar and the news feed off.
+Telemetry is off wherever a setting exists. Langfuse web contacts `langfuse.com` for an update check when the UI loads (no setting), and the browser fetches two badge and asset hosts. Grafana makes no outbound call with the plugin pre-installer, update checks, Gravatar and the news feed off, except the alert notifications: a firing or resolved alert posts to the Discord webhook, with fixed text, the rule name, labels and numbers. Prometheus makes none.
 
 ## Proven only on the real host
 
@@ -218,6 +263,6 @@ The first deploy ran these on the real host and they held: the `mc ilm rule` com
 
 The first deploy also found five defects that no test had caught, each now pinned by a test: a directory mounted over ClickHouse's `config.d` hid the image's own listen file, so ClickHouse answered its healthcheck and refused every other container; Langfuse binds to `HOSTNAME`, which Docker sets to the container name, so loopback probes were refused until `HOSTNAME=0.0.0.0`; `system.tables.create_table_query` is one line, so a TTL parser that looked for a `TTL` line found none; Tempo creates its directories with mode 0700, so the reporter has to run as Tempo's user; and Tempo keeps `work.json` beside its tenant directories, so the block listing must enter directories only.
 
-Still unproven on the host: two deploys overlapping (the step lock's wait and the overtaken exit), a hold or open racing a deploy, whether `docker compose config --hash <service>` equals the container's `com.docker.compose.config-hash` label (if not, the deploy only ever holds more, never less), `traces ingest open`, the sender token add script (`revoke --all` ran for real on 2026-11-21), and the byte limiter under load. A restore is no longer on this list: see the Restore section for what ran on 2026-11-21.
+Still unproven on the host: Prometheus starting on a fresh volume owned by 65534, its scrape of all four targets, Grafana loading the alerting files with the real webhook, a rule evaluating against real series, a notification arriving in Discord (and its silence in the UI), `grafana-alerting` against the live provisioning API, and `/healthz` failing with Grafana down. Also: two deploys overlapping (the step lock's wait and the overtaken exit), a hold or open racing a deploy, whether `docker compose config --hash <service>` equals the container's `com.docker.compose.config-hash` label (if not, the deploy only ever holds more, never less), `traces ingest open`, the sender token add script (`revoke --all` ran for real on 2026-11-21), and the byte limiter under load. A restore is no longer on this list: see the Restore section for what ran on 2026-11-21.
 
 The day-2 procedures are in [`docs/runbooks/trace-collection.md`](../../docs/runbooks/trace-collection.md). The alert issues from `traces-monitor.ts` and `traces-backup.ts` link to it by path (no anchors), so the file name is a contract.

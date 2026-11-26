@@ -43,7 +43,7 @@ Add a new app, `apps/traces`, on its own droplet. A collector accepts OTLP over 
 ## Scope Boundaries
 
 - No change to `fro-bot/agent`. The sender contract in this plan is handed to it as a document.
-- No metrics or logs pipelines. Traces only.
+- No metrics or logs pipelines for trace data. Traces only. (A Prometheus server scrapes the stack's own health metrics, and Grafana-managed rules alert on them to a Discord webhook; nothing that holds trace content is a metric.)
 - No copy of trace data outside DigitalOcean. Snapshots do not survive losing the account or the region.
 - No per-group deletion promise. A compromise is contained by revoking the token; removing what it wrote is a manual delete by sender group in Langfuse and a wait for expiry in Tempo.
 - No zero-loss deploys. A collector restart takes longer than the sender's end-of-run window.

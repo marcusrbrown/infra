@@ -73,6 +73,22 @@
       "size": [170, 60]
     },
     {
+      "id": "prometheus",
+      "type": "backend",
+      "label": "Prometheus",
+      "sublabel": "scrapes metrics, 15 days",
+      "pos": [790, 500],
+      "size": [170, 60]
+    },
+    {
+      "id": "discord",
+      "type": "external",
+      "label": "Discord",
+      "sublabel": "alert webhook",
+      "pos": [540, 640],
+      "size": [170, 60]
+    },
+    {
       "id": "worker",
       "type": "backend",
       "label": "Langfuse worker",
@@ -124,6 +140,7 @@
         "web",
         "tempo",
         "grafana",
+        "prometheus",
         "worker",
         "clickhouse",
         "postgres",
@@ -148,7 +165,11 @@
     {"id": "tunnel-grafana", "from": "operator", "to": "grafana", "label": "SSH tunnel", "variant": "security"},
     {"id": "canary", "from": "reporter", "to": "collector", "label": "deploy canary", "variant": "dashed"},
     {"id": "readback", "from": "reporter", "to": "tempo", "label": "deploy readback", "variant": "dashed"},
-    {"id": "verdict", "from": "caddy", "to": "reporter", "label": "health path", "variant": "dashed"}
+    {"id": "verdict", "from": "caddy", "to": "reporter", "label": "health path", "variant": "dashed"},
+    {"id": "scrape-collector", "from": "prometheus", "to": "collector", "label": "scrape", "variant": "dashed"},
+    {"id": "scrape-reporter", "from": "prometheus", "to": "reporter", "label": "scrape", "variant": "dashed"},
+    {"id": "promql", "from": "grafana", "to": "prometheus", "label": "PromQL"},
+    {"id": "alert", "from": "grafana", "to": "discord", "label": "alert webhook", "variant": "security"}
   ],
   "cards": [
     {
@@ -166,7 +187,8 @@
       "items": [
         "Langfuse holds whole traces, content included",
         "Tempo holds a keep-list of attributes plus span names and error text",
-        "Only Caddy is published; Langfuse and Grafana are reached over SSH"
+        "Only Caddy is published; Langfuse and Grafana are reached over SSH",
+        "Grafana alert rules post fixed text and numbers to a Discord webhook, never trace content"
       ]
     },
     {

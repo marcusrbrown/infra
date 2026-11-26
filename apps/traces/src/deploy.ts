@@ -13,14 +13,14 @@
 //      their configuration) is about to change, hold the route (503), and prove it from inside the host
 //   6. write directories, deny-all token files (only if absent), secret files, configs and the reporter source
 //   7. prune images, check free space, pull
-//   8. start the stores and Langfuse, assert and read back retention, start Tempo, Grafana, the collector and
-//      the reporter, verify the collector's image digest
+//   8. start the stores and Langfuse, assert and read back retention, start Tempo, Grafana, Prometheus, the collector
+//      and the reporter, verify the collector's image digest
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
 //      `true`; otherwise off (first bring-up) or held (it was open before). The canary gate sends the deploy's one
 //      canary (the reporter's `--canary-once` mode, by exec) once the reporter's verdict is fresh
 //  10. remove the deploy marker, which ends the route's work. Only then check Grafana's sign-in (the password file
-//      works): read-only, after the route is final, and a failure fails the run (`OperatorSurfaceError`) without
-//      touching the route
+//      works) and its provisioned alerting (the Discord contact point and the rule groups exist): read-only, after the
+//      route is final, and a failure fails the run (`OperatorSurfaceError`) without touching the route
 //
 // Overlapping deploys: the last deploy to start owns the host. Each deploy writes a random id into the deploy marker
 // in its first host script; every later script that changes the host checks, in the same script, that the marker
@@ -58,6 +58,7 @@ import {materializeIdentityFile} from '@marcusrbrown/infra-shared/server/droplet
 import {bashCommand, checkTracesStorage, shellQuote} from '../server/provision'
 import {
   GRAFANA_USER_ID,
+  PROMETHEUS_USER_ID,
   SENDER_GROUPS,
   TEMPO_USER_ID,
   TRACES_APP_DIR,
@@ -91,6 +92,7 @@ export const TRACES_DEPLOY_SECRETS = [
   'TRACES_ENCRYPTION_KEY',
   'TRACES_GRAFANA_ADMIN_PASSWORD',
   'TRACES_GRAFANA_SECRET_KEY',
+  'TRACES_DISCORD_WEBHOOK_URL',
   'TRACES_LANGFUSE_USER_EMAIL',
   'TRACES_LANGFUSE_USER_PASSWORD',
   'TRACES_LANGFUSE_PUBLIC_KEY',
@@ -136,6 +138,8 @@ export interface DeployInputs {
   encryptionKey: string
   grafanaAdminPassword: string
   grafanaSecretKey: string
+  /** Where Grafana's alert rules post. Reaches Grafana only, as an environment variable from the host `.env`. */
+  discordWebhookUrl: string
   langfuseUserEmail: string
   langfuseUserPassword: string
   /** The Application-role key the collector sends with. Unset on the first deploy. */
@@ -154,6 +158,7 @@ const KEY_VALUE = /^[\w-]{8,128}$/
 const EMAIL = /^[^\s@,'"$`\\#:;]{1,64}@[a-z\d.-]{1,190}\.[a-z]{2,24}$/i
 const DOMAIN = /^(?=.{4,253}$)[a-z\d](?:[a-z\d-]*[a-z\d])?(?:\.[a-z\d](?:[a-z\d-]*[a-z\d])?)+$/
 /** A published GHCR image, pinned by digest. The tag, when present, is informational. */
+const DISCORD_WEBHOOK = /^https:\/\/(?:(?:ptb|canary)\.)?discord(?:app)?\.com\/api\/webhooks\/\d{17,20}\/[\w-]{20,100}$/
 const COLLECTOR_IMAGE = /^ghcr\.io\/[\da-z][\w./-]*(?::[\w.-]+)?@sha256:[\da-f]{64}$/
 
 function read(env: EnvLike, name: DeployInputName): string {
@@ -226,6 +231,14 @@ export function readInputs(env: EnvLike): DeployInputs {
     )
   }
 
+  // Never echoed: the address is the credential.
+  const discordWebhookUrl = requireValue(env, 'TRACES_DISCORD_WEBHOOK_URL')
+  if (!DISCORD_WEBHOOK.test(discordWebhookUrl)) {
+    throw new Error(
+      'TRACES_DISCORD_WEBHOOK_URL must be a Discord webhook address: https://discord.com/api/webhooks/<id>/<token>',
+    )
+  }
+
   const encryptionKey = requireValue(env, 'TRACES_ENCRYPTION_KEY')
   if (!HEX_64.test(encryptionKey)) throw new Error('TRACES_ENCRYPTION_KEY must be 64 lower-case hex characters')
 
@@ -254,6 +267,7 @@ export function readInputs(env: EnvLike): DeployInputs {
     encryptionKey,
     grafanaAdminPassword: requireUrlSafe(env, 'TRACES_GRAFANA_ADMIN_PASSWORD', GRAFANA_ADMIN_PASSWORD_MIN),
     grafanaSecretKey: requireUrlSafe(env, 'TRACES_GRAFANA_SECRET_KEY', 16),
+    discordWebhookUrl,
     langfuseUserEmail: email,
     langfuseUserPassword: requireUrlSafe(env, 'TRACES_LANGFUSE_USER_PASSWORD', 12),
     langfuseKey: optionalPair(env, 'TRACES_LANGFUSE_PUBLIC_KEY', 'TRACES_LANGFUSE_SECRET_KEY'),
@@ -279,6 +293,7 @@ export const SERVICES = [
   'postgres',
   'tempo',
   'grafana',
+  'prometheus',
   'health-reporter',
 ] as const
 
@@ -286,7 +301,8 @@ export type Service = (typeof SERVICES)[number]
 
 /**
  * The services whose change puts data or the public route at risk: the collector, the backends and their
- * configuration, and Caddy (its configuration is the route). Grafana and the health reporter are not gated.
+ * configuration, and Caddy (its configuration is the route). Grafana, Prometheus and the health reporter are not
+ * gated: none of them is on the path of a trace, and none holds trace content.
  * On an open route a change to any of these holds the route first and reopens it only after the gates pass.
  */
 export const GATED_SERVICES: readonly Service[] = [
@@ -311,8 +327,10 @@ export type IngestState = 'off' | 'held' | 'open'
 const COLLECTOR_GID = '65532'
 const GRAFANA_UID = String(GRAFANA_USER_ID)
 const REPORTER_UID = String(TEMPO_USER_ID)
+const PROMETHEUS_UID = String(PROMETHEUS_USER_ID)
 
 const COMPOSE_PROJECT_VOLUME = 'traces_collector_queue'
+const PROMETHEUS_PROJECT_VOLUME = 'traces_prometheus_data'
 
 /** Fixed Langfuse bootstrap identifiers: one organisation, one project, one user. */
 const INIT = {
@@ -341,6 +359,7 @@ export function buildEnvFile(inputs: DeployInputs): string {
     `SALT=${inputs.salt}`,
     `ENCRYPTION_KEY=${inputs.encryptionKey}`,
     `NEXTAUTH_SECRET=${inputs.nextauthSecret}`,
+    `TRACES_DISCORD_WEBHOOK_URL=${inputs.discordWebhookUrl}`,
     `TRACES_DOMAIN=${inputs.domain}`,
     `TRACES_COLLECTOR_IMAGE=${inputs.collectorImage}`,
     `LANGFUSE_INIT_ORG_ID=${INIT.orgId}`,
@@ -406,6 +425,27 @@ export const UPLOADED_FILES: readonly {local: string; remote: string; touches: r
     remote: 'config/grafana/datasources/tempo.yaml',
     touches: ['grafana'],
   },
+  {
+    local: 'config/grafana/datasources/prometheus.yaml',
+    remote: 'config/grafana/datasources/prometheus.yaml',
+    touches: ['grafana'],
+  },
+  {
+    local: 'config/grafana/alerting/contact-points.yaml',
+    remote: 'config/grafana/alerting/contact-points.yaml',
+    touches: ['grafana'],
+  },
+  {
+    local: 'config/grafana/alerting/policies.yaml',
+    remote: 'config/grafana/alerting/policies.yaml',
+    touches: ['grafana'],
+  },
+  {
+    local: 'config/grafana/alerting/rules.yaml',
+    remote: 'config/grafana/alerting/rules.yaml',
+    touches: ['grafana'],
+  },
+  {local: 'config/prometheus/prometheus.yml', remote: 'config/prometheus/prometheus.yml', touches: ['prometheus']},
   {local: 'src/health-report.ts', remote: 'health-reporter/health-report.ts', touches: ['health-reporter']},
 ]
 
@@ -753,7 +793,9 @@ export function prepareDirsScript(id: string): string {
     'config/clickhouse',
     'config/clickhouse-users',
     'config/grafana',
+    'config/grafana/alerting',
     'config/grafana/datasources',
+    'config/prometheus',
     'health-reporter',
     'secrets',
   ].map(dir)
@@ -1196,6 +1238,27 @@ export function createCollectorScript(id: string): string {
 }
 
 export const QUEUE_SENTINEL = 'TRACES_QUEUE_VOLUME_READY'
+export const PROMETHEUS_VOLUME_SENTINEL = 'TRACES_PROMETHEUS_VOLUME_READY'
+
+/**
+ * Give a named volume's directory to the user its container runs as, and read the owner back. The directory must be
+ * under Docker's data root on the encrypted volume; nothing else is ever changed.
+ */
+function volumeOwnerBody(label: string, volume: string, uid: string, sentinel: string): string {
+  return `mp=$(docker volume inspect ${volume} --format '{{.Mountpoint}}')
+case "$mp" in
+  ${TRACES_DOCKER_ROOT}/volumes/*/_data) ;;
+  *) echo "${label} volume is not under the Docker data root on the volume" >&2; exit 1 ;;
+esac
+chown ${uid}:${uid} "$mp"
+chmod 0700 "$mp"
+owner=$(stat -c '%u:%g' "$mp")
+if [ "$owner" != ${uid}:${uid} ]; then
+  echo "${label} volume owner is not ${uid}" >&2
+  exit 1
+fi
+echo ${sentinel}`
+}
 
 /**
  * The collector runs as UID 65532 and a fresh named volume is root-owned. Ownership is set here, once, on the
@@ -1208,19 +1271,25 @@ export function queueVolumeScript(id: string): string {
   return guardedStep(
     'queue-volume',
     id,
-    `mp=$(docker volume inspect ${COMPOSE_PROJECT_VOLUME} --format '{{.Mountpoint}}')
-case "$mp" in
-  ${TRACES_DOCKER_ROOT}/volumes/*/_data) ;;
-  *) echo "queue volume is not under the Docker data root on the volume" >&2; exit 1 ;;
-esac
-chown ${COLLECTOR_GID}:${COLLECTOR_GID} "$mp"
-chmod 0700 "$mp"
-owner=$(stat -c '%u:%g' "$mp")
-if [ "$owner" != ${COLLECTOR_GID}:${COLLECTOR_GID} ]; then
-  echo "queue volume owner is not ${COLLECTOR_GID}" >&2
-  exit 1
-fi
-echo ${QUEUE_SENTINEL}`,
+    volumeOwnerBody('queue', COMPOSE_PROJECT_VOLUME, COLLECTOR_GID, QUEUE_SENTINEL),
+  )
+}
+
+/** Create (never recreate) the Prometheus container, which also creates its data volume. */
+export function createPrometheusScript(id: string): string {
+  return composeStep('create-prometheus', id, `${COMPOSE} create --no-recreate prometheus`)
+}
+
+/**
+ * Prometheus runs as `nobody` (65534) and a fresh named volume is root-owned, so its first start would fail to write
+ * its data. Ownership is set here, once, as for the collector's queue volume, instead of relying on Docker copying
+ * it out of the image.
+ */
+export function prometheusVolumeScript(id: string): string {
+  return guardedStep(
+    'prometheus-volume',
+    id,
+    volumeOwnerBody('prometheus data', PROMETHEUS_PROJECT_VOLUME, PROMETHEUS_UID, PROMETHEUS_VOLUME_SENTINEL),
   )
 }
 
@@ -1287,6 +1356,78 @@ export function parseGrafanaProbe(stdout: string): string | undefined {
   if (code === undefined) return undefined
   if (!stdout.split('\n').some(line => line.trim() === GRAFANA_PROBE_SENTINEL)) return undefined
   return code
+}
+
+/** The contact point the alerting files provision; pinned to `config/grafana/alerting/contact-points.yaml` by a test. */
+export const ALERT_CONTACT_POINT_UID = 'traces-discord'
+
+/** The rule groups the rules file provisions and how many rules each holds; pinned to `rules.yaml` by a test. */
+export const ALERT_RULE_GROUPS: readonly {name: string; rules: number}[] = [
+  {name: 'stack', rules: 4},
+  {name: 'collector', rules: 3},
+  {name: 'tempo', rules: 2},
+  {name: 'storage', rules: 4},
+]
+
+export const GRAFANA_ALERTING_SENTINEL = 'TRACES_GRAFANA_ALERTING_PROBED'
+
+/**
+ * What Grafana says about its provisioned alerting, or why the check could not be made. Parsed, not validated: the
+ * contact-point list is kept as text for `evaluateGrafanaAlerting` to read.
+ */
+export type GrafanaAlerting =
+  | {error: string}
+  | {
+      contactPoints: {code: string; body: string}
+      rules: {code: string; groups: Record<string, number>}
+    }
+
+/**
+ * Reads two lists from Grafana's provisioning API on its loopback port, from the host, with the admin password from
+ * its secret file (the same credential handling as `grafanaSignInScript`: the password is in a curl config on stdin,
+ * in no argv). It only reads: it sends no notification and changes no rule.
+ *
+ *   - the contact points, with every `settings` object cut out on the host, so the webhook address (which Grafana
+ *     redacts anyway) could not reach the output;
+ *   - the alert rules, counted by rule group on the host.
+ */
+export function grafanaAlertingScript(): string {
+  return `set -u
+# traces-step:grafana-alerting
+cd ${TRACES_APP_DIR}
+base=http://127.0.0.1:3001/api/v1/provisioning
+file=secrets/grafana/admin-password
+get() {
+  code=000
+  body=
+  if [ -s "$file" ]; then
+    out=$(printf 'user = "admin:%s"\\n' "$(cat "$file")" | curl -q -s --noproxy '*' --max-time 10 -K - -w '\\nTRACES_HTTP=%{http_code}' "$1") || true
+    code=$(printf '%s' "$out" | sed -n 's/.*TRACES_HTTP=\\([0-9]*\\)$/\\1/p' | tail -n 1)
+    body=$(printf '%s' "$out" | sed 's/TRACES_HTTP=[0-9]*$//' | tr -d '\\n')
+  fi
+  code=\${code:-000}
+}
+get "$base/contact-points"
+echo "TRACES_GRAFANA_CP_HTTP=$code"
+printf 'TRACES_GRAFANA_CP_BODY=%s\\n' "$(printf '%s' "$body" | sed 's/"settings":{[^}]*}/"settings":{}/g')"
+get "$base/alert-rules"
+echo "TRACES_GRAFANA_RULES_HTTP=$code"
+printf '%s' "$body" | grep -o '"ruleGroup":"[^"]*"' | sort | uniq -c | sed -n 's/^ *\\([0-9]*\\) "ruleGroup":"\\([^"]*\\)"$/TRACES_GRAFANA_RULE_GROUP=\\2 \\1/p'
+echo ${GRAFANA_ALERTING_SENTINEL}`
+}
+
+/** A complete answer only: both status lines, the contact-point line and the sentinel. Anything else is `undefined`. */
+export function parseGrafanaAlerting(stdout: string): GrafanaAlerting | undefined {
+  if (!stdout.split('\n').some(line => line.trim() === GRAFANA_ALERTING_SENTINEL)) return undefined
+  const contactCode = /^TRACES_GRAFANA_CP_HTTP=(\d{3})$/m.exec(stdout)?.[1]
+  const rulesCode = /^TRACES_GRAFANA_RULES_HTTP=(\d{3})$/m.exec(stdout)?.[1]
+  const body = /^TRACES_GRAFANA_CP_BODY=(.*)$/m.exec(stdout)?.[1]
+  if (contactCode === undefined || rulesCode === undefined || body === undefined) return undefined
+  const groups: Record<string, number> = {}
+  for (const match of stdout.matchAll(/^TRACES_GRAFANA_RULE_GROUP=([\w-]+) (\d+)$/gm)) {
+    if (match[1] !== undefined && match[2] !== undefined) groups[match[1]] = Number(match[2])
+  }
+  return {contactPoints: {code: contactCode, body}, rules: {code: rulesCode, groups}}
 }
 
 export const BOOTSTRAP_PROBE_SENTINEL = 'TRACES_BOOTSTRAP_PROBED'
@@ -1485,6 +1626,7 @@ export type GateId =
   | 'bootstrap-key'
   | 'bootstrap-variables'
   | 'grafana-signin'
+  | 'grafana-alerting'
 
 export interface GateResult {
   id: GateId
@@ -1564,6 +1706,66 @@ export function evaluateGrafana(signIn: GrafanaSignIn): GateResult {
       ? ' Grafana reads the password file only when it can enter /run/secrets/grafana, and applies it only when it creates its database: see "Grafana sign-in check fails" in docs/runbooks/trace-collection.md.'
       : ''
   return gate(false, `the admin password file was not accepted (HTTP ${signIn.code}, expected 200).${hint}`)
+}
+
+/**
+ * The second operator gate: Grafana has provisioned the Discord contact point and every rule group the files define.
+ * Pure. It proves the files were read and accepted (Grafana refuses a file it cannot parse, and the contact point only
+ * exists with a valid webhook address); it does not prove a message reaches Discord, because it sends none.
+ */
+export function evaluateGrafanaAlerting(probe: GrafanaAlerting): GateResult {
+  const gate = (pass: boolean, detail: string): GateResult => ({
+    id: 'grafana-alerting',
+    status: pass ? 'pass' : 'fail',
+    detail,
+    kind: 'operator',
+  })
+  if ('error' in probe) return gate(false, `the Grafana alerting check failed: ${probe.error}.`)
+
+  const refused = (what: string, code: string): GateResult | undefined =>
+    code === '200'
+      ? undefined
+      : gate(
+          false,
+          code === '000'
+            ? `Grafana did not answer for the ${what} (no HTTP response, or the admin password file is missing on the host).`
+            : `Grafana refused the ${what} (HTTP ${code}, expected 200).`,
+        )
+
+  const contactRefused = refused('contact point list', probe.contactPoints.code)
+  if (contactRefused !== undefined) return contactRefused
+  let points: unknown
+  try {
+    points = JSON.parse(probe.contactPoints.body)
+  } catch {
+    return gate(false, 'the contact point list could not be read.')
+  }
+  if (!Array.isArray(points)) return gate(false, 'the contact point list could not be read.')
+  const point = points.find(
+    (entry: unknown): entry is {uid: string; type?: unknown} =>
+      typeof entry === 'object' && entry !== null && 'uid' in entry && entry.uid === ALERT_CONTACT_POINT_UID,
+  )
+  if (point === undefined) {
+    return gate(false, `the Discord contact point (uid ${ALERT_CONTACT_POINT_UID}) is not provisioned.`)
+  }
+  if (point.type !== 'discord') {
+    return gate(
+      false,
+      `the contact point ${ALERT_CONTACT_POINT_UID} has type ${JSON.stringify(point.type)}, expected "discord".`,
+    )
+  }
+
+  const rulesRefused = refused('alert rule list', probe.rules.code)
+  if (rulesRefused !== undefined) return rulesRefused
+  const short = ALERT_RULE_GROUPS.filter(group => (probe.rules.groups[group.name] ?? 0) !== group.rules).map(
+    group => `${group.name} (${probe.rules.groups[group.name] ?? 0} of ${group.rules})`,
+  )
+  if (short.length > 0) return gate(false, `rule group missing or incomplete: ${short.join(', ')}.`)
+  const total = ALERT_RULE_GROUPS.reduce((sum, group) => sum + group.rules, 0)
+  return gate(
+    true,
+    `the Discord contact point and ${ALERT_RULE_GROUPS.length} rule groups (${total} rules) are provisioned`,
+  )
 }
 
 /**
@@ -2120,6 +2322,21 @@ async function awaitGrafanaSignIn(exec: RemoteExec, deps: DeployDeps): Promise<G
   return last
 }
 
+/**
+ * One read of Grafana's provisioned alerting. Grafana has already answered the sign-in check, so there is no wait and
+ * no retry: a refusal here is a real one, and a second try would only spend another request on the admin account. An
+ * answer that cannot be read, or a rejected execution, is a failed check and never a pass. This never throws.
+ */
+async function awaitGrafanaAlerting(exec: RemoteExec): Promise<GrafanaAlerting> {
+  try {
+    const result = await exec(bashCommand(grafanaAlertingScript()))
+    const parsed = result.exitCode === 0 ? parseGrafanaAlerting(result.stdout) : undefined
+    return parsed ?? {error: 'its answer could not be read'}
+  } catch (error) {
+    return {error: clip(errorMessage(error))}
+  }
+}
+
 async function runCanaryOnce(exec: RemoteExec, deployId: string): Promise<CanaryState> {
   const checks = parseCanaryChecks(await exec(bashCommand(canaryScript(deployId))))
   return checks === undefined ? {state: 'unreadable'} : {state: 'ran', checks}
@@ -2139,8 +2356,8 @@ function pairToStdin(pair: KeyPair): string {
  * The deploy proper, over an `exec` that already speaks to the host. Exported for tests; `deploy` is the entry
  * point that builds the ssh transport.
  *
- * `runDeploy` decides and verifies the route from the route gates alone, removes the marker and returns. Only then is
- * Grafana's sign-in checked, over the bare `rawExec` and outside `runDeploy`'s failure handler (which would close the
+ * `runDeploy` decides and verifies the route from the route gates alone, removes the marker and returns. Only then are
+ * Grafana's sign-in and its provisioned alerting checked, over the bare `rawExec` and outside `runDeploy`'s failure handler (which would close the
  * route). No outcome of that check (a pass, a refusal, a timeout, a rejected execution, malformed output) can reach
  * the route: it is read-only, it comes after the route is final, and a failure becomes `OperatorSurfaceError`, which
  * fails the run. A deploy that already failed never gets here.
@@ -2152,8 +2369,13 @@ export async function performDeploy(
 ): Promise<DeployResult> {
   const routed = await runDeploy(inputs, rawExec, deps)
   const grafana = evaluateGrafana(await awaitGrafanaSignIn(rawExec, deps))
-  for (const line of describeGates([grafana])) deps.log(`  ${line}`)
-  const result: DeployResult = {...routed, gates: [...routed.gates, grafana]}
+  // The alerting check signs in again. After a refused password it is not run: that would be one more failed login.
+  const alerting: GateResult =
+    grafana.status === 'pass'
+      ? evaluateGrafanaAlerting(await awaitGrafanaAlerting(rawExec))
+      : {id: 'grafana-alerting', status: 'skipped', detail: 'not run: the sign-in check did not pass', kind: 'operator'}
+  for (const line of describeGates([grafana, alerting])) deps.log(`  ${line}`)
+  const result: DeployResult = {...routed, gates: [...routed.gates, grafana, alerting]}
   const failed = failedOperatorGates(result.gates)
   if (failed.length > 0) throw new OperatorSurfaceError(result, failed)
   return result
@@ -2412,6 +2634,9 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
     log('==> Starting the collector container and its queue volume')
     await sh('Create the collector container', createCollectorScript(deployId), [STEP_SENTINEL('create-collector')])
     await sh('Prepare the collector queue volume', queueVolumeScript(deployId), [QUEUE_SENTINEL])
+    log('==> Starting the Prometheus container and its data volume')
+    await sh('Create the Prometheus container', createPrometheusScript(deployId), [STEP_SENTINEL('create-prometheus')])
+    await sh('Prepare the Prometheus data volume', prometheusVolumeScript(deployId), [PROMETHEUS_VOLUME_SENTINEL])
 
     const privateServices: Service[] = ['postgres', 'redis', 'minio', 'clickhouse', 'langfuse-web', 'langfuse-worker']
     log('==> Starting the stores and Langfuse')
@@ -2440,15 +2665,15 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       }
     }
 
-    log('==> Starting Tempo, Grafana, the collector and the reporter')
-    const publicServices: Service[] = ['tempo', 'grafana', 'collector']
+    log('==> Starting Tempo, Grafana, the collector, Prometheus and the reporter')
+    const publicServices: Service[] = ['tempo', 'grafana', 'collector', 'prometheus']
     const staleOthers = stale(publicServices)
     if (staleOthers.length > 0) {
       await sh('Recreate changed services', upScript(deployId, 'up-stale-public', staleOthers, {force: true}), [
         STEP_SENTINEL('up-stale-public'),
       ])
     }
-    await sh('Start Tempo, Grafana and the collector', upScript(deployId, 'up-public', publicServices), [
+    await sh('Start Tempo, Grafana, the collector and Prometheus', upScript(deployId, 'up-public', publicServices), [
       STEP_SENTINEL('up-public'),
     ])
 

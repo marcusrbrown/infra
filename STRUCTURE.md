@@ -71,6 +71,8 @@ OpenCode slash commands (Markdown). The `generating-project-docs` skill (`.agent
 | `apps/traces/server/provision.ts` | Trace stack droplet, encrypted data volume and cloud firewall provisioning |
 | `apps/traces/collector/` | Builder manifest and Dockerfile for the collector image; CI builds and pushes it to GHCR, the host never builds it |
 | `apps/traces/config/ingest/` | The three ingest route states (`off.caddy`, `held.caddy`, `open.caddy`) |
+| `apps/traces/config/prometheus/` | Prometheus scrape config (four jobs, no rules) |
+| `apps/traces/config/grafana/alerting/` | Provisioned Grafana alerting: Discord contact point, notification policy, alert rules |
 | `apps/agent/server/provision.ts` | Operator-run AWS IAM + S3 convergence for `fro-bot/agent` durable storage; no deploy step |
 | `apps/agent/src/key-layout.ts` | S3 session/coordination-lock key layout the Action uses, independent of the Action version |
 | `apps/<name>/src/host.ts` | Deploy-side host validator (rejects `-`-prefixed / invalid hosts) |

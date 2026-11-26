@@ -37,6 +37,8 @@ on:
         required: true
       TRACES_GRAFANA_SECRET_KEY:
         required: true
+      TRACES_DISCORD_WEBHOOK_URL:
+        required: true
       TRACES_LANGFUSE_USER_EMAIL:
         required: true
       TRACES_LANGFUSE_USER_PASSWORD:
@@ -163,6 +165,7 @@ jobs:
           TRACES_ENCRYPTION_KEY: ${{ secrets.TRACES_ENCRYPTION_KEY }}
           TRACES_GRAFANA_ADMIN_PASSWORD: ${{ secrets.TRACES_GRAFANA_ADMIN_PASSWORD }}
           TRACES_GRAFANA_SECRET_KEY: ${{ secrets.TRACES_GRAFANA_SECRET_KEY }}
+          TRACES_DISCORD_WEBHOOK_URL: ${{ secrets.TRACES_DISCORD_WEBHOOK_URL }}
           TRACES_LANGFUSE_USER_EMAIL: ${{ secrets.TRACES_LANGFUSE_USER_EMAIL }}
           TRACES_LANGFUSE_USER_PASSWORD: ${{ secrets.TRACES_LANGFUSE_USER_PASSWORD }}
           COLLECTOR_DIGEST: ${{ needs.build-collector.outputs.digest }}
@@ -180,6 +183,7 @@ jobs:
           [[ -n "${TRACES_ENCRYPTION_KEY}" ]] || missing+=("TRACES_ENCRYPTION_KEY")
           [[ -n "${TRACES_GRAFANA_ADMIN_PASSWORD}" ]] || missing+=("TRACES_GRAFANA_ADMIN_PASSWORD")
           [[ -n "${TRACES_GRAFANA_SECRET_KEY}" ]] || missing+=("TRACES_GRAFANA_SECRET_KEY")
+          [[ -n "${TRACES_DISCORD_WEBHOOK_URL}" ]] || missing+=("TRACES_DISCORD_WEBHOOK_URL")
           [[ -n "${TRACES_LANGFUSE_USER_EMAIL}" ]] || missing+=("TRACES_LANGFUSE_USER_EMAIL")
           [[ -n "${TRACES_LANGFUSE_USER_PASSWORD}" ]] || missing+=("TRACES_LANGFUSE_USER_PASSWORD")
           if (( ${#missing[@]} > 0 )); then
@@ -209,6 +213,7 @@ jobs:
           TRACES_ENCRYPTION_KEY: ${{ secrets.TRACES_ENCRYPTION_KEY }}
           TRACES_GRAFANA_ADMIN_PASSWORD: ${{ secrets.TRACES_GRAFANA_ADMIN_PASSWORD }}
           TRACES_GRAFANA_SECRET_KEY: ${{ secrets.TRACES_GRAFANA_SECRET_KEY }}
+          TRACES_DISCORD_WEBHOOK_URL: ${{ secrets.TRACES_DISCORD_WEBHOOK_URL }}
           TRACES_LANGFUSE_USER_EMAIL: ${{ secrets.TRACES_LANGFUSE_USER_EMAIL }}
           TRACES_LANGFUSE_USER_PASSWORD: ${{ secrets.TRACES_LANGFUSE_USER_PASSWORD }}
           TRACES_LANGFUSE_PUBLIC_KEY: ${{ secrets.TRACES_LANGFUSE_PUBLIC_KEY }}

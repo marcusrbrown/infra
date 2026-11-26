@@ -17,6 +17,7 @@ import {
   getReporterDetail,
   getTracesComposeStatus,
   getTracesStatusSummary,
+  isHealthy,
   isPassing,
   parseComposePs,
   parseComposePsOutput,
@@ -124,6 +125,54 @@ describe('parseDetailOutput: the ingest block', () => {
     const parsed = parse(detailBody({ingest: {groups: 'nope', requests: [1]}}))
     expect(parsed.ok).toBe(true)
     expect(parsed.ok && (parsed.detail.ingest ?? null)).toBeNull()
+  })
+})
+
+describe('the ingest verdict and the monitoring verdict', () => {
+  const monitoringDown = detailOf({
+    ok: true,
+    monitoringOk: false,
+    checks: [
+      {id: 'collector-health', status: 'pass', detail: 'collector reports healthy', scope: 'ingest'},
+      {id: 'grafana-health', status: 'fail', detail: 'grafana is unhealthy (http-503)', scope: 'monitoring'},
+    ],
+  })
+
+  it('keeps the scope of each check and the monitoring flag the reporter sent', () => {
+    const body = detailBody({
+      ok: true,
+      monitoringOk: false,
+      checks: [{id: 'grafana-health', status: 'fail', detail: 'down', scope: 'monitoring'}],
+    })
+    const parsed = parseDetailOutput({exitCode: 0, stdout: detailOutput(body), stderr: ''})
+    expect(parsed.ok && parsed.detail.monitoringOk).toBe(false)
+    expect(parsed.ok && parsed.detail.checks[0]?.scope).toBe('monitoring')
+  })
+
+  it('refuses a scope it does not know, so a changed contract is not read as a pass', () => {
+    const body = detailBody({checks: [{id: 'x', status: 'pass', detail: 'd', scope: 'bogus' as never}]})
+    expect(parseDetailOutput({exitCode: 0, stdout: detailOutput(body), stderr: ''})).toEqual({
+      ok: false,
+      reason: 'unreadable',
+    })
+  })
+
+  // `ingest open` reads isPassing. A dead Grafana or Prometheus must not stop an operator opening healthy ingest.
+  it('passes the ingest verdict while monitoring fails, and is not healthy', () => {
+    expect(isPassing(monitoringDown)).toBe(true)
+    expect(isHealthy(monitoringDown)).toBe(false)
+  })
+
+  it('is healthy only when both pass, and reads a reporter without the flag as its ingest verdict', () => {
+    expect(isHealthy(detailOf({ok: true, monitoringOk: true}))).toBe(true)
+    expect(isHealthy(detailOf({ok: true}))).toBe(true)
+    expect(isHealthy(detailOf({ok: false, monitoringOk: true}))).toBe(false)
+    expect(isHealthy(detailOf({ok: true, monitoringOk: true, stale: true}))).toBe(false)
+  })
+
+  it('lists a failing monitoring check for status, and leaves it out of the lines that refuse an open', () => {
+    expect(failingLines(monitoringDown)).toContain('grafana-health: grafana is unhealthy (http-503)')
+    expect(failingLines(monitoringDown, {scope: 'ingest'})).toEqual([])
   })
 })
 
@@ -278,6 +327,47 @@ describe('tracesStatusAction', () => {
     expect(captured.stdout.join('\n')).toContain('Health verdict: FAILING')
     expect(captured.stderr.join('\n')).toContain('langfuse-worker')
     expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('shows a monitoring failure as FAILING and exits 1, while saying the ingest verdict passes', async () => {
+    const detail = detailOutput(
+      detailBody({
+        ok: true,
+        monitoringOk: false,
+        checks: [
+          {id: 'collector-health', status: 'pass', detail: 'collector reports healthy', scope: 'ingest'},
+          {id: 'prometheus-health', status: 'fail', detail: 'prometheus is not ready (http-503)', scope: 'monitoring'},
+        ],
+      }),
+    )
+    const {ctx, captured} = createCapturedCtx()
+    await expect(tracesStatusAction({}, ctx, route({detail}).spawn)).rejects.toBeInstanceOf(MockProcessExit)
+    const out = captured.stdout.join('\n')
+    expect(out).toContain('Health verdict: FAILING')
+    expect(out).toContain('Ingest verdict: PASSING')
+    expect(out).toContain('Monitoring: FAILING')
+    expect(out).toContain('prometheus-health')
+    expect(captured.stderr.join('\n')).toContain('prometheus-health: prometheus is not ready (http-503)')
+    expect(captured.exit).toEqual({code: 1})
+  })
+
+  it('keeps the scope and the monitoring flag in --json', async () => {
+    const detail = detailOutput(
+      detailBody({
+        ok: true,
+        monitoringOk: false,
+        checks: [{id: 'grafana-health', status: 'fail', detail: 'x', scope: 'monitoring'}],
+      }),
+    )
+    const {ctx, captured} = createCapturedCtx()
+    await expect(tracesStatusAction({json: true}, ctx, route({detail}).spawn)).rejects.toBeInstanceOf(MockProcessExit)
+    const printed = JSON.parse(captured.stdout.join('\n')) as {
+      ok: boolean
+      health: {monitoringOk: boolean; checks: {scope: string}[]}
+    }
+    expect(printed.ok).toBe(false)
+    expect(printed.health.monitoringOk).toBe(false)
+    expect(printed.health.checks[0]?.scope).toBe('monitoring')
   })
 
   it('exits 1 when a service is down even though the verdict passes', async () => {

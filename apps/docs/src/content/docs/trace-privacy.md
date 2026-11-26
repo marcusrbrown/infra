@@ -32,7 +32,7 @@ The data volume is encrypted at rest by the hosting provider. The provider holds
 
 ## Who can read it
 
-Only the operator, and only over SSH to the host. Langfuse and Grafana are not published: they listen on the host's loopback address and are reached through an SSH tunnel. The only public endpoint is the ingest path, which accepts traces and reads nothing back, and a health path that answers one word. No third-party service receives trace data.
+Only the operator, and only over SSH to the host. Langfuse and Grafana are not published: they listen on the host's loopback address and are reached through an SSH tunnel. The only public endpoint is the ingest path, which accepts traces and reads nothing back, and a health path that answers one word. No third-party service receives trace data. The alert notifications described under "Calls the software makes on its own" go to Discord and hold no trace data.
 
 ## How long it is kept
 
@@ -50,7 +50,7 @@ The operator can delete a trace from Langfuse on request. Tempo has no way to de
 
 ## Calls the software makes on its own
 
-Telemetry and update checks are turned off wherever the software has a setting for them. One call has no setting: when the Langfuse web interface loads, it checks for an update. Loading the interface also makes the operator's browser fetch a small number of badge and asset files. No other outbound call is known.
+Telemetry and update checks are turned off wherever the software has a setting for them. One call has no setting: when the Langfuse web interface loads, it checks for an update. Loading the interface also makes the operator's browser fetch a small number of badge and asset files. The stack also sends alert notifications to a Discord webhook the operator controls. A notification carries fixed text, the name of the alert rule, a few labels (an exporter, a store or a disk name) and numbers (a fill ratio, a count of failed spans, an age). It never carries trace content, span names, log lines or any attribute. Discord receives that text. No other outbound call is known.
 
 ## Questions or removal requests
 

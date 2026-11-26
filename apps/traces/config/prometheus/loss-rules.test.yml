@@ -1,0 +1,719 @@
+# promtool unit tests for `loss-rules.yml`: `promtool test rules loss-rules.test.yml`. The bun test
+# `loss-rules.test.ts` runs it in the pinned Prometheus image with no network, and skips when docker or the image is
+# missing. Samples are one minute apart; `_xN` is N missing samples, so `_x40 1+0x100` is a counter that first
+# appears at minute 40 with value 1 and then stays flat. A series new in the window fires for the 5 minutes after it
+# appears (minutes 40 to 44 here) and not at 45; a counter that was there and rose fires while the rise is within 30m.
+rule_files: [loss-rules.yml]
+evaluation_interval: 1m
+tests:
+  # Export failures: neither counter was ever exported (they are absent until the first failure): no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: send failures absent, then 1, then flat (increase() sees 0): fires for the 5 minutes the series is new, then resolves
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '_x40 1+0x100'
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 44m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 45m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: enqueue failures absent, then 1, then flat: fires for 5 minutes
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'otelcol_exporter_enqueue_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '_x40 1+0x100'
+    alert_rule_test:
+      - eval_time: 41m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 44m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 45m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: both counters new for one exporter, two minutes apart: one alert for that exporter, from the first to 5 minutes after the second
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '_x40 1+0x100'
+      - series: 'otelcol_exporter_enqueue_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '_x42 2+0x100'
+    alert_rule_test:
+      - eval_time: 41m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 44m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 46m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 47m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: a positive baseline from the first scrape, with no history: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '5+0x150'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: a normal increase of a counter that was already there: fires, resolves after 30 minutes
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '0+0x20 3+0x130'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 25m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 60m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: a counter that keeps rising: fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '0+1x150'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 80m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+
+  # Export failures: one exporter old and flat, another new: only the new one fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '5+0x150'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/tempo",data_type="traces"}'
+        values: '_x40 2+0x100'
+    alert_rule_test:
+      - eval_time: 42m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/tempo
+      - eval_time: 46m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: the target was scraped for only 6 minutes, then a counter appears: fires (the guard needs 5 minutes of history, not 30)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '_x20 1+0x130'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '_x26 4+0x124'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 30m
+        alertname: CollectorExportFailures
+        exp_alerts:
+          - exp_labels:
+              exporter: otlp_http/langfuse-fro-bot
+      - eval_time: 31m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: the target was scraped for under 5 minutes and already holds a positive count: no alert (the first scrape is quiet)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '_x20 1+0x130'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '_x20 5+0x130'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 24m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Export failures: the target was down 5 minutes before (up 0): a series appearing then is not alerted
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '0+0x22 1+0x130'
+      - series: 'otelcol_exporter_send_failed_spans{exporter="otlp_http/langfuse-fro-bot",data_type="traces"}'
+        values: '_x20 3+0x130'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 28m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: CollectorExportFailures
+        exp_alerts: []
+
+  # Ingest 503: only other status codes, flat: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'http_server_request_duration_count{http_response_status_code="200",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '5+0x150'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: never present: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: absent, then 1, then flat: fires for 5 minutes, then resolves
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'http_server_request_duration_count{http_response_status_code="503",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '_x40 1+0x100'
+      - series: 'http_server_request_duration_count{http_response_status_code="200",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '9+0x150'
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: IngestRefused503
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 44m
+        alertname: IngestRefused503
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 45m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: a positive baseline at start-up with no history: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'http_server_request_duration_count{http_response_status_code="503",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '5+0x150'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: a normal increase: fires, resolves after 30 minutes
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'http_server_request_duration_count{http_response_status_code="503",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '0+0x20 3+0x130'
+    alert_rule_test:
+      - eval_time: 19m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: IngestRefused503
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 25m
+        alertname: IngestRefused503
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 60m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: the target was scraped for only 6 minutes, then a 503 appears: fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '_x20 1+0x130'
+      - series: 'http_server_request_duration_count{http_response_status_code="503",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '_x26 1+0x124'
+      - series: 'http_server_request_duration_count{http_response_status_code="200",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '9+0x150'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: IngestRefused503
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 30m
+        alertname: IngestRefused503
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 31m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: the canary route alone, appearing in the window: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'http_server_request_duration_count{http_response_status_code="503",http_request_method="POST",http_route="/canary/v1/traces",server_address="10.0.0.4",server_port="4414"}'
+        values: '_x40 9+0x100'
+    alert_rule_test:
+      - eval_time: 41m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: the canary route alone, rising: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'http_server_request_duration_count{http_response_status_code="503",http_request_method="POST",http_route="/canary/v1/traces",server_address="10.0.0.4",server_port="4414"}'
+        values: '0+0x20 9+0x130'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: the canary route and a real series: the real one fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'http_server_request_duration_count{http_response_status_code="503",http_request_method="POST",http_route="/canary/v1/traces",server_address="10.0.0.4",server_port="4414"}'
+        values: '_x40 9+0x100'
+      - series: 'http_server_request_duration_count{http_response_status_code="503",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '_x40 1+0x100'
+    alert_rule_test:
+      - eval_time: 41m
+        alertname: IngestRefused503
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 46m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Ingest 503: a 429 appearing in the window is not a 503: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="otelcol",instance="collector:8888"}'
+        values: '1+0x150'
+      - series: 'http_server_request_duration_count{http_response_status_code="429",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '_x40 7+0x100'
+      - series: 'http_server_request_duration_count{http_response_status_code="200",http_request_method="POST",server_address="10.0.0.4"}'
+        values: '9+0x150'
+    alert_rule_test:
+      - eval_time: 41m
+        alertname: IngestRefused503
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: IngestRefused503
+        exp_alerts: []
+
+  # Tempo discards: never present: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: TempoDiscards
+        exp_alerts: []
+
+  # Tempo discards: a new reason, absent, then 4, then flat: fires with the reason for 5 minutes, then resolves
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_discarded_spans_total{reason="trace_too_large",tenant="single-tenant"}'
+        values: '_x40 4+0x100'
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 41m
+        alertname: TempoDiscards
+        exp_alerts:
+          - exp_labels:
+              reason: trace_too_large
+      - eval_time: 44m
+        alertname: TempoDiscards
+        exp_alerts:
+          - exp_labels:
+              reason: trace_too_large
+      - eval_time: 45m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 72m
+        alertname: TempoDiscards
+        exp_alerts: []
+
+  # Tempo discards: a positive baseline at start-up with no history: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_discarded_spans_total{reason="trace_too_large",tenant="single-tenant"}'
+        values: '6+0x150'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: TempoDiscards
+        exp_alerts: []
+
+  # Tempo discards: a normal increase: fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_discarded_spans_total{reason="rate_limited",tenant="single-tenant"}'
+        values: '0+0x20 3+0x130'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: TempoDiscards
+        exp_alerts:
+          - exp_labels:
+              reason: rate_limited
+      - eval_time: 60m
+        alertname: TempoDiscards
+        exp_alerts: []
+
+  # Tempo discards: one reason old and flat, another new: only the new one fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_discarded_spans_total{reason="rate_limited",tenant="single-tenant"}'
+        values: '5+0x150'
+      - series: 'tempo_discarded_spans_total{reason="trace_too_large",tenant="single-tenant"}'
+        values: '_x40 2+0x100'
+    alert_rule_test:
+      - eval_time: 42m
+        alertname: TempoDiscards
+        exp_alerts:
+          - exp_labels:
+              reason: trace_too_large
+      - eval_time: 46m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: TempoDiscards
+        exp_alerts: []
+
+  # Tempo discards: the target was scraped for only 6 minutes, then a reason appears: fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '_x20 1+0x130'
+      - series: 'tempo_discarded_spans_total{reason="trace_too_large",tenant="single-tenant"}'
+        values: '_x26 2+0x124'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: TempoDiscards
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: TempoDiscards
+        exp_alerts:
+          - exp_labels:
+              reason: trace_too_large
+      - eval_time: 31m
+        alertname: TempoDiscards
+        exp_alerts: []
+
+  # Tempo discards: the counter without the _total suffix is read too
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_discarded_spans{reason="trace_too_large",tenant="single-tenant"}'
+        values: '_x40 4+0x100'
+    alert_rule_test:
+      - eval_time: 41m
+        alertname: TempoDiscards
+        exp_alerts:
+          - exp_labels:
+              reason: trace_too_large
+
+  # Truncation: never present: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+      - eval_time: 90m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+
+  # Truncation: absent, then 2, then flat: fires for 5 minutes, then resolves
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_distributor_attributes_truncated_total{tenant="single-tenant"}'
+        values: '_x40 2+0x100'
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+      - eval_time: 41m
+        alertname: TempoAttributeTruncation
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 44m
+        alertname: TempoAttributeTruncation
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 45m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+      - eval_time: 72m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+
+  # Truncation: a positive baseline at start-up with no history: no alert
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_distributor_attributes_truncated_total{tenant="single-tenant"}'
+        values: '8+0x150'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+
+  # Truncation: a normal increase: fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_distributor_attributes_truncated_total{tenant="single-tenant"}'
+        values: '0+0x20 3+0x130'
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: TempoAttributeTruncation
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 60m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+
+  # Truncation: the target was scraped for only 6 minutes, then the counter appears: fires
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '_x20 1+0x130'
+      - series: 'tempo_distributor_attributes_truncated_total{tenant="single-tenant"}'
+        values: '_x26 2+0x124'
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+      - eval_time: 26m
+        alertname: TempoAttributeTruncation
+        exp_alerts:
+          - exp_labels: {}
+      - eval_time: 31m
+        alertname: TempoAttributeTruncation
+        exp_alerts: []
+
+  # Truncation: the counter without the _total suffix is read too
+  - interval: 1m
+    input_series:
+      - series: 'up{job="tempo",instance="tempo:3200"}'
+        values: '1+0x150'
+      - series: 'tempo_distributor_attributes_truncated{tenant="single-tenant"}'
+        values: '_x40 2+0x100'
+    alert_rule_test:
+      - eval_time: 41m
+        alertname: TempoAttributeTruncation
+        exp_alerts:
+          - exp_labels: {}

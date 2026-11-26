@@ -1,0 +1,25 @@
+# Scrape configuration for the trace stack. Targets are compose service names on the edge network.
+# No rule files, no Alertmanager and no remote write: Grafana queries this server and owns the alert rules.
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+
+scrape_configs:
+  # The collector's own telemetry: exporter queues and failures, receiver counts, HTTP requests by status.
+  - job_name: otelcol
+    static_configs:
+      - targets: ['collector:8888']
+
+  # Tempo's own metrics: receiver counts, discarded spans, truncated attributes.
+  - job_name: tempo
+    static_configs:
+      - targets: ['tempo:3200']
+
+  # The health reporter's gauges: probe state, disk fullness, data age, last run. Port 8082 is not routed by Caddy.
+  - job_name: health-reporter
+    static_configs:
+      - targets: ['health-reporter:8082']
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']

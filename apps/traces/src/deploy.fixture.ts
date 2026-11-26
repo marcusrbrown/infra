@@ -9,7 +9,14 @@ import type {DeployDeps, DeployInputs, IngestState} from './deploy'
 import {chmodSync, writeFileSync} from 'node:fs'
 import {join} from 'node:path'
 
-import {GATED_SERVICES, generateVoidTokenLine, REPORTER_DETAIL_COMMAND, SERVICES} from './deploy'
+import {
+  ALERT_CONTACT_POINT_UID,
+  ALERT_RULE_GROUPS,
+  GATED_SERVICES,
+  generateVoidTokenLine,
+  REPORTER_DETAIL_COMMAND,
+  SERVICES,
+} from './deploy'
 import {SENDER_GROUPS, TRACES_DEPLOY_MARKER, TRACES_VOID_TOKEN_PREFIX} from './host'
 import {OBJECT_STORE_PREFIXES, RETENTION_TABLES} from './retention'
 
@@ -51,6 +58,7 @@ const READ_ONLY_STEPS: readonly RegExp[] = [
   /^bootstrap-probe$/,
   /^bootstrap-hygiene$/,
   /^grafana-signin$/,
+  /^grafana-alerting$/,
   /^probe-ingest$/,
   /^retention-read-/,
   /^raw:reporter-detail$/,
@@ -116,6 +124,10 @@ export interface FakeOptions {
    * function of the attempt (1 for the first). Default: 200.
    */
   grafana?: string | ((attempt: number) => string)
+  /**
+   * What Grafana's provisioning API says about alerting: everything the files define (default), or one thing wrong.
+   */
+  alerting?: 'no-contact-point' | 'wrong-type' | 'no-group' | 'partial-group' | 'http-401'
 }
 
 export class FakeHost {
@@ -451,11 +463,16 @@ export class FakeHost {
       }
       case step === 'prune-images':
       case step === 'pull':
-      case step === 'create-collector': {
+      case step.startsWith('pull-'):
+      case step === 'create-collector':
+      case step === 'create-prometheus': {
         return ok(`epoch=${this.clock}\nTRACES_STEP_OK:${step}\n`)
       }
       case step === 'queue-volume': {
         return ok('TRACES_QUEUE_VOLUME_READY\n')
+      }
+      case step === 'prometheus-volume': {
+        return ok('TRACES_PROMETHEUS_VOLUME_READY\n')
       }
       case step.startsWith('up-'): {
         return this.up(step, command)
@@ -479,6 +496,9 @@ export class FakeHost {
         const configured = this.options.grafana ?? '200'
         const code = typeof configured === 'function' ? configured(attempt) : configured
         return ok(`TRACES_GRAFANA_FILE_HTTP=${code}\nTRACES_GRAFANA_PROBED\n`)
+      }
+      case step === 'grafana-alerting': {
+        return ok(this.alertingAnswer())
       }
       case step === 'probe-ingest': {
         const codes = this.options.probeOverride?.(this.served) ?? this.probeCodes()
@@ -520,6 +540,29 @@ export class FakeHost {
       .filter(line => !line.startsWith('TRACES_INGEST_STATE='))
       .join('\n')
     return `${service}:${Bun.hash(`${this.files.get('docker-compose.yaml') ?? ''}\u0000${env}`).toString(16)}`
+  }
+
+  /** What the alerting probe prints for the configured state of Grafana's provisioned alerting. */
+  private alertingAnswer(): string {
+    const mode = this.options.alerting
+    const type = mode === 'wrong-type' ? 'webhook' : 'discord'
+    const points =
+      mode === 'no-contact-point'
+        ? '[]'
+        : `[{"uid":"${ALERT_CONTACT_POINT_UID}","name":"Traces Discord","type":"${type}","settings":{},"disableResolveMessage":false,"provenance":"file"}]`
+    const groups = ALERT_RULE_GROUPS.filter((_group, index) => !(mode === 'no-group' && index === 0)).map(group => {
+      const count = mode === 'partial-group' && group === ALERT_RULE_GROUPS[0] ? group.rules - 1 : group.rules
+      return `TRACES_GRAFANA_RULE_GROUP=${group.name} ${count}`
+    })
+    const code = mode === 'http-401' ? '401' : '200'
+    return [
+      `TRACES_GRAFANA_CP_HTTP=${code}`,
+      `TRACES_GRAFANA_CP_BODY=${points}`,
+      `TRACES_GRAFANA_RULES_HTTP=${code}`,
+      ...groups,
+      'TRACES_GRAFANA_ALERTING_PROBED',
+      '',
+    ].join('\n')
   }
 
   private envBootstrapPair(): [string, string] | undefined {
@@ -571,8 +614,13 @@ export class FakeHost {
       'data-age-object-store',
       'data-age-tempo',
     ]
-    const checks = this.checksFor(required)
-    const allPass = checks.every(check => check.status === 'pass' || check.status === 'warn')
+    const passes = (check: {status: string}): boolean => check.status === 'pass' || check.status === 'warn'
+    const checks = this.checksFor(required).map(check => ({...check, scope: 'ingest'}))
+    const monitoring = this.checksFor(['grafana-health', 'prometheus-health']).map(check => ({
+      ...check,
+      scope: 'monitoring',
+    }))
+    const allPass = checks.every(passes)
     return {
       schemaVersion: 1,
       generatedAt: new Date((this.clock + 60) * 1000).toISOString(),
@@ -580,8 +628,9 @@ export class FakeHost {
       ran: this.options.verdict?.ran ?? true,
       stale: this.options.verdict?.stale ?? false,
       ok: this.options.verdict?.ok ?? allPass,
+      monitoringOk: monitoring.every(passes),
       at: new Date(this.reporterAt * 1000).toISOString(),
-      checks,
+      checks: [...checks, ...monitoring],
     }
   }
 
@@ -699,6 +748,8 @@ export function baseEnv(overrides: Record<string, string | undefined> = {}): Rec
     TRACES_ENCRYPTION_KEY: '0123456789abcdef'.repeat(4),
     TRACES_GRAFANA_ADMIN_PASSWORD: 'placeholder-grafana-admin-08',
     TRACES_GRAFANA_SECRET_KEY: 'placeholder-grafana-secret-09',
+    TRACES_DISCORD_WEBHOOK_URL:
+      'https://discord.com/api/webhooks/123456789012345678/placeholder-webhook-token-0123456789abcdef',
     TRACES_LANGFUSE_USER_EMAIL: 'operator@example.invalid',
     TRACES_LANGFUSE_USER_PASSWORD: 'placeholder-ui-password-10',
     TRACES_LANGFUSE_PUBLIC_KEY: 'pk-lf-placeholder-app-public-11',
@@ -723,6 +774,7 @@ export function secretValues(env: Record<string, string | undefined>): string[] 
     'TRACES_ENCRYPTION_KEY',
     'TRACES_GRAFANA_ADMIN_PASSWORD',
     'TRACES_GRAFANA_SECRET_KEY',
+    'TRACES_DISCORD_WEBHOOK_URL',
     'TRACES_LANGFUSE_USER_PASSWORD',
     'TRACES_LANGFUSE_PUBLIC_KEY',
     'TRACES_LANGFUSE_SECRET_KEY',

@@ -117,6 +117,13 @@ export const TEMPO_USER_ID = 10_001
  */
 export const GRAFANA_USER_ID = 472
 
+/**
+ * The uid and gid Prometheus runs as: `nobody`, the user its image declares. The compose file gives Prometheus
+ * `user: "65534:65534"`, and deploy makes its data volume's directory owned by this id, once, like the collector's
+ * queue volume. `docker-compose.test.ts` pins Prometheus's `user` to it.
+ */
+export const PROMETHEUS_USER_ID = 65_534
+
 // ─── Deploy state and locks ───────────────────────────────────────────────────
 //
 // These paths are a contract between the deploy, the sender-token commands and the ingest command. The CLI

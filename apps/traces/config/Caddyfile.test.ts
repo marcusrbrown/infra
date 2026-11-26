@@ -208,14 +208,18 @@ describe('traces Caddyfile', () => {
     }
   })
 
-  it('routes nothing to Grafana, Langfuse, Tempo or the canary receiver in any state', async () => {
+  it('routes nothing to Grafana, Langfuse, Tempo, Prometheus or the canary receiver in any state', async () => {
     for (const state of states) {
       const rendered = await render(state)
       for (const forbidden of [
         /grafana/i,
         /langfuse/i,
         /tempo/i,
+        /prometheus/i,
         /canary/i,
+        /:9090\b/,
+        /:8082\b/,
+        /\/metrics/,
         /:4414\b/,
         /:3000\b/,
         /:3001\b/,
@@ -226,6 +230,15 @@ describe('traces Caddyfile', () => {
       ]) {
         expect(rendered).not.toMatch(forbidden)
       }
+    }
+  })
+
+  it('proxies the health reporter on its public port only, never its metrics port', async () => {
+    for (const state of states) {
+      const upstreams = [...(await render(state)).matchAll(/reverse_proxy\s+health-reporter:(\d+)/g)].map(
+        match => match[1],
+      )
+      expect(upstreams).toEqual(['8080'])
     }
   })
 })

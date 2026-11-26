@@ -4,16 +4,19 @@
 #   - every image is pinned by tag and digest
 #   - no AI gateway service
 #   - nothing is published except Caddy (80, 443) and, on 127.0.0.1 only, Langfuse web and Grafana
+#   - Prometheus and Grafana-managed alert rules added: failures reach a Discord webhook as fixed text and numbers
 #   - two networks (see below), healthchecks, a log size limit and `restart: unless-stopped` everywhere
 #   - telemetry and outbound update checks are off wherever a setting exists
 #   - secrets are interpolated from the host `.env` or read from files, never written here
 #
 # Networks:
-#   edge     Caddy, the collector, Langfuse web, Tempo, the health reporter. The internet-facing,
-#            custom-built collector can reach nothing else.
-#   backend  Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo, the health reporter.
-#            The reporter bridges both: it reads the collector and Tempo on edge, and ClickHouse, MinIO and the
-#            Langfuse worker on backend.
+#   edge     Caddy, the collector, Langfuse web, Tempo, Prometheus, the health reporter. The internet-facing,
+#            custom-built collector can reach nothing else (Prometheus answers read-only queries and has no
+#            management endpoint on).
+#   backend  Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo, Prometheus, the
+#            health reporter. The reporter bridges both: it reads the collector and Tempo on edge, and
+#            ClickHouse, MinIO, the Langfuse worker and Grafana on backend. Prometheus bridges both: it scrapes
+#            the collector, Tempo and the reporter on edge, and Grafana queries it on backend.
 #
 # No ClickHouse memory limit, on purpose: capping it near 7 GB lost spans after the sender got 200.
 #
@@ -275,6 +278,34 @@ services:
     networks: [edge, backend]
     logging: *logging
 
+  # Scrapes the collector, Tempo, the health reporter and itself, and keeps 15 days of samples (2 GB at most). It
+  # evaluates no rules: Grafana queries it and owns the alert rules, which post to a Discord webhook. No Alertmanager,
+  # no lifecycle endpoint, no admin API, no remote-write receiver. The image runs as `nobody`; `PROMETHEUS_USER_ID` in
+  # src/host.ts is that one id, and deploy gives the data volume to it (a test pins both).
+  prometheus:
+    image: prom/prometheus:v3.13.5@sha256:aafa9d694e6a883c02db516d9f6e5b84e14195f49a2a6456a4cca815edda72b9
+    restart: unless-stopped
+    user: '65534:65534'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=2GB
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks: [edge, backend]
+    healthcheck:
+      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:9090/-/ready || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *logging
+
   grafana:
     image: grafana/grafana:13.3.2@sha256:81556409ba48b2b922e0adb69a2511337d8ba7578f11962eefa6149a2d815101
     restart: unless-stopped
@@ -310,8 +341,12 @@ services:
       GF_PLUGINS_PREINSTALL_AUTO_UPDATE: 'false'
       GF_PLUGINS_PLUGIN_ADMIN_ENABLED: 'false'
       GF_CLOUD_MIGRATION_ENABLED: 'false'
+      # The one outbound call Grafana makes: the alert rules post to this Discord webhook (the contact point reads it
+      # as $TRACES_DISCORD_WEBHOOK_URL). Required, so a stack without a place to send alerts does not start.
+      TRACES_DISCORD_WEBHOOK_URL: ${TRACES_DISCORD_WEBHOOK_URL:?}
     volumes:
       - ./config/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./config/grafana/alerting:/etc/grafana/provisioning/alerting:ro
       - ./secrets/grafana:/run/secrets/grafana:ro
       - grafana_data:/var/lib/grafana
     networks: [backend]
@@ -382,4 +417,5 @@ volumes:
   redis_data: {}
   postgres_data: {}
   tempo_data: {}
+  prometheus_data: {}
   grafana_data: {}

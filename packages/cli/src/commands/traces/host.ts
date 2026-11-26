@@ -56,6 +56,7 @@ export const TRACES_SERVICES = [
   'postgres',
   'tempo',
   'grafana',
+  'prometheus',
   'health-reporter',
 ] as const
 

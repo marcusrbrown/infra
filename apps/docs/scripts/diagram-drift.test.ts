@@ -1190,6 +1190,11 @@ const TABLE = {
       minio: maps(fact.service(composePath('traces'), 'minio'), fact.volume(composePath('traces'), 'minio_data')),
       tempo: maps(fact.service(composePath('traces'), 'tempo'), fact.volume(composePath('traces'), 'tempo_data')),
       grafana: maps(fact.service(composePath('traces'), 'grafana'), fact.volume(composePath('traces'), 'grafana_data')),
+      prometheus: maps(
+        fact.service(composePath('traces'), 'prometheus'),
+        fact.volume(composePath('traces'), 'prometheus_data'),
+      ),
+      discord: illustrative('Discord is an external service reached by a webhook.'),
     },
   },
 

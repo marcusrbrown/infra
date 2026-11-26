@@ -1,0 +1,686 @@
+# Grafana-managed alert rules over the Prometheus data source, in one folder. Each rule queries one instant value (A),
+# reduces it to the last value per series (B) and compares it (C).
+#
+# Absence is decided rule by rule, never by default:
+#   - A loss counter (export failures, ingest 503s, Tempo discards and truncation) is not exported until its first
+#     increment. No data therefore means no loss: noDataState OK, so an absent counter never alerts.
+#   - `increase()` of a series that is absent, then 1, then flat is 0, so each loss query is two halves joined by
+#     `or`: `increase(x[30m]) > 0` for a series that was there and rose, and `x unless x offset 5m` for a series that
+#     is present now and was absent 5 minutes ago. The second half needs `up{job=...} offset 5m == 1`: with no
+#     history (the first scrape after a start, a target that was down) an old count is not a new failure and does not
+#     page. The first failure on a new series therefore alerts within minutes and stays for 5 minutes (five
+#     evaluations of the 1 minute group); a rise after that is the 30 minute half's.
+#     The same queries are mirrored in `config/prometheus/loss-rules.yml` and tested with promtool; a test fails
+#     when the two differ.
+#   - The export failure rule joins its two counters with `or` over a `kind` label, not with `+` (which drops every
+#     series missing from one side) and not with one name regex (`increase` drops the metric name, so two counters
+#     of one exporter would collide as one labelset and the query would error).
+#   - TracesTargetDown and ReporterStale read series that must always exist. No data means Prometheus is not
+#     scraping, or the reporter has recorded no run: noDataState Alerting.
+#   - Every other rule reads a gauge the reporter leaves out when it could not take the reading (that makes the
+#     verdict `unknown`, which fails the health path, which the external monitor reports). noDataState OK.
+#   - A query that fails keeps the rule's last state (KeepLast), so a Prometheus outage neither resolves a firing
+#     alert nor starts thirteen new ones. TracesTargetDown alone fires on a failing query: it is the rule that says
+#     the monitoring cannot see.
+#
+# Messages are fixed text, the rule's own labels and numbers. The `$` in the templates is not expanded: Grafana
+# reads annotations as written.
+apiVersion: 1
+groups:
+  - orgId: 1
+    name: stack
+    folder: Traces stack
+    interval: 1m
+    rules:
+      - uid: traces-target-down
+        title: TracesTargetDown
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: up
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B < 1
+              refId: C
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 5m
+        annotations:
+          summary: 'A trace stack scrape target is down, or Prometheus cannot be queried'
+          description: 'Prometheus has not reached {{ $labels.job }} at {{ $labels.instance }} for 5 minutes. Run `traces status` and look at that service.'
+        labels:
+          severity: critical
+        isPaused: false
+      - uid: traces-langfuse-down
+        title: LangfuseDown
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'traces_probe_up{target=~"langfuse-web|langfuse-worker"}'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B < 1
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 5m
+        annotations:
+          summary: Langfuse is unhealthy
+          description: 'The health reporter has found {{ $labels.target }} unhealthy for 5 minutes. Traces may be accepted and not stored.'
+        labels:
+          severity: critical
+        isPaused: false
+      - uid: traces-grafana-down
+        title: GrafanaDown
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'traces_probe_up{target="grafana"}'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B < 1
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 5m
+        annotations:
+          summary: Grafana is unhealthy
+          description: 'The health reporter has found {{ $labels.target }} unhealthy for 5 minutes. The health path also fails, which the external monitor reports.'
+        labels:
+          severity: critical
+        isPaused: false
+      - uid: traces-reporter-stale
+        title: ReporterStale
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: time() - traces_reporter_last_run_timestamp_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B > 900
+              refId: C
+        noDataState: Alerting
+        execErrState: KeepLast
+        for: 5m
+        annotations:
+          summary: The health reporter has not finished a run for 15 minutes
+          description: 'The latest run finished {{ printf "%.0f" $values.B.Value }} seconds ago, or no run is on record. The verdict and every gauge from the reporter are stale.'
+        labels:
+          severity: warning
+        isPaused: false
+  - orgId: 1
+    name: collector
+    folder: Traces stack
+    interval: 1m
+    rules:
+      - uid: traces-collector-queue-filling
+        title: CollectorQueueFilling
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: sum by (exporter) (otelcol_exporter_queue_size) / sum by (exporter) (otelcol_exporter_queue_capacity)
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B >= 0.8
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 5m
+        annotations:
+          summary: A collector exporter queue is filling
+          description: 'The {{ $labels.exporter }} queue is at {{ printf "%.2f" $values.B.Value }} of its capacity. At full the collector answers 503 to senders.'
+        labels:
+          severity: warning
+        isPaused: false
+      - uid: traces-collector-export-failures
+        title: CollectorExportFailures
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: '(sum by (exporter) (label_replace(increase(otelcol_exporter_send_failed_spans[30m]), "kind", "send", "", "") or label_replace(increase(otelcol_exporter_enqueue_failed_spans[30m]), "kind", "enqueue", "", "")) > 0) or (sum by (exporter) (label_replace(otelcol_exporter_send_failed_spans unless otelcol_exporter_send_failed_spans offset 5m, "kind", "send", "", "") or label_replace(otelcol_exporter_enqueue_failed_spans unless otelcol_exporter_enqueue_failed_spans offset 5m, "kind", "enqueue", "", "")) > 0 and on() (up{job="otelcol"} offset 5m == 1))'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B > 0
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 0s
+        annotations:
+          summary: The collector failed to send or queue spans
+          description: '{{ $labels.exporter }} failed to send or queue {{ printf "%.0f" $values.B.Value }} spans in the last 30 minutes. Those spans are lost.'
+        labels:
+          severity: critical
+        isPaused: false
+      - uid: traces-ingest-refused-503
+        title: IngestRefused503
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: '(sum(increase(http_server_request_duration_count{http_response_status_code="503",http_route=""}[30m])) > 0) or (sum(http_server_request_duration_count{http_response_status_code="503",http_route=""} unless http_server_request_duration_count{http_response_status_code="503",http_route=""} offset 5m) > 0 and on() (up{job="otelcol"} offset 5m == 1))'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B > 0
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 0s
+        annotations:
+          summary: Ingest answered 503
+          description: 'Ingest answered 503 to {{ printf "%.0f" $values.B.Value }} requests in the last 30 minutes: an exporter queue was full and the collector shed data.'
+        labels:
+          severity: critical
+        isPaused: false
+  - orgId: 1
+    name: tempo
+    folder: Traces stack
+    interval: 1m
+    rules:
+      - uid: traces-tempo-discards
+        title: TempoDiscards
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: '(sum by (reason) (increase({__name__=~"tempo_discarded_spans(_total)?"}[30m])) > 0) or (sum by (reason) ({__name__=~"tempo_discarded_spans(_total)?"} unless {__name__=~"tempo_discarded_spans(_total)?"} offset 5m) > 0 and on() (up{job="tempo"} offset 5m == 1))'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B > 0
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 0s
+        annotations:
+          summary: Tempo discarded spans
+          description: 'Tempo discarded {{ printf "%.0f" $values.B.Value }} spans in the last 30 minutes, reason {{ $labels.reason }}.'
+        labels:
+          severity: critical
+        isPaused: false
+      - uid: traces-tempo-attribute-truncation
+        title: TempoAttributeTruncation
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: '(sum(increase({__name__=~"tempo_distributor_attributes_truncated(_total)?"}[30m])) > 0) or (sum({__name__=~"tempo_distributor_attributes_truncated(_total)?"} unless {__name__=~"tempo_distributor_attributes_truncated(_total)?"} offset 5m) > 0 and on() (up{job="tempo"} offset 5m == 1))'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B > 0
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 0s
+        annotations:
+          summary: Tempo truncated attributes
+          description: 'Tempo truncated {{ printf "%.0f" $values.B.Value }} attributes at its length limit in the last 30 minutes. Nothing was lost but the tail of long values.'
+        labels:
+          severity: info
+        isPaused: false
+  - orgId: 1
+    name: storage
+    folder: Traces stack
+    interval: 1m
+    rules:
+      - uid: traces-volume-space-warning
+        title: VolumeSpaceWarning
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'traces_disk_used_ratio{mount="volume"}'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B >= 0.7
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 10m
+        annotations:
+          summary: The data volume is 70 percent full
+          description: 'The {{ $labels.mount }} filesystem is at {{ printf "%.2f" $values.B.Value }} of its capacity.'
+        labels:
+          severity: warning
+        isPaused: false
+      - uid: traces-volume-space-critical
+        title: VolumeSpaceCritical
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'traces_disk_used_ratio{mount="volume"}'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B >= 0.85
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 5m
+        annotations:
+          summary: The data volume is 85 percent full
+          description: 'The {{ $labels.mount }} filesystem is at {{ printf "%.2f" $values.B.Value }} of its capacity. Grow the volume or free space before the stores stop.'
+        labels:
+          severity: critical
+        isPaused: false
+      - uid: traces-root-space
+        title: RootSpace
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'traces_disk_used_ratio{mount="root"}'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B >= 0.85
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 10m
+        annotations:
+          summary: The root disk is 85 percent full
+          description: 'The {{ $labels.mount }} filesystem is at {{ printf "%.2f" $values.B.Value }} of its capacity.'
+        labels:
+          severity: critical
+        isPaused: false
+      - uid: traces-data-older-than-31d
+        title: DataOlderThan31d
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: traces_oldest_data_age_seconds
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B > 2678400
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 10m
+        annotations:
+          summary: A store holds data older than 31 days
+          description: 'The oldest data in {{ $labels.store }} is {{ printf "%.0f" $values.B.Value }} seconds old. Retention is 30 days: check the TTL and the lifecycle rule.'
+        labels:
+          severity: critical
+        isPaused: false

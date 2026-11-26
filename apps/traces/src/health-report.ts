@@ -2,7 +2,7 @@
 //
 // One verdict for the whole trace stack, produced on the host. A timer runs every check, then publishes
 // the result. The verdict sends no trace: it rests on the ready endpoints, the collector and Tempo metrics, disk
-// space and data age. Two listeners serve it:
+// space and data age. Three listeners serve it:
 //
 //   0.0.0.0:8080   GET /healthz   200 or 503, and a body of `{ok, at}`: one boolean and one timestamp.
 //                                 Caddy routes this path publicly, so nothing else may ever be in it.
@@ -10,6 +10,16 @@
 //                  GET /live      the process is up (the compose healthcheck)
 //                                 The second listener is bound to the container's own loopback, so only
 //                                 `docker compose exec` reaches it; `traces status` reads it over SSH.
+//   0.0.0.0:8082   GET /metrics   Prometheus text: gauges from the latest run (probe state, disk fullness, the age
+//                                 of the oldest data, when the run finished) with fixed labels and numbers only.
+//                                 Prometheus scrapes it over the compose network. Caddy never routes to it and
+//                                 nothing publishes it.
+//
+// Two sets of checks, one answer each. The ingest checks (the collector, Tempo, Langfuse, the disks and the age of the
+// data) decide whether traces are received and stored; the monitoring checks (Grafana and Prometheus) decide whether the
+// stack can tell anyone when it is not. `ok` is the ingest verdict, which the deploy gate and `traces ingest open` read, so
+// a dead Grafana or Prometheus can never hold or refuse healthy ingest. `/healthz` answers for both (`healthy`), so the
+// external monitor still reports a dead Grafana or Prometheus.
 //
 // Rules every check follows:
 //   - Fail closed. An unreachable dependency, a non-2xx, an unparsable body or a missing metric is
@@ -60,8 +70,9 @@ export const THRESHOLDS = {
   canaryPollMs: 3000,
 } as const
 
-export const PORTS = {public: 8080, detail: 8081} as const
+export const PORTS = {public: 8080, detail: 8081, metrics: 8082} as const
 export const HEALTH_PATH = '/healthz'
+export const METRICS_PATH = '/metrics'
 export const DETAIL_PATH = '/detail'
 export const LIVE_PATH = '/live'
 
@@ -113,6 +124,8 @@ export const ENDPOINTS = {
   tempoTraceBase: 'http://tempo:3200/api/traces/',
   langfuseWeb: 'http://langfuse-web:3000/api/public/health',
   langfuseWorker: 'http://langfuse-worker:3030/api/health',
+  grafanaHealth: 'http://grafana:3000/api/health',
+  prometheusReady: 'http://prometheus:9090/-/ready',
   clickhouse: 'http://clickhouse:8123/',
   objectStore: 'http://minio:9000',
 } as const
@@ -140,13 +153,19 @@ export interface CheckResult {
 }
 
 export interface Verdict {
+  /** The ingest verdict: every ingest check passes. What the deploy gate and `traces ingest open` read. */
   ok: boolean
+  /** Every monitoring check passes. A verdict missing one of them is not monitoring-ok. */
+  monitoringOk: boolean
   /** When the run finished, in epoch milliseconds. */
   at: number
   checks: CheckResult[]
 }
 
-/** The checks every verdict must carry. A verdict missing one cannot pass. */
+/** What a check is about: whether traces are received and stored, or whether the stack can raise an alarm. */
+export type CheckScope = 'ingest' | 'monitoring'
+
+/** The checks every ingest verdict must carry. A verdict missing one cannot pass. */
 export const REQUIRED_CHECKS = [
   'collector-health',
   'collector-queues',
@@ -164,7 +183,54 @@ export const REQUIRED_CHECKS = [
   'data-age-tempo',
 ] as const
 
+/**
+ * The checks of the alerting path. They fail `/healthz` and nothing else: no ingest decision reads them. A verdict
+ * missing one cannot be monitoring-ok.
+ */
+export const MONITORING_CHECKS = ['grafana-health', 'prometheus-health'] as const
+
+/** The scope of a check. An id nobody has classified is an ingest check, so a new check fails closed. */
+export function checkScope(id: string): CheckScope {
+  return (MONITORING_CHECKS as readonly string[]).includes(id) ? 'monitoring' : 'ingest'
+}
+
 export type Probe<T> = {ok: true; value: T} | {ok: false; reason: string}
+
+// ─── Gauges for Prometheus ────────────────────────────────────────────────────
+
+/** The metric names Prometheus scrapes from `/metrics`; the alert rules in `config/grafana/alerting` read the same names. */
+export const METRIC_NAMES = {
+  probeUp: 'traces_probe_up',
+  diskUsedRatio: 'traces_disk_used_ratio',
+  oldestDataAge: 'traces_oldest_data_age_seconds',
+  lastRun: 'traces_reporter_last_run_timestamp_seconds',
+} as const
+
+/** What `traces_probe_up` says is up, and the check each reads. */
+export const PROBE_TARGETS = {
+  'langfuse-web': 'langfuse-web',
+  'langfuse-worker': 'langfuse-worker',
+  grafana: 'grafana-health',
+} as const
+
+export type ProbeTarget = keyof typeof PROBE_TARGETS
+export type DiskMount = 'volume' | 'root'
+export type DataStore = 'clickhouse' | 'object-store' | 'tempo'
+
+/**
+ * The numbers one finished run leaves for `/metrics`. Every label is one of the fixed names above. A reading the run
+ * could not take is absent, never zero: an unreadable disk is not an empty one, and an empty store has no age.
+ */
+export interface Gauges {
+  /** 1 when the probe passed, 0 when it did not. */
+  probes: Partial<Record<ProbeTarget, 0 | 1>>
+  /** Used share of a filesystem, from 0 to 1. */
+  disk: Partial<Record<DiskMount, number>>
+  /** Seconds since the oldest data in a store was written. */
+  ages: Partial<Record<DataStore, number>>
+  /** When the run finished, in epoch seconds. */
+  lastRun: number
+}
 
 export interface Sample {
   name: string
@@ -662,6 +728,13 @@ export function usedPercent(stats: FsStats): number | undefined {
   return total <= 0 ? undefined : (used / total) * 100
 }
 
+/** Used share from 0 to 1, computed as `usedPercent` does. */
+export function usedRatio(stats: FsStats): number | undefined {
+  if (usedPercent(stats) === undefined) return undefined
+  const used = stats.blocks - stats.bfree
+  return used / (used + stats.bavail)
+}
+
 export function evaluateDisk(
   id: string,
   label: string,
@@ -700,6 +773,12 @@ export function evaluateAge(id: string, label: string, oldest: Probe<number | un
   return days > THRESHOLDS.maxDataAgeDays
     ? result(id, 'fail', `${shown} (limit ${THRESHOLDS.maxDataAgeDays})`)
     : result(id, 'pass', shown)
+}
+
+/** Seconds since the oldest datum of a store, or undefined for an empty or unreadable store. */
+export function ageSeconds(oldest: Probe<number | undefined>, nowMs: number): number | undefined {
+  if (!oldest.ok || oldest.value === undefined || !Number.isFinite(oldest.value)) return undefined
+  return Math.max(0, (nowMs - oldest.value) / 1000)
 }
 
 /** Time of the oldest object from a key of the form `events/otel/<project>/YYYY/MM/DD/HH/MM/<id>.json`. */
@@ -1146,6 +1225,22 @@ export async function checkLangfuse(deps: ReporterDeps): Promise<CheckResult[]> 
   ]
 }
 
+/** Grafana answers its own health endpoint on the backend network; Prometheus alerts and the operator UI depend on it. */
+export async function checkGrafana(deps: ReporterDeps): Promise<CheckResult> {
+  const probe = await probeText(deps, ENDPOINTS.grafanaHealth)
+  return probe.ok
+    ? result('grafana-health', 'pass', 'grafana is healthy')
+    : result('grafana-health', 'fail', `grafana is unhealthy (${probe.reason})`)
+}
+
+/** Prometheus answers `/-/ready` once it has loaded its data and can serve queries. Grafana's alert rules read it. */
+export async function checkPrometheus(deps: ReporterDeps): Promise<CheckResult> {
+  const probe = await probeText(deps, ENDPOINTS.prometheusReady)
+  return probe.ok
+    ? result('prometheus-health', 'pass', 'prometheus is ready')
+    : result('prometheus-health', 'fail', `prometheus is not ready (${probe.reason})`)
+}
+
 // ─── ClickHouse (read-only user) ──────────────────────────────────────────────
 
 async function queryClickHouse(
@@ -1406,19 +1501,25 @@ export interface RunOutcome {
   counters: CounterState
   /** The ingest counts from this run's scrape, or null when the scrape failed or could not be read. */
   ingest: IngestCounts | null
+  gauges: Gauges
 }
 
+const passes = (entry: CheckResult): boolean => entry.status === 'pass' || entry.status === 'warn'
+
 /**
- * Assemble a verdict from check results. It passes only when every required check is present and is `pass` or
- * `warn`. A missing check, an unknown one or a failed one fails the verdict.
+ * Assemble a verdict from check results. The ingest verdict passes only when every required ingest check is present
+ * and is `pass` or `warn`: a missing check, an unknown one or a failed one fails it. Anything that is not a monitoring
+ * check counts as an ingest check, so an unclassified id fails closed. The monitoring verdict is the same rule over
+ * `MONITORING_CHECKS`, and is kept apart: it never touches `ok`.
  */
 export function assembleVerdict(results: readonly CheckResult[], at: number): Verdict {
   const byId = new Map(results.map(entry => [entry.id, entry]))
   const checks = REQUIRED_CHECKS.map(id => byId.get(id) ?? result(id, 'unknown', 'check did not run'))
-  const required: readonly string[] = REQUIRED_CHECKS
-  const extras = results.filter(entry => !required.includes(entry.id))
-  const all = [...checks, ...extras]
-  return {ok: all.every(entry => entry.status === 'pass' || entry.status === 'warn'), at, checks: all}
+  const monitoring = MONITORING_CHECKS.map(id => byId.get(id) ?? result(id, 'unknown', 'check did not run'))
+  const classified: readonly string[] = [...REQUIRED_CHECKS, ...MONITORING_CHECKS]
+  const extras = results.filter(entry => !classified.includes(entry.id))
+  const ingest = [...checks, ...extras]
+  return {ok: ingest.every(passes), monitoringOk: monitoring.every(passes), at, checks: [...ingest, ...monitoring]}
 }
 
 const COLLECTOR_COUNTER_PREFIXES = ['enqueue:', 'send:', 'http503:'] as const
@@ -1457,8 +1558,10 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
   let collectorState = counters
   let tempoState = counters
   let ingest: IngestCounts | null = null
+  const disks: Gauges['disk'] = {}
+  const stores: Gauges['ages'] = {}
 
-  const [collector, tempo, langfuse, disk, ages] = await Promise.all([
+  const [collector, tempo, langfuse, monitoring, disk, ages] = await Promise.all([
     guarded(['collector-health', 'collector-queues', 'collector-failures', 'collector-refused'], async () => {
       const [health, metrics] = await Promise.all([
         checkCollectorHealth(deps),
@@ -1489,12 +1592,22 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
       return [ready, ...evaluated.results]
     }),
     guarded(['langfuse-web', 'langfuse-worker'], () => checkLangfuse(deps)),
+    guarded(['grafana-health', 'prometheus-health'], async () => {
+      const [grafana, prometheus] = await Promise.all([checkGrafana(deps), checkPrometheus(deps)])
+      return [grafana, prometheus]
+    }),
     guarded(['volume-space', 'root-space'], async () => {
       const [sentinel, volume, root] = await Promise.all([
         readFileText(deps, PATHS.volumeSentinel),
         probeFs(deps, PATHS.volumeSentinel),
         probeFs(deps, PATHS.rootProbe),
       ])
+      // The volume's fullness is believed only when its sentinel is the recognised one, as the check requires.
+      const recognised = sentinel.ok && sentinel.value.split('\n')[0]?.trim() === SENTINEL_CONTENT
+      const volumeRatio = recognised && volume.ok ? usedRatio(volume.value) : undefined
+      const rootRatio = root.ok ? usedRatio(root.value) : undefined
+      if (volumeRatio !== undefined) disks.volume = volumeRatio
+      if (rootRatio !== undefined) disks.root = rootRatio
       return [
         evaluateVolume(volume, sentinel),
         evaluateDisk('root-space', 'root disk', root, {
@@ -1510,6 +1623,14 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
         oldestTempoBlock(deps),
       ])
       const now = deps.now()
+      for (const [store, probe] of [
+        ['clickhouse', clickhouse],
+        ['object-store', objects],
+        ['tempo', blocks],
+      ] as const) {
+        const seconds = ageSeconds(probe, now)
+        if (seconds !== undefined) stores[store] = seconds
+      }
       return [
         evaluateAge('data-age-clickhouse', 'ClickHouse', clickhouse, now),
         evaluateAge('data-age-object-store', 'object store', objects, now),
@@ -1518,10 +1639,18 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
     }),
   ])
 
+  const results = [...collector, ...tempo, ...langfuse, ...monitoring, ...disk, ...ages]
+  const finishedAt = deps.now()
+  const probes: Gauges['probes'] = {}
+  for (const [target, id] of Object.entries(PROBE_TARGETS) as [ProbeTarget, string][]) {
+    probes[target] = results.find(entry => entry.id === id)?.status === 'pass' ? 1 : 0
+  }
+
   return {
-    verdict: assembleVerdict([...collector, ...tempo, ...langfuse, ...disk, ...ages], deps.now()),
+    verdict: assembleVerdict(results, finishedAt),
     counters: mergeCounters(counters, collectorState, tempoState),
     ingest,
+    gauges: {probes, disk: disks, ages: stores, lastRun: finishedAt / 1000},
   }
 }
 
@@ -1548,11 +1677,14 @@ export interface Reporter {
   health: () => HealthAnswer
   /** The operator's detail. Reads the cache only. */
   detail: () => string
+  /** The Prometheus text for the latest finished run; empty before the first. Reads the cache only. */
+  metrics: () => string
 }
 
 export function createReporter(deps: ReporterDeps): Reporter {
   let verdict: Verdict | undefined
   let ingest: IngestCounts | null = null
+  let gauges: Gauges | undefined
   let counters = emptyCounterState()
   let running: Promise<void> | undefined
 
@@ -1566,6 +1698,7 @@ export function createReporter(deps: ReporterDeps): Reporter {
         counters = outcome.counters
         verdict = outcome.verdict
         ingest = outcome.ingest
+        gauges = outcome.gauges
       } catch (error) {
         // A run that dies leaves the old verdict to go stale; it never turns into a pass. A run that overran its
         // deadline publishes a failing verdict now, instead of letting the old one age out: its late result is
@@ -1587,7 +1720,8 @@ export function createReporter(deps: ReporterDeps): Reporter {
   return {
     runOnce,
     health: () => {
-      const ok = verdict?.ok === true && isFresh()
+      // The public answer is for the whole stack: ingest and monitoring.
+      const ok = verdict?.ok === true && verdict.monitoringOk && isFresh()
       return {
         status: ok ? 200 : 503,
         body: JSON.stringify({ok, at: verdict === undefined ? null : new Date(verdict.at).toISOString()}),
@@ -1600,12 +1734,50 @@ export function createReporter(deps: ReporterDeps): Reporter {
         intervalMs: THRESHOLDS.intervalMs,
         ran: verdict !== undefined,
         stale: verdict === undefined ? true : !isFresh(),
+        // `ok` is the ingest verdict alone, which `traces ingest open` and the deploy gate read. `healthy` is what
+        // `/healthz` answers: ingest and monitoring.
         ok: verdict?.ok === true && isFresh(),
+        monitoringOk: verdict?.monitoringOk === true && isFresh(),
+        healthy: verdict?.ok === true && verdict.monitoringOk && isFresh(),
         at: verdict === undefined ? null : new Date(verdict.at).toISOString(),
-        checks: verdict?.checks ?? [],
+        checks: (verdict?.checks ?? []).map(entry => ({...entry, scope: checkScope(entry.id)})),
         ingest,
       }),
+    metrics: () => renderMetrics(gauges),
   }
+}
+
+// ─── Prometheus text ──────────────────────────────────────────────────────────
+
+/**
+ * The gauges as Prometheus text. Names and label values come from the fixed lists above and every value is a number,
+ * so nothing a probe read can reach the page. Before the first run there is nothing to say, and the page is empty:
+ * Prometheus then has no series, and the alert for a reporter that never ran is `ReporterStale`'s no-data case.
+ */
+export function renderMetrics(gauges: Gauges | undefined): string {
+  if (gauges === undefined) return ''
+  const lines: string[] = []
+  const family = (name: string, help: string, samples: readonly (readonly [string, number])[]): void => {
+    if (samples.length === 0) return
+    lines.push(`# HELP ${name} ${help}`, `# TYPE ${name} gauge`)
+    for (const [labels, value] of samples) lines.push(`${name}${labels} ${value}`)
+  }
+  const entries = <K extends string>(record_: Partial<Record<K, number>>, label: string): [string, number][] =>
+    (Object.entries(record_) as [K, number][]).map(([key, value]) => [`{${label}="${key}"}`, value])
+
+  family(
+    METRIC_NAMES.probeUp,
+    'Whether the latest probe of a dependency passed (1) or not (0).',
+    entries(gauges.probes, 'target'),
+  )
+  family(METRIC_NAMES.diskUsedRatio, 'Used share of a filesystem, from 0 to 1.', entries(gauges.disk, 'mount'))
+  family(
+    METRIC_NAMES.oldestDataAge,
+    'Seconds since the oldest data in a store was written.',
+    entries(gauges.ages, 'store'),
+  )
+  family(METRIC_NAMES.lastRun, 'When the latest run of the reporter finished, in Unix seconds.', [['', gauges.lastRun]])
+  return `${lines.join('\n')}\n`
 }
 
 // ─── HTTP handlers ────────────────────────────────────────────────────────────
@@ -1628,6 +1800,17 @@ export function handleDetail(reporter: Reporter, request: Request): Response {
   if (pathname === DETAIL_PATH) return new Response(reporter.detail(), {status: 200, headers: JSON_HEADERS})
   if (pathname === LIVE_PATH) return new Response('live', {status: 200})
   return new Response('not found', {status: 404})
+}
+
+/** The metrics listener: `GET /metrics` and nothing else. It reads the cache, so a scrape never starts a probe. */
+export function handleMetrics(reporter: Reporter, request: Request): Response {
+  const {pathname} = new URL(request.url)
+  if (pathname !== METRICS_PATH) return new Response('not found', {status: 404})
+  if (request.method !== 'GET') return new Response('method not allowed', {status: 405})
+  return new Response(reporter.metrics(), {
+    status: 200,
+    headers: {'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store'},
+  })
 }
 
 // ─── Real dependencies and entry point ────────────────────────────────────────
@@ -1713,11 +1896,12 @@ function log(message: string): void {
   process.stderr.write(`${new Date().toISOString()} ${message}\n`)
 }
 
-/** Start both listeners and the timer. Called only when this file is the entry point. */
+/** Start the three listeners and the timer. Called only when this file is the entry point. */
 export function start(deps: ReporterDeps = realDeps()): void {
   const reporter = createReporter(deps)
   Bun.serve({port: PORTS.public, hostname: '0.0.0.0', fetch: request => handlePublic(reporter, request)})
   Bun.serve({port: PORTS.detail, hostname: '127.0.0.1', fetch: request => handleDetail(reporter, request)})
+  Bun.serve({port: PORTS.metrics, hostname: '0.0.0.0', fetch: request => handleMetrics(reporter, request)})
 
   const tick = (): void => {
     reporter

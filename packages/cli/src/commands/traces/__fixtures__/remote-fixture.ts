@@ -98,6 +98,7 @@ export interface CheckFixture {
   id: string
   status: 'pass' | 'warn' | 'fail' | 'unknown'
   detail: string
+  scope?: 'ingest' | 'monitoring'
 }
 
 /** The reporter's counts block as the host writes it. Whether it is present at all is the caller's choice. */
@@ -112,7 +113,15 @@ export const INGEST_FIXTURE = {
 } as const
 
 export function detailBody(
-  overrides: {ok?: boolean; stale?: boolean; ran?: boolean; checks?: CheckFixture[]; ingest?: unknown} = {},
+  overrides: {
+    ok?: boolean
+    /** Monitoring checks (Grafana, Prometheus) only. Absent means the reporter predates the split. */
+    monitoringOk?: boolean
+    stale?: boolean
+    ran?: boolean
+    checks?: CheckFixture[]
+    ingest?: unknown
+  } = {},
 ): string {
   return JSON.stringify({
     ...('ingest' in overrides ? {ingest: overrides.ingest} : {}),
@@ -122,6 +131,7 @@ export function detailBody(
     ran: overrides.ran ?? true,
     stale: overrides.stale ?? false,
     ok: overrides.ok ?? true,
+    ...(overrides.monitoringOk === undefined ? {} : {monitoringOk: overrides.monitoringOk}),
     at: '2026-11-20T11:58:00.000Z',
     checks: overrides.checks ?? [{id: 'collector-health', status: 'pass', detail: 'collector reports healthy'}],
   })

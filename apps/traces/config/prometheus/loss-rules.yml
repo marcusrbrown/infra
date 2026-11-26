@@ -1,0 +1,20 @@
+# A mirror of the loss rules in `../grafana/alerting/rules.yaml`, for `promtool test rules` (`loss-rules.test.yml`).
+# Prometheus never loads it (`prometheus.yml` has no `rule_files`) and deploy never uploads it. Each `expr` is the
+# query of the Grafana rule of the same name, character for character; a test fails when the two drift.
+#
+# Each query is the standard idiom for a counter that is not exported until its first increment:
+#   - `increase(x[30m]) > 0` catches a series that was already there and rose, and
+#   - `x unless x offset 5m`, when the target was scraped 5 minutes ago, catches a series that first appeared in the
+#     last 5 minutes. `increase` sees nothing there: absent, then 1, then 1 is no increase.
+# The `up ... offset 5m == 1` guard keeps the first scrape quiet: with no history, an old count is not new.
+groups:
+  - name: loss
+    rules:
+      - alert: CollectorExportFailures
+        expr: '(sum by (exporter) (label_replace(increase(otelcol_exporter_send_failed_spans[30m]), "kind", "send", "", "") or label_replace(increase(otelcol_exporter_enqueue_failed_spans[30m]), "kind", "enqueue", "", "")) > 0) or (sum by (exporter) (label_replace(otelcol_exporter_send_failed_spans unless otelcol_exporter_send_failed_spans offset 5m, "kind", "send", "", "") or label_replace(otelcol_exporter_enqueue_failed_spans unless otelcol_exporter_enqueue_failed_spans offset 5m, "kind", "enqueue", "", "")) > 0 and on() (up{job="otelcol"} offset 5m == 1))'
+      - alert: IngestRefused503
+        expr: '(sum(increase(http_server_request_duration_count{http_response_status_code="503",http_route=""}[30m])) > 0) or (sum(http_server_request_duration_count{http_response_status_code="503",http_route=""} unless http_server_request_duration_count{http_response_status_code="503",http_route=""} offset 5m) > 0 and on() (up{job="otelcol"} offset 5m == 1))'
+      - alert: TempoDiscards
+        expr: '(sum by (reason) (increase({__name__=~"tempo_discarded_spans(_total)?"}[30m])) > 0) or (sum by (reason) ({__name__=~"tempo_discarded_spans(_total)?"} unless {__name__=~"tempo_discarded_spans(_total)?"} offset 5m) > 0 and on() (up{job="tempo"} offset 5m == 1))'
+      - alert: TempoAttributeTruncation
+        expr: '(sum(increase({__name__=~"tempo_distributor_attributes_truncated(_total)?"}[30m])) > 0) or (sum({__name__=~"tempo_distributor_attributes_truncated(_total)?"} unless {__name__=~"tempo_distributor_attributes_truncated(_total)?"} offset 5m) > 0 and on() (up{job="tempo"} offset 5m == 1))'

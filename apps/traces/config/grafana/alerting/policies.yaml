@@ -1,0 +1,10 @@
+# Every alert goes to the one contact point. Alerts of one rule are sent together (the same alert name in one folder);
+# a firing alert is repeated every 4 hours until it resolves, and its resolution is sent too.
+apiVersion: 1
+policies:
+  - orgId: 1
+    receiver: Traces Discord
+    group_by: [grafana_folder, alertname]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h

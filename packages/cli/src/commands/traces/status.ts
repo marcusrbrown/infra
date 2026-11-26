@@ -114,13 +114,17 @@ const detailSchema = z.object({
   intervalMs: z.number(),
   ran: z.boolean(),
   stale: z.boolean(),
+  /** The ingest verdict alone: what `ingest open` reads. A failing Grafana or Prometheus is not in it. */
   ok: z.boolean(),
+  /** Grafana and Prometheus. Absent from a reporter that predates the split. */
+  monitoringOk: z.boolean().optional(),
   at: z.string().nullable(),
   checks: z.array(
     z.object({
       id: z.string(),
       status: z.enum(['pass', 'warn', 'fail', 'unknown']),
       detail: z.string(),
+      scope: z.enum(['ingest', 'monitoring']).optional(),
     }),
   ),
   ingest: ingestSchema.nullish().catch(null),
@@ -162,14 +166,32 @@ export async function getReporterDetail(
   return parseDetailOutput(result)
 }
 
-/** True only for a verdict that ran, is fresh and passed. Everything else, including a stale pass, is not passing. */
+/**
+ * True only for an ingest verdict that ran, is fresh and passed. Everything else, including a stale pass, is not
+ * passing. This is what `ingest open` reads: monitoring (Grafana, Prometheus) is not part of it, so a dead Grafana
+ * never keeps an operator from opening healthy ingest.
+ */
 export function isPassing(detail: ReporterDetail): boolean {
   return detail.ran && !detail.stale && detail.ok
 }
 
-/** The checks that keep a verdict from passing, as `id: detail` lines. */
-export function failingLines(detail: ReporterDetail): string[] {
+/** The monitoring verdict: fresh, and Grafana and Prometheus pass. A reporter that predates the split has none to fail. */
+export function isMonitoringPassing(detail: ReporterDetail): boolean {
+  return detail.ran && !detail.stale && detail.monitoringOk !== false
+}
+
+/** What `/healthz` answers: the ingest verdict and the monitoring verdict. `traces status` reports this. */
+export function isHealthy(detail: ReporterDetail): boolean {
+  return isPassing(detail) && isMonitoringPassing(detail)
+}
+
+/**
+ * The checks that keep a verdict from passing, as `id: detail` lines. `scope: 'ingest'` leaves out the monitoring
+ * checks, for a command that only reads the ingest verdict.
+ */
+export function failingLines(detail: ReporterDetail, options: {scope?: 'ingest'} = {}): string[] {
   const lines = detail.checks
+    .filter(entry => options.scope !== 'ingest' || entry.scope !== 'monitoring')
     .filter(entry => entry.status === 'fail' || entry.status === 'unknown')
     .map(entry => `${entry.id}: ${entry.detail}`)
   if (!detail.ran) lines.push('the reporter has not finished a run yet')
@@ -224,7 +246,7 @@ export async function getTracesStatusSummary(
       services: servicesFact(compose.services),
       health: detail.ok
         ? {
-            ok: isPassing(detail.detail),
+            ok: isHealthy(detail.detail),
             stale: detail.detail.stale,
             at: detail.detail.at,
             failing: detail.detail.checks
@@ -263,7 +285,7 @@ export async function tracesStatusAction(
     return
   }
 
-  const passing = detail.ok && isPassing(detail.detail)
+  const passing = detail.ok && isHealthy(detail.detail)
   const allOk = compose.ok && passing
 
   if (json) {
@@ -287,6 +309,11 @@ export async function tracesStatusAction(
     ctx.console.log('───────────────────────────────────────────────────────────')
     for (const entry of detail.detail.checks) {
       ctx.console.log(`${entry.id.padEnd(22)} ${entry.status.padEnd(8)} ${entry.detail}`)
+    }
+    if (detail.detail.monitoringOk !== undefined) {
+      ctx.console.log(
+        `Ingest verdict: ${isPassing(detail.detail) ? 'PASSING' : 'FAILING'}; Monitoring: ${isMonitoringPassing(detail.detail) ? 'PASSING' : 'FAILING'} (a failing monitoring check fails the health path and never holds or refuses ingest)`,
+      )
     }
     if (detail.detail.ingest != null) {
       for (const line of ingestLines(detail.detail.ingest)) ctx.console.log(line)

@@ -1,6 +1,6 @@
 # Trace Collection Operations
 
-Day-2 procedures for the trace collection stack at `traces.fro.bot`: health checks, deploys, the ingest route, sender tokens, backups, restore and rebuild. Design, networks, deploy ordering, locks and the rules that must not be broken are in [`apps/traces/AGENTS.md`](../../apps/traces/AGENTS.md); this runbook does not repeat them.
+Day-2 procedures for the trace collection stack at `traces.fro.bot`: health checks, alerts, deploys, the ingest route, sender tokens, backups, restore and rebuild. Design, networks, deploy ordering, locks and the rules that must not be broken are in [`apps/traces/AGENTS.md`](../../apps/traces/AGENTS.md); this runbook does not repeat them.
 
 Commands run from a checkout whose `bun install` is current. CLI commands reach the host as `root` over SSH with the host keys pinned in `.github/known_hosts`, using your SSH agent or `TRACES_SSH_KEY`. The host comes from `TRACES_HOST`, and defaults to `traces.fro.bot`.
 
@@ -29,7 +29,7 @@ A collector on one DigitalOcean droplet accepts OTLP traces from three sender gr
 
 Every other path answers 404. An ingest path answers 404 when the route is `off`, 503 when it is `held` (senders retry) and 401 to a request with no token when it is `open`. [Ingest](#ingest-hold-open-status) covers the states.
 
-Langfuse and Grafana have no hostname. Both are reached through an SSH tunnel:
+Langfuse and Grafana have no hostname. Both are reached through an SSH tunnel (Prometheus has no UI path at all: it is queried through Grafana):
 
 ```bash
 bunx @marcusrbrown/infra traces open
@@ -66,7 +66,7 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
    curl -fsS https://traces.fro.bot/healthz
    ```
 
-   Success: HTTP 200 and `{"ok": true, "at": "<timestamp>"}`. The reporter recomputes every five minutes, so `at` is recent. It sends no trace: the verdict rests on the containers and ready endpoints, the collector's send and enqueue failures and queue fill, 503s on ingest, Tempo's discards, disk space and data age. Delivery to both backends is proven by the deploy's canary, not by `/healthz`.
+   Success: HTTP 200 and `{"ok": true, "at": "<timestamp>"}`. The answer covers ingest and monitoring (Grafana and Prometheus); `traces status` shows the two verdicts apart. The reporter recomputes every five minutes, so `at` is recent. It sends no trace: the verdict rests on the containers and ready endpoints (Grafana's included), the collector's send and enqueue failures and queue fill, 503s on ingest, Tempo's discards, disk space and data age. Delivery to both backends is proven by the deploy's canary, not by `/healthz`.
 
 3. Compare the route's configured state with what the outside world sees:
 
@@ -82,7 +82,7 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
    bunx @marcusrbrown/infra traces logs collector --tail 200
    ```
 
-   Services: `caddy`, `collector`, `langfuse-web`, `langfuse-worker`, `clickhouse`, `minio`, `redis`, `postgres`, `tempo`, `grafana`, `health-reporter`. Logs can hold prompt text, tool output, private repository content and database passwords. Do not paste them into an issue, a chat or a shared log. The command refuses in CI without `--allow-ci`.
+   Services: `caddy`, `collector`, `langfuse-web`, `langfuse-worker`, `clickhouse`, `minio`, `redis`, `postgres`, `tempo`, `grafana`, `prometheus`, `health-reporter`. Logs can hold prompt text, tool output, private repository content and database passwords. Do not paste them into an issue, a chat or a shared log. The command refuses in CI without `--allow-ci`.
 
 ### What the monitor checks
 
@@ -143,10 +143,13 @@ The alert text carries nothing the endpoint said. The exact reason is in the pro
 | `bootstrap-key` | the bootstrap pair is not supplied and Langfuse answers 401 to it |
 | `bootstrap-variables` | no `LANGFUSE_INIT_PROJECT_*KEY` value is in the host `.env` or in a running container |
 | `grafana-signin` | after the route is final, Grafana accepts the admin password file (200) |
+| `grafana-alerting` | after the sign-in check passes, Grafana lists the Discord contact point and every alert rule group the files define |
+| `prometheus-ready` | after the route is set, the Prometheus image was pulled, the container created, its data volume handed to `nobody` and it started ready (`/-/ready`) |
+| `grafana-ready` | after the route is set, the Grafana image was pulled and it started healthy |
 
 The canary is the only synthetic trace. The deploy sends it once, after the reporter's verdict is fresh, by running `health-report.ts --canary-once` inside the reporter's container; it lands in the Langfuse environment `canary`. The reporter's periodic run sends none, so a quiet stack holds no routine synthetic traces. If the canary command fails, prints something unreadable or any canary check is not `pass`, the `canary` gate fails and the route stays closed (an open route is held).
 
-The route opens only when every gate passes, except `grafana-signin`: Grafana is an operator UI and does not decide the route. A failing `grafana-signin` leaves the route as the other gates set it and fails the run afterwards (see [Grafana sign-in check fails](#grafana-sign-in-check-fails)). Gate design is in [Holding, gates and the route](../../apps/traces/AGENTS.md#holding-gates-and-the-route).
+The route opens only when every gate passes, except `grafana-signin`, `grafana-alerting`, `prometheus-ready` and `grafana-ready`: Grafana and Prometheus raise the alarm and carry no trace, so they do not decide the route, and they are pulled and started only after it is final. A failing one leaves the route as the other gates set it and fails the run afterwards (see [Grafana sign-in check fails](#grafana-sign-in-check-fails) and [Grafana alerting check fails](#grafana-alerting-check-fails)). Gate design is in [Holding, gates and the route](../../apps/traces/AGENTS.md#holding-gates-and-the-route).
 
 ### Outcomes
 
@@ -155,7 +158,7 @@ The route opens only when every gate passes, except `grafana-signin`: Grafana is
 | `Ingest is open: every ingest path reached the collector and asked for a token` | every gate passed; 401 proven on all three paths from inside the host | nothing |
 | `Ingest is OFF. Gates not met:` (or `HELD`) | the deploy completed, but a gate is not met and the route stays closed (an open route is held). `ingest-variable` and `langfuse-key` end here | meet the named gate and deploy again. `ingest-variable` fails while `TRACES_INGEST_OPEN` is unset or anything but exactly `true` |
 | `Gates failed: <gate>: <detail>` | the key pair is set and a safety gate failed. An open route is held first | fix the named gate and deploy again |
-| `The stack was deployed, but an operator-surface check failed.` | only `grafana-signin` failed. The route is where the other gates left it (the message says which) | [Grafana sign-in check fails](#grafana-sign-in-check-fails) |
+| `The stack was deployed, but an operator-surface check failed.` | only `grafana-signin`, `grafana-alerting`, `prometheus-ready` or `grafana-ready` failed (for the last two, the pull or the start failed: `traces logs prometheus` or `traces logs grafana`, then deploy again, which recreates both; the route is untouched). When `grafana-ready` fails, the two Grafana checks are skipped and the log says so. The route is where the other gates left it (the message says which) | [Grafana sign-in check fails](#grafana-sign-in-check-fails), [Grafana alerting check fails](#grafana-alerting-check-fails) |
 | `Applied but unverified: the host was updated and the update did not verify.` | the host changed and a later step failed. The message says whether ingest is held, off, or "may be open" | if it says "may be open", run `bunx @marcusrbrown/infra traces ingest hold` now. Fix the cause named in the message and deploy again. Only a deploy that passes every gate reopens ingest |
 | `The files could not be compared with the host` | nothing was written. The marker stays, so the next deploy holds an open route first | deploy again once the host answers |
 | `Another deploy started on this host and took over` | a newer deploy owns the host; this one stopped and changed nothing further | follow the newer deploy |
@@ -174,6 +177,19 @@ traces_ssh 'docker compose --project-directory /mnt/traces/app stop grafana && d
 ```
 
 The volume is `traces_grafana_data` (the compose project is `traces`, the volume is `grafana_data`). Then run the deploy again: it recreates Grafana, which creates its database with the password from the file, and the check passes. Confirm the secret directory and the user first if it fails again: `docker compose --project-directory /mnt/traces/app exec -T grafana id` must print `uid=472 gid=472`, and `ls -ld /mnt/traces/app/secrets/grafana` must show `root 472` and `drwxr-x---`.
+
+### Grafana alerting check fails
+
+After the sign-in check passes, the deploy reads Grafana's provisioning API from the host, twice and read-only, and expects the contact point `traces-discord` with type `discord` and every rule group the files define (`stack` 4, `collector` 3, `tempo` 2, `storage` 4). It sends no test notification. The error says which part is wrong:
+
+| Message | Cause | Do |
+| --- | --- | --- |
+| `the Discord contact point (uid traces-discord) is not provisioned` | Grafana did not load `config/grafana/alerting/contact-points.yaml`, usually because it refused the file | `traces logs grafana --tail 200` and search for `provisioning`; fix the file named; deploy again |
+| `rule group missing or incomplete: <group> (<n> of <m>)` | Grafana refused `rules.yaml`, or a rule was deleted in the UI (a file-provisioned rule cannot be edited there) | the same log; a rule removed by hand returns on the next Grafana restart, so deploy again |
+| `Grafana refused the ... (HTTP 401 ...)` | the admin password changed after the sign-in check, or Grafana restarted | deploy again |
+| `its answer could not be read` | the host command failed or printed something unrecognised | deploy again; if it repeats, run the command by hand: `traces_ssh 'cd /mnt/traces/app && ls config/grafana/alerting'` |
+
+A missing `TRACES_DISCORD_WEBHOOK_URL` never gets this far: the deploy refuses it before any SSH call, and Grafana does not start without it.
 
 ### Deploying from a checkout
 
@@ -543,6 +559,46 @@ Delete nothing at any stage. A leftover restore volume and the previous volume a
 ---
 
 ## Alerts and Discord
+
+There are two alert paths, and they do not depend on each other.
+
+1. **Grafana-managed trace alerts.** Prometheus scrapes the collector, Tempo, the health reporter and itself every 30 s; Grafana evaluates the rules in the folder `Traces stack` and posts to a Discord webhook. This is the ongoing path for failures of a running stack. [What the trace alerts are](#what-the-trace-alerts-are) lists the rules.
+2. **The external monitor and the backup** (the table below): GitHub Actions workflows that open an issue and post to Discord. They stay as the independent check from outside the host, and they catch a stack whose Grafana or Prometheus is down.
+
+### What the trace alerts are
+
+| Rule | Severity | Means | Do |
+| --- | --- | --- | --- |
+| `TracesTargetDown` | critical | Prometheus cannot scrape a target for 5 m, or cannot be queried at all | `traces status`; `traces logs <job>` (`otelcol` is the collector); if every target is down, `traces logs prometheus` |
+| `LangfuseDown` | critical | Langfuse web or worker unhealthy for 5 m. Traces may be accepted and not stored | `traces logs langfuse-worker` / `langfuse-web` |
+| `GrafanaDown` | critical | Grafana unhealthy for 5 m. The health path fails too, and the external monitor reports it | `traces logs grafana` |
+| `ReporterStale` | warning | the reporter's last run finished over 15 m ago, or none is on record | `traces logs health-reporter`; the verdict and every reporter gauge are stale |
+| `CollectorQueueFilling` | warning | an exporter queue is at 0.8 or more of its capacity for 5 m; at full, ingest answers 503 | `traces logs collector`; check the backend the exporter feeds |
+| `CollectorExportFailures` | critical | the collector failed to send or queue spans in the last 30 m. Those spans are lost | the same, then the backend named by the `exporter` label |
+| `IngestRefused503` | critical | ingest answered 503 in the last 30 m (the canary route excluded): a queue was full | read `CollectorQueueFilling` and the exporter's backend |
+| `TempoDiscards` | critical | Tempo discarded spans in the last 30 m; the `reason` label says why | `traces logs tempo` |
+| `TempoAttributeTruncation` | info | Tempo cut long attribute values at its limit in the last 30 m. Nothing else was lost | none unless it is new and frequent |
+| `VolumeSpaceWarning` / `VolumeSpaceCritical` | warning / critical | the data volume is 0.70 / 0.85 full | free space or grow the volume before the stores stop |
+| `RootSpace` | critical | the root disk is 0.85 full | `docker system df`; the logs and image layers |
+| `DataOlderThan31d` | critical | a store holds data older than 31 days (the `store` label) | retention is 30 days: check the TTL and the lifecycle rule, then the next deploy's retention step |
+
+Where they go: one Discord channel, through the webhook in the `traces` Environment secret `TRACES_DISCORD_WEBHOOK_URL`. Grafana groups alerts by rule name, sends the first message 30 s after the first alert, repeats a still-firing alert every 4 hours and sends a resolution message. A message is fixed text, the rule name, its labels and numbers: never a span, a log line or a body. The deploy writes the address into the host `.env` (mode 0600, on the encrypted volume), and only Grafana's container receives it.
+
+**Absent data.** The failure counters are not exported until their first failure, so an absent counter is "no failure" and never alerts. That also means `increase()` cannot see the first failure on a new series (absent, then 1, then 1 is no increase), so each loss rule also fires on a series that is present now and was absent 5 minutes ago, when the target was scraped then. The first failure of a new exporter, a new Tempo discard reason or a first ingest 503 therefore alerts within minutes of the first scrape that shows it, and that alert resolves after 5 minutes (a rise after that is the 30 minute `increase()` half's). Two limits come with it: on the first scrape after a start (Prometheus just started, or the target was down 5 minutes ago) an old count does not page, and a series that first appears with less than 5 minutes of the target's history is not alerted. `TracesTargetDown` and `ReporterStale` alert on no data, because they read series that always exist.
+
+**A Prometheus outage is caught three ways.** The reporter's `prometheus-health` check (`/-/ready`) fails, which fails `/healthz` and so the external monitor (`healthz-503`); `TracesTargetDown` fires on a failing query (`execErrState: Alerting`) once Grafana can still post; and `TracesTargetDown` also fires when Prometheus is up and a target is not. Every other rule keeps its last state on a query error, so an outage neither resolves a firing alert nor starts new ones. If Prometheus is down, Grafana cannot post the rules' alerts at all: the `/healthz` path and the monitor's issue are what tell you. During a restore or a rebuild expect `TracesTargetDown` and `ReporterStale`.
+
+**Monitoring never holds ingest.** `traces status` and `/detail` show two verdicts: the ingest verdict (the collector, Tempo, Langfuse, disk and data age) and the monitoring verdict (`grafana-health` and `prometheus-health`). `/healthz` fails when either does. `traces ingest open` and the deploy's `reporter-verdict` gate read the ingest verdict only, so a dead Grafana or Prometheus does not stop an open, and does not make a deploy hold an open route. Prometheus and Grafana are pulled and started after the route is decided, never in the route-critical pull or start: a failed pull or start fails the run with `prometheus-ready` or `grafana-ready`, and the route is untouched. To bring monitoring back, fix the service (`traces logs prometheus`, `traces logs grafana`) and deploy again.
+
+**Set up the webhook once.** In the Discord channel: Edit Channel, Integrations, Webhooks, New Webhook, Copy Webhook URL. Set it as the `traces` Environment secret (`gh secret set TRACES_DISCORD_WEBHOOK_URL --env traces --repo marcusrbrown/infra`, pasting at the prompt; never as an argument) and as `TRACES_DISCORD_WEBHOOK_URL` in the repo-root `.env` for a local deploy. Then deploy. The deploy checks that Grafana loaded the contact point; it sends no message. To see one arrive, open Grafana through the tunnel (`traces open`, then `http://localhost:3001`), go to Alerting, Contact points, `Traces Discord`, Test. That is the one place a test message is sent, and only by you.
+
+**Rotate or revoke the webhook.** Delete the webhook in Discord (revokes it at once), create a new one, set the secret and deploy. The deploy rewrites `.env` and recreates Grafana; as for any `.env` change on an open route, it holds ingest while it does.
+
+**Silence an alert.** Open Grafana through the tunnel (`traces open`, `http://localhost:3001`, sign in as `admin`), then Alerting, Silences, New silence. Match on `alertname` (for example `VolumeSpaceWarning`), set an end time, and add a comment. A silence stops the notification and not the evaluation, so the alert still shows as firing in Alerting, Alert rules, and the message returns when the silence ends. Silences live in Grafana's database, and survive a deploy. Rules are provisioned from files and cannot be edited in the UI; to change a threshold, edit `config/grafana/alerting/rules.yaml` and deploy.
+
+**Look at the data.** In Grafana, Explore, choose the `Prometheus` data source and run, for example, `traces_disk_used_ratio` or `otelcol_exporter_queue_size`. Prometheus keeps 15 days. It has no UI path of its own.
+
+### Monitor and backup alerts
 
 | Label | Opened by | Closes when |
 | --- | --- | --- |

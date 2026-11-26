@@ -178,6 +178,15 @@
       allowedVersions: '/^26\\.3\\./',
     },
     {
+      // Prometheus answers the trace stack's alert queries. It stays on the 3.13 line, the one the alert rules and the
+      // scrape config were checked against; moving to the next line is an edit of this ceiling in a reviewed PR. Docker
+      // Hub tags carry a `v` prefix.
+      description: ['Keep the trace stack Prometheus on the 3.13 line'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: ['prom/prometheus'],
+      allowedVersions: '/^v?3\\.13\\./',
+    },
+    {
       // Langfuse supports and tests Redis 7, and a Redis 7 server may not read data written by Redis 8.
       description: ['Hold the trace stack Redis at major 7'],
       matchFileNames: ['apps/traces/docker-compose.yaml'],

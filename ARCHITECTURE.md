@@ -43,7 +43,7 @@ Role → path. Reference symbols and files; no line numbers (they rot).
 | Broker mint/revoke client | `apps/broker/src/mint.ts` (`mintKey`, `revokeKey`, `listApiKeys`, single-flight lock) |
 | Broker sweeper | `apps/broker/src/sweeper.ts` (`sweepExpired`, `reconcile`, `startupReconcile`, `startSweeper`) |
 | Broker CLI command group | `packages/cli/src/commands/broker/` (`status.ts`, `deploy.ts`, `logs.ts`, `index.ts` → `registerBrokerCommands`) |
-| Traces stack | `apps/traces/docker-compose.yaml`, `apps/traces/config/` (`Caddyfile`, `ingest/` route states, `otelcol.yaml`, `tempo.yaml`), `apps/traces/collector/` (builder manifest and Dockerfile for the collector image) |
+| Traces stack | `apps/traces/docker-compose.yaml`, `apps/traces/config/` (`Caddyfile`, `ingest/` route states, `otelcol.yaml`, `tempo.yaml`, `prometheus/`, `grafana/` data sources and alerting), `apps/traces/collector/` (builder manifest and Dockerfile for the collector image) |
 | Traces deploy and host checks | `apps/traces/src/deploy.ts`, `apps/traces/src/host.ts`, `apps/traces/src/retention.ts` |
 | Traces health reporter | `apps/traces/src/health-report.ts` |
 | Traces CLI command group | `packages/cli/src/commands/traces/` (`status.ts`, `deploy.ts`, `logs.ts`, `open.ts`, `ingest.ts`, `sender.ts`, `index.ts` → `registerTracesCommands`) |

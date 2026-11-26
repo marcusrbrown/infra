@@ -104,7 +104,7 @@ Mechanics: [`.github/workflows/opencode-go-privacy.yaml`](../../../.github/workf
 
 ### An open restricting PR is an exposure window
 
-A restricting PR does not change the served model list until merge and deploy approval. Notify on restrictions while the PR is open; if no model remains eligible, use the [emergency disable](../../runbooks/cliproxy-opencode-go.md#emergency-disable-without-a-deploy). On 2026-11-25 #2085 restricted two models and sat unnoticed for about 16 hours before it merged; the notice came with #2099.
+A restricting PR does not change the served model list until it merges and the gated cliproxy deploy successfully applies the restricted list; approval alone does not end the exposure. Confirm the deploy log reports the new eligible count and that `cliproxy models opencode-go` no longer lists the restricted models. Notify on restrictions while the PR is open; if no model remains eligible, use the [emergency disable](../../runbooks/cliproxy-opencode-go.md#emergency-disable-without-a-deploy). On 2026-11-25 #2085 restricted two models and sat unnoticed for about 16 hours before it merged; the notice came with #2099.
 
 When the notice links the PR, look it up by same-repository head. `gh pr list --head <branch>` matches the branch name across forks, so filter on `isCrossRepository` as the stale-PR lookup does (`.github/workflows/opencode-go-privacy.yaml:208`).
 

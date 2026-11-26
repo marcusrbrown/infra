@@ -58,7 +58,7 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
    - **429** is the byte limiter working: a sender spent its 1 GiB allowance and is refilling at 32 KiB/s. It shows in `requests` (`429=<n>`) and in `refusedSpans`, and it does **not** fail the verdict, so it does not file `traces-unhealthy` or block `ingest open`.
    - **503** fails `collector-refused` for 30 minutes after the count last rose. It means an exporter queue is full and the collector is shedding data: read `collector-queues`, then `traces logs collector`. The 503 count covers the three authenticated receivers together; it cannot say which group.
    - **401** includes the public monitor's deliberate unauthenticated `POST` to `/workstation/v1/traces` every 15 minutes (about 96 a day) and deploy-gate probes, so the 401 count cannot diagnose a sender. To diagnose a revoked sender token, check the sender's `undelivered` or `dropped` log lines and its latest trace in Langfuse.
-   - `refusedSpans` counts spans answered 429 or 503, so it can be above zero on a healthy stack, and it stays at zero for a sender refused with 401.
+   - `refusedSpans` counts spans answered 429 or 503, so it can be above zero on a healthy stack, and a 401 does not increment it: the counter is cumulative per group, so a sender refused with 401 changes nothing there.
 
 2. Read the public health path, which needs no SSH:
 

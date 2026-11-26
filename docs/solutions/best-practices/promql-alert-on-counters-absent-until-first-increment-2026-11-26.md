@@ -23,7 +23,7 @@ Loss counters such as the collector's export-failure counters and Tempo's discar
 
 **Why `increase()` misses it.** A series that is absent, then appears at 1 and stays at 1, has the same first and last sample in the window. The increase is 0, so nothing alerts.
 
-**Use two halves joined by `or`.** One half catches a series that rose. The other catches a series that exists now and did not 5 minutes ago, behind a guard that the target was up 5 minutes ago:
+**Use two halves joined by `or`.** One half catches a series that rose. The other catches a series that exists now and did not 5 minutes ago, behind a guard that its single scrape target was already being scraped 5 minutes ago:
 
 ```promql
 (sum by (exporter) (increase(x[30m])) > 0)
@@ -32,7 +32,9 @@ or
    and on() (up{job="otelcol"} offset 5m == 1))
 ```
 
-The tradeoff: the new-series half fires for the 5 minutes after the series appears, and a series that first appears with less than 5 minutes of the target's history does not alert. Without the guard, a restart would page on an old count.
+What the guard does: a series already present at the target's first scrape (an old count after a restart) never counts as new, because by the time the target has 5 minutes of history the series has too. A series that appears within the target's first 5 minutes is not suppressed but alerts late, from minute 5 until 5 minutes after it appeared. The new-series half fires for at most 5 minutes; a later rise is the `increase()` half's.
+
+`and on()` with an empty match list lets any series of the guard satisfy it for every exporter. That is correct here only because the job has one target. For a job with several targets, match the guard to each target's own history (for example `and on(instance)`, keeping `instance` through the aggregation) before aggregating.
 
 **Do not merge counters by name.** `increase()` drops the metric name. One `__name__` regex over two counters of the same exporter then yields two series with one labelset, and the query fails at evaluation time with a duplicate-labelset error. `promtool check rules` accepts such a query. `promtool test rules` catches it. Give each counter its own label with `label_replace`, join with `or`, then aggregate. A plain `+` is no fix: it drops every series missing from one side.
 

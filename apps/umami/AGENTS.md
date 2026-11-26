@@ -399,7 +399,7 @@ The check must have zero null timestamps and a stable orphan baseline. Review th
 Do not run this block until the backup receipt is verified and the pre-check output has been reviewed. The prompt is an intentional second gate; typing anything else exits without applying. Stay present for the complete output. Do not batch, parallelize, or retry a failed apply without investigation:
 
 ```bash
-read -r -p 'Verified backup and reviewed pre-check; type APPLY UMAMI RETENTION to continue: ' APPROVAL
+printf 'Verified backup and reviewed pre-check; type APPLY UMAMI RETENTION to continue: '; read -r APPROVAL
 if [[ "$APPROVAL" != 'APPLY UMAMI RETENTION' ]]; then
   printf 'apply not authorized; timer remains unchanged\n' >&2
   exit 1
@@ -463,7 +463,7 @@ The public surfaces are `https://fro.bot/systematic` and `https://mrbro.dev/dev-
 Only after the supervised apply and post-check are successful, type the approval phrase and enable the timer. Because the timer has `Persistent=true`, `systemctl enable --now` may immediately trigger a catch-up retention service run when an already-enabled timer has a recorded missed activation. `Persistent=true` does not guarantee a catch-up on first-ever enable because no prior timer stamp exists; the next scheduled run may be the first timer edge. That is safe only because the supervised apply and post-check already passed and `--apply` is idempotent and advisory-locked. Stay present for the complete possible catch-up run.
 
 ```bash
-read -r -p 'Supervised apply and post-check passed; type ENABLE UMAMI RETENTION to continue: ' APPROVAL
+printf 'Supervised apply and post-check passed; type ENABLE UMAMI RETENTION to continue: '; read -r APPROVAL
 if [[ "$APPROVAL" != 'ENABLE UMAMI RETENTION' ]]; then
   printf 'timer remains disabled\n' >&2
   exit 1

@@ -561,9 +561,23 @@ const createFails = (request: DoRequest): Response | undefined =>
   request.method === 'POST' ? Response.json({}, {status: 500}) : undefined
 
 describe('backup: the read-back after a create is retried while the listing catches up', () => {
-  it('pins the bounds: 6 attempts, 5 seconds apart', () => {
-    expect(READBACK_ATTEMPTS).toBe(6)
-    expect(READBACK_INTERVAL_MS).toBe(5000)
+  it('pins the bounds: 12 attempts, 10 seconds apart', () => {
+    expect(READBACK_ATTEMPTS).toBe(12)
+    expect(READBACK_INTERVAL_MS).toBe(10_000)
+  })
+
+  // 2026-11-25: the listing lagged more than 30 s behind a snapshot that existed.
+  it('succeeds when the created snapshot first appears on attempt 10', async () => {
+    const fake = fakeDo({
+      snapshots: [daily(30)],
+      override: firstListings(9, () => Response.json({snapshots: [], links: {}})),
+    })
+    const run = await backup(fake)
+
+    expect(run.outcome).toMatchObject({exitCode: 0, created: true, failures: []})
+    expect(listingCount(fake)).toBe(10)
+    expect(run.sleeps).toEqual(Array.from({length: 9}, () => READBACK_INTERVAL_MS))
+    expect(fake.creates()).toHaveLength(1)
   })
 
   // Mutation target: removing the retry fails this and the next one.

@@ -40,8 +40,8 @@
  * Order and guards:
  * 1. Create `traces-<yyyymmdd>-<hhmm>` (UTC) with the tag. A failure is recorded and the run goes on.
  * 2. Read the snapshots back. When the create succeeded, it must be listed and be the newest daily snapshot. The listing
- *    can lag a just-created snapshot, so after a create the read-back is retried (6 attempts, 5 s apart) while it is
- *    malformed or does not hold the created id yet. With no create it is one listing.
+ *    can lag a just-created snapshot, so after a create the read-back is retried (12 attempts, 10 s apart, about 2
+ *    minutes) while it is malformed or does not hold the created id yet. With no create it is one listing.
  * 3. The newest daily snapshot must be at most 36 hours old, or the run fails.
  * 4. Prune only when step 3 passed: a broken backup must not also erase history. Delete our snapshots older than 8 days,
  *    oldest first, at most 10 a run, so a wrong clock or a long backlog cannot wipe the history in one run.
@@ -130,9 +130,9 @@ export const MAX_DELETES_PER_RUN = 10
  * After a create, the read-back listing is tried at most this many times. DigitalOcean's listing can lag a snapshot that
  * was created a moment ago, or answer in a shape it does not hold a few seconds later.
  */
-export const READBACK_ATTEMPTS = 6
+export const READBACK_ATTEMPTS = 12
 /** The pause between two read-back attempts. */
-export const READBACK_INTERVAL_MS = 5000
+export const READBACK_INTERVAL_MS = 10_000
 
 const MAX_PAGES = 50
 const REQUEST_TIMEOUT_MS = 30_000

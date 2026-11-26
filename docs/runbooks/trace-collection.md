@@ -383,7 +383,7 @@ One issue labelled `traces-backup-failure`, titled "Trace data backup is failing
 | `do-api:<stage>:timeout`, `:network`, `:http-5xx`, `:malformed:*` | transient API trouble: dispatch a backup by hand |
 | `droplet-not-found`, `droplet-ambiguous` | no droplet, or more than one, is named `traces` |
 | `volume-not-found`, `volume-ambiguous` | no `traces-data*` volume, or more than one, is attached to the droplet: see [Interrupted restore](#interrupted-restore) |
-| `created-snapshot-not-listed`, `created-snapshot-not-newest` | the listing did not show the new snapshot within about 30 seconds: dispatch a backup by hand |
+| `created-snapshot-not-listed`, `created-snapshot-not-newest` | the listing did not show the new snapshot within about 2 minutes (12 attempts, 10 seconds apart): dispatch a backup by hand |
 | `newest-snapshot-too-old` | no daily snapshot in the last 36 hours, so nothing was pruned: dispatch a backup by hand |
 
 A snapshot is taken while the stack runs. ClickHouse, PostgreSQL and the object store come back complete from one; see [What a restore brings back](#what-a-restore-brings-back) for Tempo.

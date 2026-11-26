@@ -12,17 +12,19 @@
 //   5. compare every file with the host. If ingest is open and a gated service (the collector, a backend or
 //      their configuration) is about to change, hold the route (503), and prove it from inside the host
 //   6. write directories, deny-all token files (only if absent), secret files, configs and the reporter source
-//   7. prune images, check free space, pull
-//   8. start the stores and Langfuse, assert and read back retention, start Tempo, Grafana, the collector and the
-//      reporter, verify the collector's image digest
+//   7. prune images, check free space, pull the ingest services (never Grafana or Prometheus)
+//   8. start the stores and Langfuse, assert and read back retention, start Tempo, the collector and the reporter,
+//      verify the collector's image digest
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
 //      `true`; otherwise off (first bring-up) or held (it was open before). The canary gate sends the deploy's one
 //      canary (the reporter's `--canary-once` mode, by exec) once the reporter's verdict is fresh
-//  10. start Prometheus, then remove the deploy marker, which ends the route's work. Prometheus is monitoring, not the
-//      route: it starts only after the route is decided, as an operator gate (`prometheus-ready`), so a failure to
-//      start it fails the run and never holds or closes ingest. Only then check Grafana's sign-in (the password file
-//      works) and its provisioned alerting (the Discord contact point and the rule groups exist): read-only, after the
-//      route is final, and a failure fails the run (`OperatorSurfaceError`) without touching the route
+//  10. pull and start the monitoring services, Prometheus and then Grafana, then remove the deploy marker, which ends
+//      the route's work. They are monitoring, not the route: they are pulled and started only after the route is decided,
+//      each as an operator gate (`prometheus-ready`, `grafana-ready`), so a failed pull or start fails the run and never
+//      holds or closes ingest. Both are recreated on every deploy, so a changed file of theirs is applied here. Only
+//      then check Grafana's sign-in (the password file works) and its provisioned alerting (the Discord contact point
+//      and the rule groups exist), unless Grafana did not start: read-only, after the route is final, and a failure
+//      fails the run (`OperatorSurfaceError`) without touching the route
 //
 // Overlapping deploys: the last deploy to start owns the host. Each deploy writes a random id into the deploy marker
 // in its first host script; every later script that changes the host checks, in the same script, that the marker
@@ -300,6 +302,18 @@ export const SERVICES = [
 ] as const
 
 export type Service = (typeof SERVICES)[number]
+
+/**
+ * The services that only raise the alarm: Grafana (it owns the alert rules) and Prometheus (it holds the metrics they
+ * read). No trace passes through either, nothing in the compose file depends on either, and neither is gated. They are
+ * pulled and started after the route is decided, as operator gates, so a failure of either never holds or closes ingest.
+ */
+export const MONITORING_SERVICES = ['grafana', 'prometheus'] as const satisfies readonly Service[]
+
+/** Every other service: the ones the route depends on. The route-critical pull and start cover these and no others. */
+export const INGEST_SERVICES: readonly Service[] = SERVICES.filter(
+  service => !(MONITORING_SERVICES as readonly string[]).includes(service),
+)
 
 /**
  * The services whose change puts data or the public route at risk: the collector, the backends and their
@@ -1217,8 +1231,14 @@ export function pruneScript(id: string): string {
   return composeStep('prune-images', id, 'docker image prune -af')
 }
 
-export function pullScript(id: string): string {
-  return composeStep('pull', id, `timeout 1800 ${COMPOSE} pull`)
+/**
+ * `docker compose pull` for named services only (the ingest services by default). An unscoped pull would take the
+ * monitoring images into the route-critical step, where a registry failure on one of them holds ingest.
+ */
+export function pullScript(id: string, name = 'pull', services: readonly string[] = INGEST_SERVICES): string {
+  for (const service of services) assertService(service)
+  if (services.length === 0) throw new Error('pullScript needs at least one service')
+  return composeStep(name, id, `timeout 1800 ${COMPOSE} pull ${services.join(' ')}`)
 }
 
 export interface UpOptions {
@@ -1649,6 +1669,7 @@ export type GateId =
   | 'grafana-signin'
   | 'grafana-alerting'
   | 'prometheus-ready'
+  | 'grafana-ready'
 
 export interface GateResult {
   id: GateId
@@ -2392,12 +2413,26 @@ export async function performDeploy(
   deps: DeployDeps,
 ): Promise<DeployResult> {
   const routed = await runDeploy(inputs, rawExec, deps)
-  const grafana = evaluateGrafana(await awaitGrafanaSignIn(rawExec, deps))
+  // Both Grafana checks need Grafana. When it did not start (`grafana-ready` is the failure) they are not run: the
+  // sign-in check would spend its whole retry window on a service that is not there.
+  const grafanaDown = routed.gates.some(gate => gate.id === 'grafana-ready' && gate.status !== 'pass')
+  const notRun = (id: 'grafana-signin' | 'grafana-alerting', why: string): GateResult => ({
+    id,
+    status: 'skipped',
+    detail: `not run: ${why}`,
+    kind: 'operator',
+  })
+  const grafana = grafanaDown
+    ? notRun('grafana-signin', 'Grafana did not start (see grafana-ready)')
+    : evaluateGrafana(await awaitGrafanaSignIn(rawExec, deps))
   // The alerting check signs in again. After a refused password it is not run: that would be one more failed login.
   const alerting: GateResult =
     grafana.status === 'pass'
       ? evaluateGrafanaAlerting(await awaitGrafanaAlerting(rawExec))
-      : {id: 'grafana-alerting', status: 'skipped', detail: 'not run: the sign-in check did not pass', kind: 'operator'}
+      : notRun(
+          'grafana-alerting',
+          grafanaDown ? 'Grafana did not start (see grafana-ready)' : 'the sign-in check did not pass',
+        )
   for (const line of describeGates([grafana, alerting])) deps.log(`  ${line}`)
   const result: DeployResult = {...routed, gates: [...routed.gates, grafana, alerting]}
   const failed = failedOperatorGates(result.gates)
@@ -2490,23 +2525,47 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
   }
 
   /**
-   * Prometheus is monitoring, not the route. It starts here, after the route is decided and proven, and its failure is
-   * a result and not an exception: it must not reach the failure handler below, which would hold the route. The steps
-   * are guarded like every other change to the host (a refusal is the one thing that is rethrown), and it is recreated
-   * on every deploy, as the reporter is, so a changed `prometheus.yml` needs no pending-restart record. Nothing else
-   * waits for it: the alert rules read it, and the reporter's `prometheus-health` check says when it is down.
+   * One monitoring service: pulled, then started, as an operator gate. Its failure (a registry that does not answer, a
+   * digest that is not there, a start that does not come up healthy, a volume that cannot be handed over) is a result
+   * and not an exception: it must not reach the failure handler below, which would hold the route. Every step is
+   * guarded like any other change to the host, and a refusal (another deploy owns the host, or its step is running)
+   * is the one thing rethrown, since it ends this deploy. The service is recreated on every deploy, as the reporter
+   * is, so a changed file of its own (`prometheus.yml`, a Grafana provisioning file) is applied here, and a start that
+   * failed last time is retried even though the files then match the host's: no pending-restart record is needed.
    */
-  const startPrometheus = async (): Promise<GateResult> => {
-    log(
-      '==> Starting Prometheus (after the route is decided; a failure here fails the run and never touches the route)',
-    )
+  const startMonitoringService = async (
+    id: 'prometheus-ready' | 'grafana-ready',
+    label: string,
+    run: () => Promise<unknown>,
+  ): Promise<GateResult> => {
     const gate = (pass: boolean, detail: string): GateResult => ({
-      id: 'prometheus-ready',
+      id,
       status: pass ? 'pass' : 'fail',
       detail,
       kind: 'operator',
     })
     try {
+      await run()
+      return gate(true, `${label} was pulled, started and reports healthy`)
+    } catch (error) {
+      if (ownership.overtaken || error instanceof DeployStepBusyError) throw error
+      return gate(false, `${label} did not start (${clip(errorMessage(error))}). Ingest is not affected.`)
+    }
+  }
+
+  /**
+   * Prometheus and Grafana, after the route is decided and proven. Nothing here is in the route-critical pull or start.
+   * The two are independent: one failing does not stop the other. Prometheus goes first, because Grafana's alert rules
+   * read it.
+   */
+  const startMonitoring = async (): Promise<GateResult[]> => {
+    log(
+      '==> Pulling and starting Prometheus and Grafana (after the route is decided; a failure here fails the run and never touches the route)',
+    )
+    const prometheus = await startMonitoringService('prometheus-ready', 'Prometheus', async () => {
+      await sh('Pull the Prometheus image', pullScript(deployId, 'pull-prometheus', ['prometheus']), [
+        STEP_SENTINEL('pull-prometheus'),
+      ])
       await sh('Create the Prometheus container', createPrometheusScript(deployId), [
         STEP_SENTINEL('create-prometheus'),
       ])
@@ -2514,21 +2573,25 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       await sh('Start Prometheus', upScript(deployId, 'up-prometheus', ['prometheus'], {force: true}), [
         STEP_SENTINEL('up-prometheus'),
       ])
-      return gate(true, 'Prometheus started and reports healthy')
-    } catch (error) {
-      // Another deploy owns the host, or its step is running: that is not Prometheus, and it ends this deploy.
-      if (ownership.overtaken || error instanceof DeployStepBusyError) throw error
-      return gate(false, `Prometheus did not start (${clip(errorMessage(error))}). Ingest is not affected.`)
-    }
+    })
+    const grafana = await startMonitoringService('grafana-ready', 'Grafana', async () => {
+      await sh('Pull the Grafana image', pullScript(deployId, 'pull-grafana', ['grafana']), [
+        STEP_SENTINEL('pull-grafana'),
+      ])
+      await sh('Start Grafana', upScript(deployId, 'up-grafana', ['grafana'], {force: true}), [
+        STEP_SENTINEL('up-grafana'),
+      ])
+    })
+    return [prometheus, grafana]
   }
 
   /** The very last step of a deploy that evaluated every gate and left the route in its final state. */
   const finish = async (result: DeployResult): Promise<DeployResult> => {
-    const prometheus = await startPrometheus()
-    for (const line of describeGates([prometheus])) log(`  ${line}`)
+    const monitoring = await startMonitoring()
+    for (const line of describeGates(monitoring)) log(`  ${line}`)
     // Compare-and-delete under the ingest lock: only the deploy that owns the marker removes it.
     await sh('Remove the deploy marker', removeOwnFileScript(deployId, MARKER_FILE), [REMOVED_SENTINEL])
-    return {...result, gates: [...result.gates, prometheus]}
+    return {...result, gates: [...result.gates, ...monitoring]}
   }
 
   // `compare`: nothing on the host has changed yet. `stage`: files and the route may have. `apply`: the stack has.
@@ -2721,15 +2784,15 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       }
     }
 
-    log('==> Starting Tempo, Grafana, the collector and the reporter')
-    const publicServices: Service[] = ['tempo', 'grafana', 'collector']
+    log('==> Starting Tempo, the collector and the reporter')
+    const publicServices: Service[] = ['tempo', 'collector']
     const staleOthers = stale(publicServices)
     if (staleOthers.length > 0) {
       await sh('Recreate changed services', upScript(deployId, 'up-stale-public', staleOthers, {force: true}), [
         STEP_SENTINEL('up-stale-public'),
       ])
     }
-    await sh('Start Tempo, Grafana and the collector', upScript(deployId, 'up-public', publicServices), [
+    await sh('Start Tempo and the collector', upScript(deployId, 'up-public', publicServices), [
       STEP_SENTINEL('up-public'),
     ])
 

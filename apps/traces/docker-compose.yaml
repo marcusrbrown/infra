@@ -299,7 +299,7 @@ services:
       - prometheus_data:/prometheus
     networks: [edge, backend]
     healthcheck:
-      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:9090/-/healthy || exit 1']
+      test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:9090/-/ready || exit 1']
       interval: 10s
       timeout: 5s
       retries: 10

@@ -463,6 +463,7 @@ export class FakeHost {
       }
       case step === 'prune-images':
       case step === 'pull':
+      case step.startsWith('pull-'):
       case step === 'create-collector':
       case step === 'create-prometheus': {
         return ok(`epoch=${this.clock}\nTRACES_STEP_OK:${step}\n`)

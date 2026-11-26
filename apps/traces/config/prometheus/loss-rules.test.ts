@@ -4,8 +4,8 @@ import {describe, expect, it, setDefaultTimeout} from 'bun:test'
 setDefaultTimeout(120_000)
 
 // The four loss rules count a counter that is not exported until its first increment. `increase()` sees nothing on
-// a series that goes absent, then 1, then flat, so each rule also reads "present now, absent 30 minutes ago", behind
-// a guard that the target was scraped then. `loss-rules.yml` mirrors those queries for `promtool test rules`, and
+// a series that goes absent, then 1, then flat, so each rule also reads "present now, absent 5 minutes ago", behind
+// a guard that the target was scraped then. The increase half keeps its 30 minute window. `loss-rules.yml` mirrors those queries for `promtool test rules`, and
 // `loss-rules.test.yml` holds the cases. Two things are checked here: the mirror is the Grafana rules (so the tested
 // query is the deployed one), and promtool passes it.
 
@@ -83,15 +83,19 @@ describe('the loss rules mirror', () => {
   })
 
   // Every query keeps the three parts of the idiom, so a rewrite that drops one fails here before it fails in promtool.
-  it.each(LOSS_RULES)('%s: reads the increase, the series new in the window, and the 30 minute scrape guard', title => {
-    const expr = mirrorQueries().get(title) ?? ''
-    expect(expr).toMatch(/^\(.*increase\(.*\[30m\].*\) > 0\) or \(/)
-    expect(expr).toContain(' unless ')
-    expect(expr).toContain(' offset 30m')
-    expect(expr).toMatch(/and on\(\) \(up\{job="(?:otelcol|tempo)"\} offset 30m == 1\)\)$/)
-    // A plain `+` between two vectors drops every series missing from one side.
-    expect(expr).not.toMatch(/\)\)\s*\+\s*sum/)
-  })
+  it.each(LOSS_RULES)(
+    '%s: reads the 30 minute increase, the series new in the last 5 minutes, and the 5 minute scrape guard',
+    title => {
+      const expr = mirrorQueries().get(title) ?? ''
+      expect(expr).toMatch(/^\(.*increase\(.*\[30m\].*\) > 0\) or \(/)
+      expect(expr).toContain(' unless ')
+      expect(expr).toContain(' offset 5m')
+      expect(expr).not.toContain(' offset 30m')
+      expect(expr).toMatch(/and on\(\) \(up\{job="(?:otelcol|tempo)"\} offset 5m == 1\)\)$/)
+      // A plain `+` between two vectors drops every series missing from one side.
+      expect(expr).not.toMatch(/\)\)\s*\+\s*sum/)
+    },
+  )
 
   it('guards each rule with the scrape job of the metric it reads', () => {
     const queries = mirrorQueries()

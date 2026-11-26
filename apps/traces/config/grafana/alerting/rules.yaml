@@ -5,9 +5,11 @@
 #   - A loss counter (export failures, ingest 503s, Tempo discards and truncation) is not exported until its first
 #     increment. No data therefore means no loss: noDataState OK, so an absent counter never alerts.
 #   - `increase()` of a series that is absent, then 1, then flat is 0, so each loss query is two halves joined by
-#     `or`: `increase(x[30m]) > 0` for a series that was there and rose, and `x unless x offset 30m` for a series that
-#     is present now and was absent 30 minutes ago. The second half needs `up{job=...} offset 30m == 1`: with no
-#     history (monitoring start-up, a target that was down) an old count is not a new failure and does not page.
+#     `or`: `increase(x[30m]) > 0` for a series that was there and rose, and `x unless x offset 5m` for a series that
+#     is present now and was absent 5 minutes ago. The second half needs `up{job=...} offset 5m == 1`: with no
+#     history (the first scrape after a start, a target that was down) an old count is not a new failure and does not
+#     page. The first failure on a new series therefore alerts within minutes and stays for 5 minutes (five
+#     evaluations of the 1 minute group); a rise after that is the 30 minute half's.
 #     The same queries are mirrored in `config/prometheus/loss-rules.yml` and tested with promtool; a test fails
 #     when the two differ.
 #   - The export failure rule joins its two counters with `or` over a `kind` label, not with `+` (which drops every
@@ -293,7 +295,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: '(sum by (exporter) (label_replace(increase(otelcol_exporter_send_failed_spans[30m]), "kind", "send", "", "") or label_replace(increase(otelcol_exporter_enqueue_failed_spans[30m]), "kind", "enqueue", "", "")) > 0) or (sum by (exporter) (label_replace(otelcol_exporter_send_failed_spans unless otelcol_exporter_send_failed_spans offset 30m, "kind", "send", "", "") or label_replace(otelcol_exporter_enqueue_failed_spans unless otelcol_exporter_enqueue_failed_spans offset 30m, "kind", "enqueue", "", "")) > 0 and on() (up{job="otelcol"} offset 30m == 1))'
+              expr: '(sum by (exporter) (label_replace(increase(otelcol_exporter_send_failed_spans[30m]), "kind", "send", "", "") or label_replace(increase(otelcol_exporter_enqueue_failed_spans[30m]), "kind", "enqueue", "", "")) > 0) or (sum by (exporter) (label_replace(otelcol_exporter_send_failed_spans unless otelcol_exporter_send_failed_spans offset 5m, "kind", "send", "", "") or label_replace(otelcol_exporter_enqueue_failed_spans unless otelcol_exporter_enqueue_failed_spans offset 5m, "kind", "enqueue", "", "")) > 0 and on() (up{job="otelcol"} offset 5m == 1))'
               instant: true
               range: false
               intervalMs: 1000
@@ -342,7 +344,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: '(sum(increase(http_server_request_duration_count{http_response_status_code="503",http_route=""}[30m])) > 0) or (sum(http_server_request_duration_count{http_response_status_code="503",http_route=""} unless http_server_request_duration_count{http_response_status_code="503",http_route=""} offset 30m) > 0 and on() (up{job="otelcol"} offset 30m == 1))'
+              expr: '(sum(increase(http_server_request_duration_count{http_response_status_code="503",http_route=""}[30m])) > 0) or (sum(http_server_request_duration_count{http_response_status_code="503",http_route=""} unless http_server_request_duration_count{http_response_status_code="503",http_route=""} offset 5m) > 0 and on() (up{job="otelcol"} offset 5m == 1))'
               instant: true
               range: false
               intervalMs: 1000
@@ -396,7 +398,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: '(sum by (reason) (increase({__name__=~"tempo_discarded_spans(_total)?"}[30m])) > 0) or (sum by (reason) ({__name__=~"tempo_discarded_spans(_total)?"} unless {__name__=~"tempo_discarded_spans(_total)?"} offset 30m) > 0 and on() (up{job="tempo"} offset 30m == 1))'
+              expr: '(sum by (reason) (increase({__name__=~"tempo_discarded_spans(_total)?"}[30m])) > 0) or (sum by (reason) ({__name__=~"tempo_discarded_spans(_total)?"} unless {__name__=~"tempo_discarded_spans(_total)?"} offset 5m) > 0 and on() (up{job="tempo"} offset 5m == 1))'
               instant: true
               range: false
               intervalMs: 1000
@@ -445,7 +447,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: '(sum(increase({__name__=~"tempo_distributor_attributes_truncated(_total)?"}[30m])) > 0) or (sum({__name__=~"tempo_distributor_attributes_truncated(_total)?"} unless {__name__=~"tempo_distributor_attributes_truncated(_total)?"} offset 30m) > 0 and on() (up{job="tempo"} offset 30m == 1))'
+              expr: '(sum(increase({__name__=~"tempo_distributor_attributes_truncated(_total)?"}[30m])) > 0) or (sum({__name__=~"tempo_distributor_attributes_truncated(_total)?"} unless {__name__=~"tempo_distributor_attributes_truncated(_total)?"} offset 5m) > 0 and on() (up{job="tempo"} offset 5m == 1))'
               instant: true
               range: false
               intervalMs: 1000

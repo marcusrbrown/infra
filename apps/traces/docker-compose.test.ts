@@ -617,7 +617,16 @@ describe('traces compose: Prometheus', () => {
   it('checks itself at its own health endpoint, which the image’s wget can reach', () => {
     const test = strings(record(prometheus().healthcheck, 'healthcheck').test, 'healthcheck.test').join(' ')
     expect(test).toContain('wget')
-    expect(test).toContain('http://127.0.0.1:9090/-/healthy')
+    expect(test).toContain('http://127.0.0.1:9090/-/ready')
+    expect(test).not.toContain('/-/healthy')
+  })
+
+  // `up --wait` waits for this healthcheck, and the reporter's `prometheus-health` reads the same endpoint: "started"
+  // (the deploy's `prometheus-ready`) and "ready" (the monitoring check) mean the same thing.
+  it('waits on the same endpoint the reporter probes', () => {
+    const test = strings(record(prometheus().healthcheck, 'healthcheck').test, 'healthcheck.test').join(' ')
+    const probed = new URL(ENDPOINTS.prometheusReady)
+    expect(test).toContain(`http://127.0.0.1:${probed.port}${probed.pathname}`)
   })
 
   it('scrapes the collector, Tempo, the reporter and itself every 30 seconds, and nothing else', async () => {
@@ -873,11 +882,9 @@ describe('Grafana alerting provisioning', async () => {
     expect(failures).toContain('sum by (exporter)')
     expect(failures).toContain('increase(otelcol_exporter_send_failed_spans[30m])')
     expect(failures).toContain('increase(otelcol_exporter_enqueue_failed_spans[30m])')
+    expect(failures).toContain('otelcol_exporter_send_failed_spans unless otelcol_exporter_send_failed_spans offset 5m')
     expect(failures).toContain(
-      'otelcol_exporter_send_failed_spans unless otelcol_exporter_send_failed_spans offset 30m',
-    )
-    expect(failures).toContain(
-      'otelcol_exporter_enqueue_failed_spans unless otelcol_exporter_enqueue_failed_spans offset 30m',
+      'otelcol_exporter_enqueue_failed_spans unless otelcol_exporter_enqueue_failed_spans offset 5m',
     )
     // Joined by `or` over a distinguishing label. One name regex would make `increase` (which drops the metric name)
     // return two series with one labelset, which Prometheus rejects as an error.
@@ -893,10 +900,10 @@ describe('Grafana alerting provisioning', async () => {
   })
 
   // `increase()` of a series that goes absent, then 1, then flat is 0, so the first failure on a new series would
-  // never alert. Each loss rule also reads the series that is present now and was absent 30 minutes ago, and only
+  // never alert. Each loss rule also reads the series that is present now and was absent 5 minutes ago, and only
   // when the target was scraped then, so monitoring start-up does not page on old counts. promtool proves it
   // (`config/prometheus/loss-rules.test.ts`); this pins the shape.
-  it('reads each loss counter as an increase and as a series new in the window, behind a 30 minute scrape guard', () => {
+  it('reads each loss counter as a 30 minute increase and as a series new in 5 minutes, behind a 5 minute scrape guard', () => {
     const guards: Record<string, string> = {
       CollectorExportFailures: 'otelcol',
       IngestRefused503: 'otelcol',
@@ -907,8 +914,9 @@ describe('Grafana alerting provisioning', async () => {
       const {expr} = rule(title)
       expect({title, increase: /^\(.*increase\(.*\[30m\].*\) > 0\) or \(/.test(expr)}).toEqual({title, increase: true})
       expect({title, unless: expr.includes(' unless ')}).toEqual({title, unless: true})
-      expect({title, offset: expr.includes(' offset 30m')}).toEqual({title, offset: true})
-      expect(expr.endsWith(`and on() (up{job="${job}"} offset 30m == 1))`)).toBe(true)
+      expect({title, offset: expr.includes(' offset 5m')}).toEqual({title, offset: true})
+      expect({title, longOffset: expr.includes(' offset 30m')}).toEqual({title, longOffset: false})
+      expect(expr.endsWith(`and on() (up{job="${job}"} offset 5m == 1))`)).toBe(true)
     }
     // The label a message names survives both halves.
     expect(rule('TempoDiscards').expr.match(/sum by \(reason\)/g)).toHaveLength(2)

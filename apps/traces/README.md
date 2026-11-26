@@ -25,7 +25,7 @@ bun run deploy:traces        # loads the root .env; the deploy-traces workflow r
 
 The deploy brings the stack up privately, checks each gate, and opens the public ingest route only when every gate passes and `TRACES_INGEST_OPEN` is exactly `true`. A first deploy ends with ingest off and a message naming the gates that are not met. On a host that already serves traffic, a deploy that changes the collector, a backend or their configuration holds the route (503) first, and a deploy that fails a gate leaves it held. Retention (30 days in ClickHouse and in the object store) is asserted and read back on every deploy.
 
-Topics: Langfuse Topics is usable once the operator adds three LLM connections in the Langfuse UI (summary and naming through the cliproxy proxy, embedding at the local embedder). It sends trace content to a model provider, so read the privacy page and the runbook's "Topics" section first. Summaries are kept 30 days.
+Topics: Langfuse Topics is usable once the operator adds two LLM connections: the cliproxy proxy for the summary and naming models (in the Langfuse UI) and the local embedder (through the public API, because the UI form's chat test cannot pass against it). It sends trace content to a model provider, so read the privacy page and the runbook's "Topics" section first. Summaries are kept 30 days.
 
 Alerts: Grafana-managed rules over Prometheus metrics (`config/grafana/alerting/`) post to a Discord webhook (`TRACES_DISCORD_WEBHOOK_URL`, required). No Alertmanager. The deploy checks that Grafana loaded the contact point and the rule groups; it sends no test message. The rules and how to silence one are in `docs/runbooks/trace-collection.md`.
 

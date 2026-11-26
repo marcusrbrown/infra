@@ -561,7 +561,7 @@ Delete nothing at any stage. A leftover restore volume and the previous volume a
 
 ## Topics
 
-Langfuse Topics groups traces by what they were about, on a map the operator creates in the Langfuse UI. It is off until three LLM connections exist. Read the [privacy page](../../apps/docs/src/content/docs/trace-privacy.md) first: Topics sends trace content to a model provider, and the page must say so before the first map is built. The design, the settings and what only the host proves are in [`apps/traces/AGENTS.md`](../../apps/traces/AGENTS.md#topics).
+Langfuse Topics groups traces by what they were about, on a map the operator creates in the Langfuse UI. It is off until two LLM connections exist (one for the summary and naming models, one for the embedder) and the Topics settings name a model for each of its three slots. Read the [privacy page](../../apps/docs/src/content/docs/trace-privacy.md) first: Topics sends trace content to a model provider, and the page must say so before the first map is built. The design, the settings and what only the host proves are in [`apps/traces/AGENTS.md`](../../apps/traces/AGENTS.md#topics).
 
 ### What runs where
 
@@ -592,18 +592,38 @@ Settings the stack already sets: Langfuse's LLM connections may reach `embedder`
 
    The proxy also serves Claude and GPT models, which are **not** zero retention. A Go model is listed only when the reviewed privacy snapshot clears it ([OpenCode Go through the proxy](cliproxy-opencode-go.md)); check that snapshot (`zeroRetention: true`, `trainsOnData: false`) for the one you pick. Use the id exactly as the command prints it.
 
-4. **Open the Langfuse tunnel** (`bunx @marcusrbrown/infra traces open`) and sign in at `http://localhost:3000`.
-5. **Add three LLM connections** in the project's settings, adapter _OpenAI_, one per role:
+4. **Open the Langfuse tunnel** (`bunx @marcusrbrown/infra traces open`) and sign in at `http://localhost:3000`. Keep it open for the next three steps.
+5. **Add the proxy connection in the UI.** In the project's settings, LLM connections, add one with provider name `cliproxy`, adapter _OpenAI_, base URL `https://cliproxy.fro.bot/v1`, the Topics proxy key, and the Go model id from step 3 as a custom model (turn the default models off). One connection serves both the summary and the naming slots; add the second Go model id to it if you want a different naming model. The form tests it with one chat call and saves only if that passes.
+6. **Add the embedder connection through the API, not the UI.** The UI form refuses to save a connection whose chat test fails, and the embedder serves embeddings only (v4.86.0: `web/src/features/public-api/components/CreateLLMApiKeyForm.tsx:845-870` aborts on a failed test; `web/src/features/llm-api-key/server/llmConnectionService.ts:383-447` makes a text-generation call). The public API route `PUT /api/public/llm-connections` writes the connection without that test (`web/src/pages/api/public/llm-connections/index.ts:44-80`). It still checks the base URL against `LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS`, so `embedder` is accepted and any other private host is not (`llmConnectionService.ts:673-687` calls `validateBaseUrlForWrite` when the connection is new or its base URL changed; `packages/shared/src/server/llm/baseUrlValidation.ts:41-61`).
 
-   | Role | Base URL | Model | API key |
-   | --- | --- | --- | --- |
-   | Summary | `https://cliproxy.fro.bot/v1` | the Go model id | the Topics proxy key |
-   | Naming (grouping) | `https://cliproxy.fro.bot/v1` | the same or another Go model id | the Topics proxy key |
-   | Embedding | `http://embedder:8080/v1` | `BAAI/bge-small-en-v1.5` | any non-empty text (the embedder checks none) |
+   1. **Make a short-lived key in the UI.** Project settings, API keys, create. Pick the role **Full access** (the `ADMIN` role; the picker defaults to Member, and Member cannot write connections), set the shortest expiry the picker offers, and copy both halves once.
 
-   Set the embedding **dimensions to 384**. Topics accepts 64 to 2048, and the embedder refuses more than its model's 384. The embedding model and dimensions are locked once embedded summaries exist.
+      The collector's Application-role key cannot do this: Application holds no `llmApiKeys` action, and the route requires `llmApiKeys:create` (`packages/shared/src/features/rbac/systemRoleAccessRights.ts:162-175` lists Application's actions; `packages/shared/src/features/rbac/projectAccessRights.ts:197,226` gives `llmApiKeys:create` to ADMIN, and the MEMBER list at `:271` has only `llmApiKeys:read`). Do not widen the collector's key, and do not use the bootstrap key.
 
-6. **Build the first map small.** Create a live map, filter it by **trace name** (one workflow, not everything), sample **10 to 20 percent** of traces, and use the **Intent** and **Issues** facets. Check the cost estimate it shows, then start it. Watch `traces logs langfuse-worker` for the first summaries.
+   2. **Put the two halves in your shell, read from a prompt** (nothing goes into history or the process list):
+
+      ```bash
+      read -rs -p 'public key: ' LF_PK; echo
+      read -rs -p 'secret key: ' LF_SK; echo
+      ```
+
+   3. **Create the connection** through the open tunnel. The credentials reach curl through a config on a file descriptor, not the command line:
+
+      ```bash
+      curl -q --noproxy '*' -sS --fail-with-body -X PUT \
+        -K <(printf 'user = "%s:%s"\n' "$LF_PK" "$LF_SK") \
+        -H 'content-type: application/json' \
+        -d '{"provider":"embedder","adapter":"openai","baseURL":"http://embedder:8080/v1","secretKey":"unused-no-auth","customModels":["BAAI/bge-small-en-v1.5"],"withDefaultModels":false}' \
+        http://localhost:3000/api/public/llm-connections
+      ```
+
+      Success is HTTP 201 with the connection's `id`, `provider` `embedder`, `baseURL`, `customModels` and `displaySecretKey` `...auth`. Running it again updates the same connection (HTTP 200). Fields, from `web/src/features/public-api/types/llm-connections.ts:58-67`: `provider` (any non-empty name, unique in the project) and `adapter` (`openai`) are required. `secretKey` is required and non-empty, so send a placeholder; the embedder reads no key. `baseURL` must be a valid URL and `http` is allowed on self-hosted. `customModels` lists the model ids the UI will offer, and `withDefaultModels` `false` stops it offering OpenAI's. `extraHeaders` and `config` are optional and not needed here. The secret is stored encrypted and the response never shows it.
+
+   4. **Check it and clear the shell.** `curl -q --noproxy '*' -sS -K <(printf 'user = "%s:%s"\n' "$LF_PK" "$LF_SK") http://localhost:3000/api/public/llm-connections` lists the connections (`GET`, same role); then `unset LF_PK LF_SK`.
+   5. **Delete the key in the UI** (API keys, delete) as soon as the check passes, even though it expires on its own. An Admin key can read and write everything in the project.
+
+7. **Select the models in the Topics settings.** On the Topics page, open the model settings and fill the three slots: facet summaries (connection `cliproxy`, the Go model), embeddings (connection `embedder`, `BAAI/bge-small-en-v1.5`) and topic clustering, which names topics (connection `cliproxy`, a Go model). Set **embedding dimensions to 384** before you save: the setting defaults to 1024 (`packages/shared/src/server/topics/model-config.ts:431`), Topics accepts 64 to 2048, and the embedder answers 422 to anything above its model's 384 (Topics retries without a size only on a 400, `packages/shared/src/server/topics/embeddings.ts:20-43`, so the 422 fails the test). Saving runs a real call for each changed slot (`model-config.ts:679-773`, the embedding branch at `:720-735`): the summary and naming slots return structured output, and the embedding slot embeds two texts in one request and requires both vectors to be exactly 384 long. A failed test names the slot and the reason. The embedding model and dimensions lock once embedded summaries exist, so choose them once.
+8. **Build the first map small.** Create a live map, filter it by **trace name** (one workflow, not everything), sample **10 to 20 percent** of traces, and use the **Intent** and **Issues** facets. Check the cost estimate it shows, then start it. Watch `traces logs langfuse-worker` for the first summaries.
 
 ### What it costs
 
@@ -620,18 +640,32 @@ Settings the stack already sets: Langfuse's LLM connections may reach `embedder`
 
 ### Disable it
 
-1. In Langfuse, turn off automatic processing, delete the maps and then the three connections. Deleting the summary connection stops content leaving the host.
-2. Revoke the Topics proxy key (`bunx @marcusrbrown/infra cliproxy keys`).
-3. To purge what is stored, on the host (this is destructive, and `topics` has no expiry of its own). Take a [backup](#dispatch-a-backup-by-hand) first, then run in `clickhouse-client` inside the ClickHouse container: `TRUNCATE TABLE default.topic_facet_summaries; TRUNCATE TABLE default.topic_assignments; TRUNCATE TABLE default.topic_assignments_by_trace; TRUNCATE TABLE default.topics;`. Postgres keeps the map and rule definitions; deleting the maps in the UI removes them.
-4. Leave the embedder, which costs nothing while idle, or remove the `embedder` service, the `embedder_models` volume and the `embedder-health` check from the reporter in one change. Removing only the service makes `/healthz` fail.
+1. **Stop Topics:** in the project's Topics settings, turn off automatic processing, and delete the maps. **Leave the embedder running.** It costs nothing while idle, and `embedder-health`, `EmbedderDown` and the deploy's `embedder-ready` gate all expect it.
+2. **Stop content leaving the host:** delete the `cliproxy` connection in the project's LLM connections (the summary and naming calls are the ones that carry trace content), and revoke the Topics proxy key (`bunx @marcusrbrown/infra cliproxy keys`). Delete the `embedder` connection too if you will not come back.
+3. **Purge what is stored** (destructive, and `topics` has no expiry of its own). Take a [backup](#dispatch-a-backup-by-hand) first, then run in `clickhouse-client` inside the ClickHouse container: `TRUNCATE TABLE default.topic_facet_summaries; TRUNCATE TABLE default.topic_assignments; TRUNCATE TABLE default.topic_assignments_by_trace; TRUNCATE TABLE default.topics;`. Postgres keeps the map and rule definitions; deleting the maps in the UI removes them.
+
+Removing the embedder itself is a code change, not a step here: the compose service and its volume, `INSIGHT_SERVICES` and the deploy's embedder steps and `embedder-ready` gate, the reporter's `embedder-health` check and its gauge target, the `EmbedderDown` rule and the rule count in `ALERT_RULE_GROUPS`, the `LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS` entry, the Renovate rule, the diagram, the CLI service list and every test that pins them. Make it in one PR; a partial removal leaves `/healthz` failing or a gate that can never pass.
+
+### Verified on the host
+
+Not yet done. Nothing below has been run against the real host; the first deploy that carries the embedder is where it is proven. After that deploy, run and record each:
+
+- [ ] `traces status` shows `embedder` running and `embedder-health` passing, and the deploy's `embedder-ready` gate passed (the first start read the model from `huggingface.co`).
+- [ ] The embedder connection was created through the API (step 6): HTTP 201, then HTTP 200 on a repeat, and the key deleted afterwards.
+- [ ] The Topics settings saved with all three slots, and the embedding test passed at 384 dimensions (two texts, two vectors of 384).
+- [ ] One small map on a filtered set (one trace name, 10 to 20 percent sampling, Intent and Issues) completed: summaries appeared, topics were named, and the cost estimate was about what the run cost.
+- [ ] `traces logs embedder` and `traces logs langfuse-worker` show no refused host and no 4xx from the proxy or the embedder.
+- [ ] On the next deploy, retention read back the TTL on `topic_facet_summaries` (and on the assignment tables once they exist) from the real table definitions.
 
 ### When something is wrong
 
 | Symptom | Cause | Do |
 | --- | --- | --- |
-| Saving the embedding connection fails with "Host is not in the outbound URL allowlist" or "Blocked IP address detected" | the stack's allow-list was changed, or the URL names another host | the base URL must be exactly `http://embedder:8080/v1`; check `LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS` in the compose file |
+| The UI refuses to save the embedder connection ("could not verify the API key") | the form's pre-save test is a chat call, which the embedder does not serve | create it through the API, step 6 |
+| The API answers 403 "insufficient permissions" or 401 | the key has the wrong role, is expired, or the tunnel is not open | make a new key with the **Full access** role, step 6.1; `traces open` |
+| The API answers 400 naming "Invalid base URL" (host not allowed, blocked IP) | the stack's allow-list was changed, or the URL names another host | the base URL must be exactly `http://embedder:8080/v1`; check `LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS` in the compose file |
 | A call to the proxy is refused the same way | the URL names a host other than `cliproxy.fro.bot` | use `https://cliproxy.fro.bot/v1` |
-| Embedding calls answer 422 | the dimensions setting is above 384 | set 384 |
+| The embedding slot's test fails with 422, or "returned N dimensions instead of 384" | the dimensions setting is still the default 1024, or above 384 | set 384 in the Topics settings |
 | `EmbedderDown`, or `embedder-ready` failed | the model was not read (no route to `huggingface.co`) or the volume is not owned by 65534 | `traces logs embedder`; deploy again |
 | Summaries stop, the worker logs 401 or 404 from the proxy | the key was revoked, or the model id is not served | `bunx @marcusrbrown/infra cliproxy models opencode-go`; replace the key or the id in the connection |
 

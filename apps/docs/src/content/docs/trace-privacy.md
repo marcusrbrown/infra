@@ -46,7 +46,7 @@ Langfuse also keeps a usage ledger. It records each span, trace and score it sto
 
 ## Topics (summaries of traces)
 
-Langfuse Topics groups traces by what they were about. It is off until the operator adds three model connections in Langfuse and creates a map; with none, nothing below happens.
+Langfuse Topics groups traces by what they were about. It is off until the operator adds model connections in Langfuse, picks a model for each of its three steps (summary, embedding, naming) and creates a map; with none, nothing below happens.
 
 When it runs:
 

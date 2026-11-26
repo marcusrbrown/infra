@@ -8,6 +8,8 @@
 //      Langfuse's migrations to create it and never treats "not there yet" as a pass. The older trace
 //      tables below are empty on this stack (the probe wrote 302 spans and only the two events tables held
 //      rows) and are covered as a precaution: they take the TTL when they exist and are skipped when they do not.
+//      Topics adds three more: the LLM summaries of trace content (`topic_facet_summaries`, required for the same
+//      reason) and the tables that say which topic a trace belongs to.
 //   2. Object store: every OTLP batch Langfuse uploads stays in the bucket until something deletes it, so a
 //      lifecycle rule expires `events/` (batches) and `media/` (attachments extracted from trace content) at
 //      30 days.
@@ -43,10 +45,17 @@ export interface RetentionTable {
  * characters of input, output and metadata values. Both were proven against the pinned Langfuse. The rest are
  * Langfuse's older trace, observation and score tables, empty in the probe.
  *
- * Not listed on purpose: `observations_batch_staging` (carries its own TTL), `audit_logs`, `topics`,
- * `topic_assignments`, `topic_facet_summaries`, `dataset_run_items_rmt` and `blob_storage_file_log` (settings,
- * datasets and bookkeeping an operator creates in the UI; no sender can write into them), and `billable_events`
- * (usage metadata without trace content; kept with no expiry, as the trace privacy page discloses).
+ * Topics (Langfuse v4.86.0, migration 0059): `topic_facet_summaries` holds the summary the model wrote from each
+ * trace's content, so it is required and counted from `unit_start_time`, the column Langfuse's own retention uses.
+ * `topic_assignments` and its narrow copy `topic_assignments_by_trace` hold trace ids, topic ids and map
+ * coordinates, and go on the same clock so a membership never outlives the summary it came from.
+ *
+ * Not listed on purpose: `observations_batch_staging` (carries its own TTL), `audit_logs`, `dataset_run_items_rmt`
+ * and `blob_storage_file_log` (settings, datasets and bookkeeping an operator creates in the UI; no sender can write
+ * into them), `billable_events` (usage metadata without trace content; kept with no expiry, as the trace privacy
+ * page discloses) and `topics` (names and descriptions of clusters; later runs reuse an older definition by id, so
+ * a TTL would delete one a live map still points at). They are kept until the project's Topics data is purged, which
+ * the privacy page and the runbook say.
  */
 export const RETENTION_TABLES: readonly RetentionTable[] = [
   {name: 'events_full', column: 'start_time', required: true},
@@ -55,6 +64,9 @@ export const RETENTION_TABLES: readonly RetentionTable[] = [
   {name: 'observations', column: 'start_time', required: false},
   {name: 'observations_pid_tid_sorting', column: 'start_time', required: false},
   {name: 'scores', column: 'timestamp', required: false},
+  {name: 'topic_facet_summaries', column: 'unit_start_time', required: true},
+  {name: 'topic_assignments', column: 'unit_start_time', required: false},
+  {name: 'topic_assignments_by_trace', column: 'unit_start_time', required: false},
 ]
 
 const TTL_READ_SENTINEL = 'TRACES_TTL_READ'

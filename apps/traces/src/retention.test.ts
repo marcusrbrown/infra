@@ -1,7 +1,11 @@
 import type {RemoteExec, RunResult} from '../server/provision'
 import type {LifecycleRule} from './retention'
 
+import {readFileSync} from 'node:fs'
+
 import {describe, expect, it} from 'bun:test'
+
+import {TOPIC_TABLE_DDL} from './__fixtures__/langfuse-topic-tables'
 import {
   addLifecycleScript,
   applyTtlScript,
@@ -115,7 +119,12 @@ class Sim {
   }
 }
 
-const REQUIRED_ONLY = {events_full: undefined, events_core: undefined}
+const REQUIRED_ONLY = {events_full: undefined, events_core: undefined, topic_facet_summaries: undefined}
+const IN_PLACE = {
+  events_full: NORMALISED_30('start_time'),
+  events_core: NORMALISED_30('start_time'),
+  topic_facet_summaries: NORMALISED_30('unit_start_time'),
+}
 
 describe('TTL text', () => {
   it('sets a 30-day TTL counted from the span start', () => {
@@ -230,11 +239,108 @@ describe('TTL text', () => {
     })
   })
 
-  it('covers the two proven tables as required and the older trace tables as optional', () => {
+  it('covers the two proven tables and the Topics summary table as required and the rest as optional', () => {
     const required = RETENTION_TABLES.filter(table => table.required).map(table => table.name)
-    expect(required).toEqual(['events_full', 'events_core'])
+    expect(required).toEqual(['events_full', 'events_core', 'topic_facet_summaries'])
     expect(RETENTION_TABLES.map(table => table.name)).toContain('observations')
     for (const table of RETENTION_TABLES) expect(table.column).toMatch(/^[a-z_]+$/)
+  })
+})
+
+// Topics (Langfuse v4.86.0) writes an LLM summary of each trace's content into `topic_facet_summaries`, and which topic
+// a trace belongs to into `topic_assignments` (and its narrow copy `topic_assignments_by_trace`). The summary table holds
+// content, so a missing one fails closed; the two assignment tables hold identifiers and numbers and are best effort.
+// `topics` holds cluster names and descriptions that later runs reuse by id; a TTL would orphan a live map.
+describe('Topics tables', () => {
+  const byName = (name: string) => RETENTION_TABLES.find(table => table.name === name)
+
+  it('puts the content-bearing summaries and both assignment tables on the 30-day TTL, counted from the trace start', () => {
+    expect(byName('topic_facet_summaries')).toEqual({
+      name: 'topic_facet_summaries',
+      column: 'unit_start_time',
+      required: true,
+    })
+    expect(byName('topic_assignments')).toEqual({name: 'topic_assignments', column: 'unit_start_time', required: false})
+    expect(byName('topic_assignments_by_trace')).toEqual({
+      name: 'topic_assignments_by_trace',
+      column: 'unit_start_time',
+      required: false,
+    })
+  })
+
+  it('leaves the topic definitions alone on purpose, and says why in the comment that lists exclusions', () => {
+    expect(byName('topics')).toBeUndefined()
+    const source = readFileSync(new URL('./retention.ts', import.meta.url), 'utf8')
+    expect(source).not.toMatch(/`topic_facet_summaries`[^.]*no sender can write/)
+    expect(source).toMatch(/`topics`[^.]*reuse/)
+  })
+
+  it('names a time column that every one of the tables really has, with the type the TTL needs', () => {
+    for (const table of RETENTION_TABLES.filter(entry => entry.name.startsWith('topic'))) {
+      const ddl = TOPIC_TABLE_DDL[table.name] ?? ''
+      expect({table: table.name, ddl: ddl === ''}).toEqual({table: table.name, ddl: false})
+      expect(ddl).toMatch(new RegExp(String.raw`\n\s+${table.column} DateTime64\(3, 'UTC'\),?\n`))
+    }
+  })
+
+  // The scanner reads the table TTL out of `create_table_query`. These are the real definitions: check constraints,
+  // an Enum8 and a Tuple in the column list, skip indexes, and a settings clause, none of which may hide or fake a TTL.
+  describe.each(['topic_facet_summaries', 'topic_assignments', 'topic_assignments_by_trace'])('%s', name => {
+    const ddl = TOPIC_TABLE_DDL[name] ?? ''
+    const column = 'unit_start_time'
+    const echoed = (text: string, rule = 'toDateTime(unit_start_time) + toIntervalDay(30)'): string =>
+      text.replace(/\nSETTINGS /, `\nTTL ${rule}\nSETTINGS `)
+
+    it('reads as having no TTL before the deploy sets one', () => {
+      expect(ddl).toContain('SETTINGS')
+      expect(extractTtl(ddl)).toBeUndefined()
+      expect(extractTtl(ddl.replaceAll(/\s+/g, ' '))).toBeUndefined()
+    })
+
+    it('reads the TTL back the way ClickHouse echoes it, in both layouts', () => {
+      const multiline = echoed(ddl)
+      expect(multiline).not.toBe(ddl)
+      expect(extractTtl(multiline)).toBe('toDateTime(unit_start_time) + toIntervalDay(30)')
+      expect(extractTtl(multiline.replaceAll(/\s+/g, ' '))).toBe('toDateTime(unit_start_time) + toIntervalDay(30)')
+      expect(ttlMatches(column, extractTtl(multiline))).toBe(true)
+    })
+
+    it('does not accept a TTL on another column or of another length', () => {
+      expect(ttlMatches(column, extractTtl(echoed(ddl, 'toDateTime(unit_start_time) + toIntervalDay(90)')))).toBe(false)
+      expect(ttlMatches(column, extractTtl(echoed(ddl, 'toDateTime(created_at) + toIntervalDay(30)')))).toBe(false)
+    })
+  })
+
+  it('sends one ALTER per Topics table, on unit_start_time', () => {
+    const sql = applyTtlSql(RETENTION_TABLES.filter(table => table.name.startsWith('topic')))
+    expect(sql.split('\n').filter(line => line !== '')).toEqual([
+      'ALTER TABLE default.topic_facet_summaries MODIFY TTL toDateTime(unit_start_time) + INTERVAL 30 DAY;',
+      'ALTER TABLE default.topic_assignments MODIFY TTL toDateTime(unit_start_time) + INTERVAL 30 DAY;',
+      'ALTER TABLE default.topic_assignments_by_trace MODIFY TTL toDateTime(unit_start_time) + INTERVAL 30 DAY;',
+    ])
+    expect(readTtlSql()).toContain("'topic_facet_summaries', 'topic_assignments', 'topic_assignments_by_trace'")
+    expect(readTtlSql()).not.toContain("'topics'")
+  })
+
+  it('sets the TTL on the summaries when only that table exists, skips the others, and reads it back', async () => {
+    const sim = new Sim({tables: REQUIRED_ONLY, noLifecycle: true})
+    const outcome = await assertRetention(sim.exec)
+    if (outcome.status !== 'ready') throw new Error('expected ready')
+    expect(outcome.report.altered).toContain('topic_facet_summaries')
+    expect(outcome.report.skipped).toEqual(expect.arrayContaining(['topic_assignments', 'topic_assignments_by_trace']))
+    expect(sim.tables.get('topic_facet_summaries')).toBe(NORMALISED_30('unit_start_time'))
+  })
+
+  it('is not ready, and changes nothing, while Langfuse has not created the summary table', async () => {
+    const sim = new Sim({tables: {events_full: undefined, events_core: undefined}, noLifecycle: true})
+    const outcome = await assertRetention(sim.exec)
+    expect(outcome).toEqual({status: 'not-ready', missing: ['topic_facet_summaries']})
+    expect(sim.alterCalls).toBe(0)
+  })
+
+  it('fails when the summary table does not keep the TTL, and names it', async () => {
+    const sim = new Sim({tables: REQUIRED_ONLY, alterIgnored: true})
+    await expect(assertRetention(sim.exec)).rejects.toThrow(/read-back differs from 30 days on .*topic_facet_summaries/)
   })
 })
 
@@ -283,9 +389,15 @@ describe('assertRetention: ClickHouse', () => {
 
     expect(outcome.status).toBe('ready')
     if (outcome.status !== 'ready') return
-    expect(outcome.report.altered).toEqual(['events_full', 'events_core', 'traces'])
-    expect(outcome.report.tables).toEqual(['events_full', 'events_core', 'traces'])
-    expect(outcome.report.skipped).toEqual(['observations', 'observations_pid_tid_sorting', 'scores'])
+    expect(outcome.report.altered).toEqual(['events_full', 'events_core', 'traces', 'topic_facet_summaries'])
+    expect(outcome.report.tables).toEqual(['events_full', 'events_core', 'traces', 'topic_facet_summaries'])
+    expect(outcome.report.skipped).toEqual([
+      'observations',
+      'observations_pid_tid_sorting',
+      'scores',
+      'topic_assignments',
+      'topic_assignments_by_trace',
+    ])
     expect(outcome.report.prefixesAdded).toEqual([...OBJECT_STORE_PREFIXES])
     for (const [name, ttl] of sim.tables) {
       const table = RETENTION_TABLES.find(entry => entry.name === name)
@@ -295,7 +407,7 @@ describe('assertRetention: ClickHouse', () => {
 
   it('issues no ALTER and adds no rule when everything is already in place', async () => {
     const sim = new Sim({
-      tables: {events_full: NORMALISED_30('start_time'), events_core: NORMALISED_30('start_time')},
+      tables: IN_PLACE,
       rules: [
         {Prefix: 'events/', Days: 30},
         {Prefix: 'media/', Days: 30},
@@ -309,7 +421,7 @@ describe('assertRetention: ClickHouse', () => {
 
   it('alters only the table whose TTL differs', async () => {
     const sim = new Sim({
-      tables: {events_full: NORMALISED_30('start_time'), events_core: 'toDateTime(start_time) + toIntervalDay(90)'},
+      tables: {...IN_PLACE, events_core: 'toDateTime(start_time) + toIntervalDay(90)'},
       rules: [
         {Prefix: 'events/', Days: 30},
         {Prefix: 'media/', Days: 30},
@@ -324,7 +436,7 @@ describe('assertRetention: ClickHouse', () => {
   })
 
   it('is "not ready" when a required table does not exist, names it, and changes nothing', async () => {
-    const sim = new Sim({tables: {events_full: undefined}, noLifecycle: true})
+    const sim = new Sim({tables: {events_full: undefined, topic_facet_summaries: undefined}, noLifecycle: true})
     const outcome = await assertRetention(sim.exec)
     expect(outcome).toEqual({status: 'not-ready', missing: ['events_core']})
     expect(sim.alterCalls).toBe(0)
@@ -333,21 +445,25 @@ describe('assertRetention: ClickHouse', () => {
 
   it('is "not ready" on a database with no tables at all', async () => {
     const outcome = await assertRetention(new Sim({tables: {}}).exec)
-    expect(outcome).toEqual({status: 'not-ready', missing: ['events_full', 'events_core']})
+    expect(outcome).toEqual({status: 'not-ready', missing: ['events_full', 'events_core', 'topic_facet_summaries']})
   })
 
   it('fails when the TTL read-back differs from 30 days', async () => {
     const sim = new Sim({tables: REQUIRED_ONLY, alterIgnored: true})
     const failure = assertRetention(sim.exec)
     await expect(failure).rejects.toBeInstanceOf(RetentionError)
-    await expect(failure).rejects.toThrow('read-back differs from 30 days on events_full, events_core')
+    await expect(failure).rejects.toThrow(
+      'read-back differs from 30 days on events_full, events_core, topic_facet_summaries',
+    )
   })
 
   it('fails and names the tables when an existing table cannot be altered', async () => {
     const sim = new Sim({tables: REQUIRED_ONLY, alterFails: ['events_core']})
     const failure = assertRetention(sim.exec)
     await expect(failure).rejects.toBeInstanceOf(RetentionError)
-    await expect(failure).rejects.toThrow('Could not set the 30-day TTL on events_full, events_core')
+    await expect(failure).rejects.toThrow(
+      'Could not set the 30-day TTL on events_full, events_core, topic_facet_summaries',
+    )
   })
 
   it('fails closed on an answer it does not recognise', async () => {
@@ -359,7 +475,7 @@ describe('assertRetention: ClickHouse', () => {
 })
 
 describe('assertRetention: object store', () => {
-  const READY_TABLES = {events_full: NORMALISED_30('start_time'), events_core: NORMALISED_30('start_time')}
+  const READY_TABLES = IN_PLACE
 
   it('shows the 30-day rule on the batch prefix after the run', async () => {
     const sim = new Sim({tables: READY_TABLES, noLifecycle: true})
@@ -393,7 +509,9 @@ describe('assertRetention: object store', () => {
     const exec: RemoteExec = async command => {
       if (command.includes('retention-read-ttl')) {
         return ok(
-          `${JSON.stringify({name: 'events_full', create_table_query: `x\nTTL ${NORMALISED_30('start_time')}\n`})}\n${JSON.stringify({name: 'events_core', create_table_query: `x\nTTL ${NORMALISED_30('start_time')}\n`})}\nTRACES_TTL_READ\n`,
+          `${Object.entries(IN_PLACE)
+            .map(([name, ttl]) => JSON.stringify({name, create_table_query: `x\nTTL ${ttl}\n`}))
+            .join('\n')}\nTRACES_TTL_READ\n`,
         )
       }
       return {exitCode: 1, stdout: '', stderr: 'mc: <ERROR> Unable to connect'}
@@ -447,7 +565,7 @@ describe('remote scripts', () => {
   it('send SQL on stdin only: one ALTER per table with the 30-day expression', () => {
     const sql = applyTtlSql(RETENTION_TABLES.filter(table => table.required))
     expect(sql).toBe(
-      'ALTER TABLE default.events_full MODIFY TTL toDateTime(start_time) + INTERVAL 30 DAY;\nALTER TABLE default.events_core MODIFY TTL toDateTime(start_time) + INTERVAL 30 DAY;\n',
+      'ALTER TABLE default.events_full MODIFY TTL toDateTime(start_time) + INTERVAL 30 DAY;\nALTER TABLE default.events_core MODIFY TTL toDateTime(start_time) + INTERVAL 30 DAY;\nALTER TABLE default.topic_facet_summaries MODIFY TTL toDateTime(unit_start_time) + INTERVAL 30 DAY;\n',
     )
     expect(readTtlSql()).toContain("name IN ('events_full', 'events_core'")
   })

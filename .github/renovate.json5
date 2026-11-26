@@ -187,6 +187,20 @@
       allowedVersions: '/^v?3\\.13\\./',
     },
     {
+      // The Topics embedder serves the one model its vectors come from. Its tags are `cpu-<version>`, a prefix that the
+      // docker versioning does not read, so a regex scheme names the version. It stays on the 1.9 line, the one the model
+      // and the `/v1/embeddings` request shape were checked against; the next line is an edit of this ceiling in a reviewed
+      // PR. The model is pinned by revision in the compose file's command and is never touched by Renovate. A new image
+      // is never automerged and waits for a dashboard checkbox.
+      description: ['Keep the trace stack Topics embedder on the 1.9 line, reviewed and never automerged'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: ['ghcr.io/huggingface/text-embeddings-inference'],
+      versioning: 'regex:^cpu-(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)$',
+      allowedVersions: '/^cpu-1\\.9\\./',
+      automerge: false,
+      dependencyDashboardApproval: true,
+    },
+    {
       // Langfuse supports and tests Redis 7, and a Redis 7 server may not read data written by Redis 8.
       description: ['Hold the trace stack Redis at major 7'],
       matchFileNames: ['apps/traces/docker-compose.yaml'],

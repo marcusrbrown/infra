@@ -159,6 +159,7 @@ interface Behaviour {
   langfuseWorker: number | 'throw'
   grafana: number | 'throw'
   prometheus: number | 'throw'
+  embedder: number | 'throw'
   canaryPost: number | 'throw'
   /** Places absent from the ClickHouse row, or `all` when the trace never arrives. Only materialised places can be absent. */
   rowMissing: readonly CanaryPlace[] | 'all'
@@ -191,6 +192,7 @@ function defaults(): Behaviour {
     langfuseWorker: 200,
     grafana: 200,
     prometheus: 200,
+    embedder: 200,
     canaryPost: 200,
     rowMissing: [],
     rawMissing: [],
@@ -261,6 +263,7 @@ function harness(overrides: Partial<Behaviour> = {}) {
     if (url === ENDPOINTS.langfuseWorker) return reply(behaviour.langfuseWorker, '{"status":"ok"}')
     if (url === ENDPOINTS.grafanaHealth) return reply(behaviour.grafana, '{"database":"ok"}')
     if (url === ENDPOINTS.prometheusReady) return reply(behaviour.prometheus, 'Prometheus Server is Ready.')
+    if (url === ENDPOINTS.embedderHealth) return reply(behaviour.embedder, '')
     if (url === ENDPOINTS.canaryReceiver) {
       state.posted = body
       return reply(behaviour.canaryPost, '{}')
@@ -1935,16 +1938,21 @@ describe('the monitoring checks', () => {
     ['grafana 500', {grafana: 500}, 'grafana-health'],
     ['prometheus unreachable', {prometheus: 'throw'}, 'prometheus-health'],
     ['prometheus not ready (503)', {prometheus: 503}, 'prometheus-health'],
+    ['embedder unreachable', {embedder: 'throw'}, 'embedder-health'],
+    ['embedder still loading its model (503)', {embedder: 503}, 'embedder-health'],
   ]
 
-  it('are Grafana and Prometheus, each probed at the endpoint it serves, and are not ingest checks', async () => {
-    expect([...MONITORING_CHECKS]).toEqual(['grafana-health', 'prometheus-health'])
+  it('are Grafana, Prometheus and the Topics embedder, each probed at the endpoint it serves, and are not ingest checks', async () => {
+    expect([...MONITORING_CHECKS]).toEqual(['grafana-health', 'prometheus-health', 'embedder-health'])
     for (const id of MONITORING_CHECKS) expect((REQUIRED_CHECKS as readonly string[]).includes(id)).toBe(false)
     expect(ENDPOINTS.grafanaHealth).toBe('http://grafana:3000/api/health')
     expect(ENDPOINTS.prometheusReady).toBe('http://prometheus:9090/-/ready')
+    expect(ENDPOINTS.embedderHealth).toBe('http://embedder:8080/health')
     const out = await runOnce()
     expect(check(out.detail, 'grafana-health').status).toBe('pass')
     expect(check(out.detail, 'prometheus-health').status).toBe('pass')
+    expect(check(out.detail, 'embedder-health').status).toBe('pass')
+    expect(out.requests.some(entry => entry.url === ENDPOINTS.embedderHealth)).toBe(true)
     expect(out.requests.some(entry => entry.url === ENDPOINTS.grafanaHealth)).toBe(true)
     expect(out.requests.some(entry => entry.url === ENDPOINTS.prometheusReady)).toBe(true)
   })
@@ -2024,8 +2032,21 @@ describe('the monitoring checks', () => {
     expect(assembleVerdict([...ingest, ...unknown], NOW).monitoringOk).toBe(false)
   })
 
+  // Topics is an insight feature: its embedder going down says so on /healthz and in Grafana, and never reaches the
+  // ingest verdict that the deploy gate and `traces ingest open` read.
+  it('an embedder that is down fails monitoring and /healthz only, and its gauge reads 0', async () => {
+    const out = await runOnce({embedder: 'throw'})
+    const detail = record(JSON.parse(out.detail), 'detail')
+    expect([detail.ok, detail.monitoringOk, detail.healthy]).toEqual([true, false, false])
+    expect(check(out.detail, 'embedder-health').detail).toBe('embedder is unhealthy (unreachable)')
+    expect(out.reporter.health().status).toBe(503)
+    const samples = exposition(out.reporter.metrics())
+    expect(samples[`${METRIC_NAMES.probeUp}{target="embedder"}`]).toBe(0)
+    expect(samples[`${METRIC_NAMES.probeUp}{target="grafana"}`]).toBe(1)
+  })
+
   it('does not leak a probe error into the detail', async () => {
-    const out = await runOnce({grafana: 'throw', prometheus: 'throw'})
+    const out = await runOnce({grafana: 'throw', prometheus: 'throw', embedder: 'throw'})
     expect(out.detail).not.toContain('ECONNREFUSED')
   })
 
@@ -2074,6 +2095,7 @@ describe('the metrics listener', () => {
       [`${METRIC_NAMES.probeUp}{target="langfuse-web"}`]: 1,
       [`${METRIC_NAMES.probeUp}{target="langfuse-worker"}`]: 1,
       [`${METRIC_NAMES.probeUp}{target="grafana"}`]: 1,
+      [`${METRIC_NAMES.probeUp}{target="embedder"}`]: 1,
       [`${METRIC_NAMES.diskUsedRatio}{mount="volume"}`]: 0.4,
       [`${METRIC_NAMES.diskUsedRatio}{mount="root"}`]: 0.3,
       [`${METRIC_NAMES.oldestDataAge}{store="clickhouse"}`]: 2 * 86_400,
@@ -2083,15 +2105,16 @@ describe('the metrics listener', () => {
     })
   })
 
-  it('reports a probe that fails as 0, whichever of the three it is', async () => {
+  it('reports a probe that fails as 0, whichever of the four it is', async () => {
     const cases: [Partial<Behaviour>, string][] = [
       [{langfuseWeb: 503}, 'langfuse-web'],
       [{langfuseWorker: 'throw'}, 'langfuse-worker'],
       [{grafana: 500}, 'grafana'],
+      [{embedder: 503}, 'embedder'],
     ]
     for (const [overrides, target] of cases) {
       const samples = exposition((await runOnce(overrides)).reporter.metrics())
-      for (const name of ['langfuse-web', 'langfuse-worker', 'grafana']) {
+      for (const name of ['langfuse-web', 'langfuse-worker', 'grafana', 'embedder']) {
         expect(samples[`${METRIC_NAMES.probeUp}{target="${name}"}`]).toBe(name === target ? 0 : 1)
       }
     }

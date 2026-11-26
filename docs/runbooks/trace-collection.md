@@ -82,7 +82,7 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
    bunx @marcusrbrown/infra traces logs collector --tail 200
    ```
 
-   Services: `caddy`, `collector`, `langfuse-web`, `langfuse-worker`, `clickhouse`, `minio`, `redis`, `postgres`, `tempo`, `grafana`, `prometheus`, `health-reporter`. Logs can hold prompt text, tool output, private repository content and database passwords. Do not paste them into an issue, a chat or a shared log. The command refuses in CI without `--allow-ci`.
+   Services: `caddy`, `collector`, `langfuse-web`, `langfuse-worker`, `clickhouse`, `minio`, `redis`, `postgres`, `tempo`, `grafana`, `prometheus`, `embedder`, `health-reporter`. Logs can hold prompt text, tool output, private repository content and database passwords. Do not paste them into an issue, a chat or a shared log. The command refuses in CI without `--allow-ci`.
 
 ### What the monitor checks
 
@@ -146,10 +146,11 @@ The alert text carries nothing the endpoint said. The exact reason is in the pro
 | `grafana-alerting` | after the sign-in check passes, Grafana lists the Discord contact point and every alert rule group the files define |
 | `prometheus-ready` | after the route is set, the Prometheus image was pulled, the container created, its data volume handed to `nobody` and it started ready (`/-/ready`) |
 | `grafana-ready` | after the route is set, the Grafana image was pulled and it started healthy |
+| `embedder-ready` | after the route is set and after Grafana, the Topics embedder image was pulled, the container created, its model volume handed to `nobody` and it started healthy (`/health`). Its first start reads the model from `huggingface.co`, so it can take a few minutes; later starts read the volume and work with no network |
 
 The canary is the only synthetic trace. The deploy sends it once, after the reporter's verdict is fresh, by running `health-report.ts --canary-once` inside the reporter's container; it lands in the Langfuse environment `canary`. The reporter's periodic run sends none, so a quiet stack holds no routine synthetic traces. If the canary command fails, prints something unreadable or any canary check is not `pass`, the `canary` gate fails and the route stays closed (an open route is held).
 
-The route opens only when every gate passes, except `grafana-signin`, `grafana-alerting`, `prometheus-ready` and `grafana-ready`: Grafana and Prometheus raise the alarm and carry no trace, so they do not decide the route, and they are pulled and started only after it is final. A failing one leaves the route as the other gates set it and fails the run afterwards (see [Grafana sign-in check fails](#grafana-sign-in-check-fails) and [Grafana alerting check fails](#grafana-alerting-check-fails)). Gate design is in [Holding, gates and the route](../../apps/traces/AGENTS.md#holding-gates-and-the-route).
+The route opens only when every gate passes, except `grafana-signin`, `grafana-alerting`, `prometheus-ready`, `grafana-ready` and `embedder-ready`: Grafana and Prometheus raise the alarm, the embedder serves Langfuse Topics, and none carries a trace, so they do not decide the route, and they are pulled and started only after it is final. A failing one leaves the route as the other gates set it and fails the run afterwards (see [Grafana sign-in check fails](#grafana-sign-in-check-fails) and [Grafana alerting check fails](#grafana-alerting-check-fails)). Gate design is in [Holding, gates and the route](../../apps/traces/AGENTS.md#holding-gates-and-the-route).
 
 ### Outcomes
 
@@ -158,7 +159,7 @@ The route opens only when every gate passes, except `grafana-signin`, `grafana-a
 | `Ingest is open: every ingest path reached the collector and asked for a token` | every gate passed; 401 proven on all three paths from inside the host | nothing |
 | `Ingest is OFF. Gates not met:` (or `HELD`) | the deploy completed, but a gate is not met and the route stays closed (an open route is held). `ingest-variable` and `langfuse-key` end here | meet the named gate and deploy again. `ingest-variable` fails while `TRACES_INGEST_OPEN` is unset or anything but exactly `true` |
 | `Gates failed: <gate>: <detail>` | the key pair is set and a safety gate failed. An open route is held first | fix the named gate and deploy again |
-| `The stack was deployed, but an operator-surface check failed.` | only `grafana-signin`, `grafana-alerting`, `prometheus-ready` or `grafana-ready` failed (for the last two, the pull or the start failed: `traces logs prometheus` or `traces logs grafana`, then deploy again, which recreates both; the route is untouched). When `grafana-ready` fails, the two Grafana checks are skipped and the log says so. The route is where the other gates left it (the message says which) | [Grafana sign-in check fails](#grafana-sign-in-check-fails), [Grafana alerting check fails](#grafana-alerting-check-fails) |
+| `The stack was deployed, but an operator-surface check failed.` | only `grafana-signin`, `grafana-alerting`, `prometheus-ready`, `grafana-ready` or `embedder-ready` failed (for the last three, the pull or the start failed: `traces logs prometheus`, `traces logs grafana` or `traces logs embedder`, then deploy again, which recreates all three; the route is untouched. A failing `embedder-ready` usually means the model could not be read from `huggingface.co`). When `grafana-ready` fails, the two Grafana checks are skipped and the log says so. The route is where the other gates left it (the message says which) | [Grafana sign-in check fails](#grafana-sign-in-check-fails), [Grafana alerting check fails](#grafana-alerting-check-fails) |
 | `Applied but unverified: the host was updated and the update did not verify.` | the host changed and a later step failed. The message says whether ingest is held, off, or "may be open" | if it says "may be open", run `bunx @marcusrbrown/infra traces ingest hold` now. Fix the cause named in the message and deploy again. Only a deploy that passes every gate reopens ingest |
 | `The files could not be compared with the host` | nothing was written. The marker stays, so the next deploy holds an open route first | deploy again once the host answers |
 | `Another deploy started on this host and took over` | a newer deploy owns the host; this one stopped and changed nothing further | follow the newer deploy |
@@ -558,6 +559,82 @@ Delete nothing at any stage. A leftover restore volume and the previous volume a
 
 ---
 
+## Topics
+
+Langfuse Topics groups traces by what they were about, on a map the operator creates in the Langfuse UI. It is off until three LLM connections exist. Read the [privacy page](../../apps/docs/src/content/docs/trace-privacy.md) first: Topics sends trace content to a model provider, and the page must say so before the first map is built. The design, the settings and what only the host proves are in [`apps/traces/AGENTS.md`](../../apps/traces/AGENTS.md#topics).
+
+### What runs where
+
+| Part | Where | Notes |
+| --- | --- | --- |
+| Summary and naming models | an OpenCode Go model, through the proxy at `https://cliproxy.fro.bot/v1` | Receives trace transcripts (each block capped by Langfuse). The model must be zero retention and no training |
+| Embedder | the `embedder` service on this host, `http://embedder:8080/v1` | Text Embeddings Inference with `BAAI/bge-small-en-v1.5` (384 dimensions). Internal network only, no public route |
+| Maps, summaries, topics | Langfuse (ClickHouse and PostgreSQL) | The summaries take the 30-day TTL; see [Retention](#what-topics-keeps) |
+
+Settings the stack already sets: Langfuse's LLM connections may reach `embedder` and `cliproxy.fro.bot` and no other host; the worker removes stored transcripts after three days; the worker runs four Topics jobs at once.
+
+### Set it up
+
+1. **Check the deploy.** `bunx @marcusrbrown/infra traces status` shows `embedder` running and `embedder-health` passing. If the last deploy reported `embedder-ready`, fix that first (`traces logs embedder`).
+2. **Create a proxy key just for Topics.** Use the proxy's key command and give the key a name that says what it is for:
+
+   ```bash
+   bunx @marcusrbrown/infra cliproxy keys
+   ```
+
+   Keep it out of shell history and notes: you paste it into Langfuse once. A dedicated key lets you revoke Topics without touching anything else.
+
+3. **Choose the model.** List the OpenCode Go models the proxy serves and pick one from this list only:
+
+   ```bash
+   bunx @marcusrbrown/infra cliproxy models opencode-go
+   ```
+
+   The proxy also serves Claude and GPT models, which are **not** zero retention. A Go model is listed only when the reviewed privacy snapshot clears it ([OpenCode Go through the proxy](cliproxy-opencode-go.md)); check that snapshot (`zeroRetention: true`, `trainsOnData: false`) for the one you pick. Use the id exactly as the command prints it.
+
+4. **Open the Langfuse tunnel** (`bunx @marcusrbrown/infra traces open`) and sign in at `http://localhost:3000`.
+5. **Add three LLM connections** in the project's settings, adapter _OpenAI_, one per role:
+
+   | Role | Base URL | Model | API key |
+   | --- | --- | --- | --- |
+   | Summary | `https://cliproxy.fro.bot/v1` | the Go model id | the Topics proxy key |
+   | Naming (grouping) | `https://cliproxy.fro.bot/v1` | the same or another Go model id | the Topics proxy key |
+   | Embedding | `http://embedder:8080/v1` | `BAAI/bge-small-en-v1.5` | any non-empty text (the embedder checks none) |
+
+   Set the embedding **dimensions to 384**. Topics accepts 64 to 2048, and the embedder refuses more than its model's 384. The embedding model and dimensions are locked once embedded summaries exist.
+
+6. **Build the first map small.** Create a live map, filter it by **trace name** (one workflow, not everything), sample **10 to 20 percent** of traces, and use the **Intent** and **Issues** facets. Check the cost estimate it shows, then start it. Watch `traces logs langfuse-worker` for the first summaries.
+
+### What it costs
+
+- **Model tokens.** One summary call per sampled trace, and one naming call per new topic. The estimate in the map dialog is the guide; it can understate when a model has no price. Each request is capped at 500,000 characters by default and each transcript block at 120 to 10,000 characters, so most requests are far smaller.
+- **The proxy.** Every call is a call to the shared proxy and counts against the Go subscription. Four jobs run at once. If the proxy starts answering 429, lower the sample rate before anything else.
+- **The host.** The embedder uses up to 1 GB of memory and 2 CPUs while it works. The model and its volume are about 0.2 GB.
+- **A backfill.** A map built over a long window summarises every sampled trace in it. Start with a short window.
+
+### What Topics keeps
+
+- Summaries, the embeddings made from them, and which topic each trace belongs to: 30 days, on `unit_start_time`, set by the deploy's retention step (`topic_facet_summaries` must be there or the deploy fails; the other two are skipped when absent).
+- Stored transcripts: three days (the worker's cleaner), with the 30-day `events/` rule as the backstop.
+- Topic names, descriptions and centroids (`topics`): no expiry. A later run reuses an older topic, so an expiry would break a live map. They are cluster labels, but a label written for a small group can come close to the traces it describes.
+
+### Disable it
+
+1. In Langfuse, turn off automatic processing, delete the maps and then the three connections. Deleting the summary connection stops content leaving the host.
+2. Revoke the Topics proxy key (`bunx @marcusrbrown/infra cliproxy keys`).
+3. To purge what is stored, on the host (this is destructive, and `topics` has no expiry of its own). Take a [backup](#dispatch-a-backup-by-hand) first, then run in `clickhouse-client` inside the ClickHouse container: `TRUNCATE TABLE default.topic_facet_summaries; TRUNCATE TABLE default.topic_assignments; TRUNCATE TABLE default.topic_assignments_by_trace; TRUNCATE TABLE default.topics;`. Postgres keeps the map and rule definitions; deleting the maps in the UI removes them.
+4. Leave the embedder, which costs nothing while idle, or remove the `embedder` service, the `embedder_models` volume and the `embedder-health` check from the reporter in one change. Removing only the service makes `/healthz` fail.
+
+### When something is wrong
+
+| Symptom | Cause | Do |
+| --- | --- | --- |
+| Saving the embedding connection fails with "Host is not in the outbound URL allowlist" or "Blocked IP address detected" | the stack's allow-list was changed, or the URL names another host | the base URL must be exactly `http://embedder:8080/v1`; check `LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS` in the compose file |
+| A call to the proxy is refused the same way | the URL names a host other than `cliproxy.fro.bot` | use `https://cliproxy.fro.bot/v1` |
+| Embedding calls answer 422 | the dimensions setting is above 384 | set 384 |
+| `EmbedderDown`, or `embedder-ready` failed | the model was not read (no route to `huggingface.co`) or the volume is not owned by 65534 | `traces logs embedder`; deploy again |
+| Summaries stop, the worker logs 401 or 404 from the proxy | the key was revoked, or the model id is not served | `bunx @marcusrbrown/infra cliproxy models opencode-go`; replace the key or the id in the connection |
+
 ## Alerts and Discord
 
 There are two alert paths, and they do not depend on each other.
@@ -572,6 +649,7 @@ There are two alert paths, and they do not depend on each other.
 | `TracesTargetDown` | critical | Prometheus cannot scrape a target for 5 m, or cannot be queried at all | `traces status`; `traces logs <job>` (`otelcol` is the collector); if every target is down, `traces logs prometheus` |
 | `LangfuseDown` | critical | Langfuse web or worker unhealthy for 5 m. Traces may be accepted and not stored | `traces logs langfuse-worker` / `langfuse-web` |
 | `GrafanaDown` | critical | Grafana unhealthy for 5 m. The health path fails too, and the external monitor reports it | `traces logs grafana` |
+| `EmbedderDown` | warning | the Topics embedder unhealthy for 5 m. Topics cannot embed summaries; ingest is not affected. The health path fails too | `traces logs embedder`; deploy again to recreate it |
 | `ReporterStale` | warning | the reporter's last run finished over 15 m ago, or none is on record | `traces logs health-reporter`; the verdict and every reporter gauge are stale |
 | `CollectorQueueFilling` | warning | an exporter queue is at 0.8 or more of its capacity for 5 m; at full, ingest answers 503 | `traces logs collector`; check the backend the exporter feeds |
 | `CollectorExportFailures` | critical | the collector failed to send or queue spans in the last 30 m. Those spans are lost | the same, then the backend named by the `exporter` label |

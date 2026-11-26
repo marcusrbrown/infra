@@ -1194,6 +1194,10 @@ const TABLE = {
         fact.service(composePath('traces'), 'prometheus'),
         fact.volume(composePath('traces'), 'prometheus_data'),
       ),
+      embedder: maps(
+        fact.service(composePath('traces'), 'embedder'),
+        fact.volume(composePath('traces'), 'embedder_models'),
+      ),
       discord: illustrative('Discord is an external service reached by a webhook.'),
     },
   },

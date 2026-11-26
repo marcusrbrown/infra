@@ -124,6 +124,13 @@ export const GRAFANA_USER_ID = 472
  */
 export const PROMETHEUS_USER_ID = 65_534
 
+/**
+ * The uid and gid the Topics embedder runs as: `nobody`. The image declares no user, so the compose file names one, and
+ * deploy makes the model volume's directory owned by this id, once, like Prometheus's data volume.
+ * `docker-compose.test.ts` pins the embedder's `user` to it.
+ */
+export const EMBEDDER_USER_ID = 65_534
+
 // ─── Deploy state and locks ───────────────────────────────────────────────────
 //
 // These paths are a contract between the deploy, the sender-token commands and the ingest command. The CLI

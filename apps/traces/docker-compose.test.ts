@@ -3,7 +3,8 @@ import {readdirSync} from 'node:fs'
 import {describe, expect, it} from 'bun:test'
 
 import {ENDPOINTS, METRIC_NAMES, PATHS, PORTS, THRESHOLDS} from './src/health-report'
-import {GRAFANA_USER_ID, PROMETHEUS_USER_ID, TEMPO_USER_ID, TRACES_SENTINEL_PATH} from './src/host'
+import {EMBEDDER_USER_ID, GRAFANA_USER_ID, PROMETHEUS_USER_ID, TEMPO_USER_ID, TRACES_SENTINEL_PATH} from './src/host'
+import {OBJECT_STORE_PREFIXES} from './src/retention'
 
 // Reads the real compose file and the service configs beside it. Image tags and digests are
 // Renovate-managed, so these tests assert their format and never copy a value.
@@ -128,7 +129,7 @@ describe('traces compose: networks', () => {
   })
 
   it('keeps the stores, Grafana and the worker off the edge network', () => {
-    for (const name of ['clickhouse', 'postgres', 'redis', 'minio', 'grafana', 'langfuse-worker']) {
+    for (const name of ['clickhouse', 'postgres', 'redis', 'minio', 'grafana', 'langfuse-worker', 'embedder']) {
       expect(networksOf(name)).toEqual(['backend'])
     }
   })
@@ -304,6 +305,7 @@ describe('traces compose: health reporter', () => {
       'langfuse-web': [3000],
       'langfuse-worker': [3030],
       grafana: [3000],
+      embedder: [8080],
       clickhouse: [8123],
       minio: [9000],
     }
@@ -679,6 +681,149 @@ describe('traces compose: Prometheus', () => {
   })
 })
 
+describe('traces compose: Topics embedder', () => {
+  const embedder = (): Rec => service('embedder')
+  const flags = (): string[] => strings(embedder().command, 'embedder.command')
+  const flag = (name: string): string | undefined =>
+    flags()
+      .find(entry => entry.startsWith(`--${name}=`))
+      ?.slice(name.length + 3)
+
+  it('is the Text Embeddings Inference CPU image on the 1.9 line, pinned by tag and digest', () => {
+    expect(String(embedder().image)).toMatch(
+      /^ghcr\.io\/huggingface\/text-embeddings-inference:cpu-1\.9\.\d+@sha256:[0-9a-f]{64}$/,
+    )
+  })
+
+  // The tag has a `cpu-` prefix, which Renovate's docker versioning does not read, so the rule names a regex scheme.
+  it('is held to its line by a Renovate rule that reads the tag and that the pinned tag satisfies', async () => {
+    const config = record(
+      Bun.JSON5.parse(await Bun.file(new URL('../../.github/renovate.json5', import.meta.url)).text()),
+      'renovate',
+    )
+    const rule = (config.packageRules as unknown[])
+      .map(entry => record(entry, 'rule'))
+      .find(
+        entry =>
+          Array.isArray(entry.matchPackageNames) &&
+          entry.matchPackageNames.includes('ghcr.io/huggingface/text-embeddings-inference'),
+      )
+    expect(rule?.matchFileNames).toEqual(['apps/traces/docker-compose.yaml'])
+    const tag = /:([^@]+)@/.exec(String(embedder().image))?.[1] ?? ''
+    const versioning = String(rule?.versioning)
+    expect(versioning.startsWith('regex:')).toBe(true)
+    const groups = new RegExp(versioning.slice('regex:'.length)).exec(tag)?.groups
+    expect(Object.keys(groups ?? {}).sort()).toEqual(['major', 'minor', 'patch'])
+    const allowed = String(rule?.allowedVersions)
+    expect(allowed.startsWith('/') && allowed.endsWith('/')).toBe(true)
+    expect(new RegExp(allowed.slice(1, -1)).test(tag)).toBe(true)
+    expect(new RegExp(allowed.slice(1, -1)).test('cpu-1.10.0')).toBe(false)
+    expect(new RegExp(allowed.slice(1, -1)).test('cpu-1.90.0')).toBe(false)
+    // A new model or a new line changes what the vectors mean, so it is a reviewed PR and never an automerge.
+    expect(rule?.automerge).toBe(false)
+    expect(rule?.dependencyDashboardApproval).toBe(true)
+  })
+
+  it('is on the backend network only, and nothing publishes or exposes a port', () => {
+    expect(networksOf('embedder')).toEqual(['backend'])
+    for (const key of ['ports', 'expose', 'network_mode', 'pid', 'privileged']) expect(embedder()[key]).toBeUndefined()
+  })
+
+  it('is never reached by Caddy in any state, and the route-critical services do not wait for it', async () => {
+    const caddy = [
+      await read('config/Caddyfile'),
+      ...(await Promise.all(['off', 'held', 'open'].map(state => read(`config/ingest/${state}.caddy`)))),
+    ]
+    for (const text of caddy) expect(text).not.toMatch(/embedder/i)
+    for (const name of names) {
+      const deps = service(name).depends_on
+      const needs = deps === undefined ? [] : Array.isArray(deps) ? deps : Object.keys(record(deps, 'depends_on'))
+      expect({name, needs: needs.includes('embedder')}).toEqual({name, needs: false})
+    }
+    expect(embedder().depends_on).toBeUndefined()
+  })
+
+  it('runs as nobody on a read-only root filesystem with no capabilities, and has a memory limit', () => {
+    expect(EMBEDDER_USER_ID).toBe(65_534)
+    expect(String(embedder().user)).toBe(`${EMBEDDER_USER_ID}:${EMBEDDER_USER_ID}`)
+    expect(embedder().read_only).toBe(true)
+    expect(strings(embedder().cap_drop, 'cap_drop')).toEqual(['ALL'])
+    expect(strings(embedder().security_opt, 'security_opt')).toContain('no-new-privileges:true')
+    expect(String(embedder().mem_limit)).toMatch(/^[12]g$|^(?:5\d\d|[6-9]\d\d|1\d{3})m$/)
+  })
+
+  it('serves one model, pinned to an immutable revision, on a non-privileged port the reporter probes', () => {
+    expect(flag('model-id')).toBe('BAAI/bge-small-en-v1.5')
+    expect(flag('revision')).toMatch(/^[0-9a-f]{40}$/)
+    expect(flag('port')).toBe('8080')
+    const probed = new URL(ENDPOINTS.embedderHealth)
+    expect([probed.hostname, probed.port, probed.pathname]).toEqual(['embedder', flag('port') ?? '', '/health'])
+  })
+
+  // Langfuse's OpenAI-compatible adapter sends up to 2048 inputs in one request to `<baseURL>/embeddings`.
+  it('takes as many inputs per request as that adapter sends', () => {
+    expect(Number(flag('max-client-batch-size'))).toBeGreaterThanOrEqual(2048)
+  })
+
+  it('has no token, no key, no tracing endpoint and no other way to send data out', () => {
+    for (const key of Object.keys(environment('embedder')))
+      expect(key).not.toMatch(/TOKEN|KEY|SECRET|PASSWORD|ENDPOINT/i)
+    for (const entry of flags()) expect(entry).not.toMatch(/otlp|hf-token|api-key|json-output=false/i)
+  })
+
+  it('keeps the model on one named volume it owns, and writes nowhere else but a tmpfs', () => {
+    expect(strings(embedder().volumes, 'embedder.volumes')).toEqual(['embedder_models:/data'])
+    expect(Object.keys(record(compose.volumes, 'volumes'))).toContain('embedder_models')
+    expect(strings(embedder().tmpfs, 'embedder.tmpfs')).toEqual(['/tmp'])
+    expect(environment('embedder').HUGGINGFACE_HUB_CACHE).toBeUndefined()
+  })
+
+  it('checks its own health endpoint on loopback with the curl the image ships, allowing time to fetch the model', () => {
+    const check = record(embedder().healthcheck, 'healthcheck')
+    const test = strings(check.test, 'healthcheck.test').join(' ')
+    expect(test).toContain('curl')
+    expect(test).toContain('http://127.0.0.1:8080/health')
+    expect(String(check.start_period)).toMatch(/^(?:[2-9]\d\d|\d{4,})s$/)
+  })
+})
+
+// Langfuse reads these on web (it validates a connection when it is saved) and on the worker (it makes the calls).
+describe('traces compose: Langfuse Topics settings', () => {
+  const both = ['langfuse-web', 'langfuse-worker'] as const
+
+  it.each(both)('%s: LLM connections may reach the embedder and the proxy, and no other host', name => {
+    const env = environment(name)
+    expect(env.LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS).toBe('embedder,cliproxy.fro.bot')
+    // The embedder host is the compose service, so it resolves on the backend network both services share.
+    expect(names).toContain('embedder')
+    expect(networksOf(name)).toContain('backend')
+    // The allow-list is the one switch: no private-address exemption sits beside it.
+    for (const key of Object.keys(env)) expect(key).not.toMatch(/LLM_CONNECTION_WHITELISTED|BLOCKED_IP/)
+  })
+
+  it.each(both)('%s: leaves events dispatch and the Topics queues on, and the experimental self-tracing off', name => {
+    const env = environment(name)
+    expect(env.LANGFUSE_EVENTS_DISPATCH_ENABLED ?? 'true').toBe('true')
+    expect(env.QUEUE_CONSUMER_EVENTS_DISPATCH_QUEUE_IS_ENABLED ?? 'true').toBe('true')
+    expect(env.QUEUE_CONSUMER_TOPICS_TRACE_QUEUE_IS_ENABLED ?? 'true').toBe('true')
+    expect(env.QUEUE_CONSUMER_TOPICS_UPDATE_QUEUE_IS_ENABLED ?? 'true').toBe('true')
+    expect(env.LANGFUSE_TOPICS_TRACING_ENABLED_PROJECT_IDS_EXPERIMENTAL).toBeUndefined()
+  })
+
+  // Events dispatch writes the whole assembled transcript of each routed trace under the event-upload prefix, where
+  // the 30-day rule is only a backstop. The worker's own cleaner removes them after three days.
+  it('the worker deletes stored transcripts after three days, under the prefix the 30-day rule covers', () => {
+    expect(environment('langfuse-worker').LANGFUSE_EVENTS_DISPATCH_TRANSCRIPT_CLEANER_ENABLED).toBe('true')
+    expect(environment('langfuse-web').LANGFUSE_EVENTS_DISPATCH_TRANSCRIPT_CLEANER_ENABLED).toBeUndefined()
+    const prefix = environment('langfuse-worker').LANGFUSE_S3_EVENT_UPLOAD_PREFIX
+    expect(OBJECT_STORE_PREFIXES as readonly string[]).toContain(prefix ?? '')
+  })
+
+  it('limits how many summaries the worker asks the proxy for at once', () => {
+    expect(environment('langfuse-worker').LANGFUSE_TOPICS_TRACE_QUEUE_PROCESSING_CONCURRENCY).toBe('4')
+  })
+})
+
 describe('collector mounts match the collector config', async () => {
   const collectorConfig = await read('config/otelcol.yaml')
 
@@ -701,6 +846,7 @@ const RULE_TITLES = [
   'TempoAttributeTruncation',
   'LangfuseDown',
   'GrafanaDown',
+  'EmbedderDown',
   'VolumeSpaceWarning',
   'VolumeSpaceCritical',
   'RootSpace',
@@ -846,6 +992,8 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('TracesTargetDown').labels.severity).toBe('critical')
     expect(rule('TempoDiscards').labels.severity).toBe('critical')
     expect(rule('TempoAttributeTruncation').labels.severity).toBe('info')
+    // Topics is an insight feature: no trace depends on the embedder.
+    expect(rule('EmbedderDown').labels.severity).toBe('warning')
     expect(rule('VolumeSpaceWarning').labels.severity).toBe('warning')
     expect(rule('VolumeSpaceCritical').labels.severity).toBe('critical')
   })
@@ -933,7 +1081,7 @@ describe('Grafana alerting provisioning', async () => {
       operator: '>',
       value: ((THRESHOLDS.staleAfterIntervals + 1) * THRESHOLDS.intervalMs) / 1000,
     })
-    for (const title of ['TracesTargetDown', 'LangfuseDown', 'GrafanaDown']) {
+    for (const title of ['TracesTargetDown', 'LangfuseDown', 'GrafanaDown', 'EmbedderDown']) {
       expect(rule(title).comparison).toEqual({operator: '<', value: 1})
     }
   })
@@ -942,6 +1090,7 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('VolumeSpaceWarning').expr).toBe(`${METRIC_NAMES.diskUsedRatio}{mount="volume"}`)
     expect(rule('RootSpace').expr).toBe(`${METRIC_NAMES.diskUsedRatio}{mount="root"}`)
     expect(rule('GrafanaDown').expr).toBe(`${METRIC_NAMES.probeUp}{target="grafana"}`)
+    expect(rule('EmbedderDown').expr).toBe(`${METRIC_NAMES.probeUp}{target="embedder"}`)
     expect(rule('LangfuseDown').expr).toContain(`${METRIC_NAMES.probeUp}{target=~"langfuse-web|langfuse-worker"}`)
     expect(rule('DataOlderThan31d').expr).toBe(METRIC_NAMES.oldestDataAge)
     expect(rule('ReporterStale').expr).toBe(`time() - ${METRIC_NAMES.lastRun}`)
@@ -973,6 +1122,7 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('CollectorQueueFilling').for).toBe('5m')
     expect(rule('LangfuseDown').for).toBe('5m')
     expect(rule('GrafanaDown').for).toBe('5m')
+    expect(rule('EmbedderDown').for).toBe('5m')
   })
 
   // The message is fixed text, the rule's own labels and numbers. No template reads a span, a log line or a body.

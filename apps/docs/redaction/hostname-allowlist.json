@@ -45,6 +45,11 @@
     "scope": ["**/*.md", "**/*.html"]
   },
   {
+    "host": "huggingface.co",
+    "reason": "Model hub the Topics embedder reads its pinned model from on its first start, named in the trace privacy page and the trace collection operator guide as an outbound call",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
     "host": "box.heatvision.co",
     "reason": "KeeWeb deploy target (Mail-In-A-Box server), named in the KeeWeb guide and the architecture overview",
     "scope": ["**/*.md", "**/*.html"]

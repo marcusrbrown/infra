@@ -183,7 +183,11 @@ export class FakeHost {
   clock = EPOCH
 
   constructor(readonly options: FakeOptions = {}) {
-    this.tables = new Map(Object.entries(options.tables ?? {events_full: undefined, events_core: undefined}))
+    this.tables = new Map(
+      Object.entries(
+        options.tables ?? {events_full: undefined, events_core: undefined, topic_facet_summaries: undefined},
+      ),
+    )
   }
 
   readonly run: Runner = async (argv, runOptions) => {
@@ -465,7 +469,8 @@ export class FakeHost {
       case step === 'pull':
       case step.startsWith('pull-'):
       case step === 'create-collector':
-      case step === 'create-prometheus': {
+      case step === 'create-prometheus':
+      case step === 'create-embedder': {
         return ok(`epoch=${this.clock}\nTRACES_STEP_OK:${step}\n`)
       }
       case step === 'queue-volume': {
@@ -473,6 +478,9 @@ export class FakeHost {
       }
       case step === 'prometheus-volume': {
         return ok('TRACES_PROMETHEUS_VOLUME_READY\n')
+      }
+      case step === 'embedder-volume': {
+        return ok('TRACES_EMBEDDER_VOLUME_READY\n')
       }
       case step.startsWith('up-'): {
         return this.up(step, command)
@@ -616,7 +624,7 @@ export class FakeHost {
     ]
     const passes = (check: {status: string}): boolean => check.status === 'pass' || check.status === 'warn'
     const checks = this.checksFor(required).map(check => ({...check, scope: 'ingest'}))
-    const monitoring = this.checksFor(['grafana-health', 'prometheus-health']).map(check => ({
+    const monitoring = this.checksFor(['grafana-health', 'prometheus-health', 'embedder-health']).map(check => ({
       ...check,
       scope: 'monitoring',
     }))

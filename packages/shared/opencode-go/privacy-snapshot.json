@@ -3,7 +3,7 @@
   "source": {
     "repo": "anomalyco/opencode",
     "path": "services/site/src/docs/content/console/go.mdx",
-    "commit": "13d601e31f9b6a7b7bbd581fe5d6d7e9ef656898"
+    "commit": "44344bd22d37da2dd6098e8d4b8b0236a3e143e0"
   },
   "models": {
     "beam-free": {
@@ -22,13 +22,13 @@
       "zeroRetention": true,
       "trainsOnData": false,
       "regionGated": true,
-      "agreementExpiry": "2026-11-30"
+      "agreementExpiry": "2026-12-31"
     },
     "deepseek-v4.1-flash": {
       "zeroRetention": true,
       "trainsOnData": false,
       "regionGated": true,
-      "agreementExpiry": "2026-11-30"
+      "agreementExpiry": "2026-12-31"
     },
     "gemini-4-argon": {
       "zeroRetention": false,
@@ -103,13 +103,13 @@
       "agreementExpiry": null
     },
     "kimi-k3": {
-      "zeroRetention": false,
+      "zeroRetention": true,
       "trainsOnData": false,
       "regionGated": false,
       "agreementExpiry": null
     },
     "kimi-k3.1-pro": {
-      "zeroRetention": false,
+      "zeroRetention": true,
       "trainsOnData": false,
       "regionGated": false,
       "agreementExpiry": null

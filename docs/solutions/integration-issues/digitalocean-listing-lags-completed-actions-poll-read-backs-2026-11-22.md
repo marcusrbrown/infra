@@ -8,15 +8,19 @@ symptoms:
   - 'Volume "traces-data" not found after creation, right after doctl compute volume create returned'
   - 'Volume "traces-data" is still attached to droplet <id> after the detach call, right after volume-action detach --wait returned'
   - "Trace snapshot backup failed: do-api:list-snapshots:malformed, one second after the snapshot was created"
+  - "Trace snapshot backup failed: created-snapshot-not-listed, although the snapshot existed (the listing parsed but did not contain it)"
   - "A restore stopped half-way: ports closed, Docker stopped, both volumes detached"
 root_cause: async_timing
 resolution_type: code_fix
 severity: medium
+last_updated: 2026-11-26
 tags: [digitalocean, doctl, eventual-consistency, volume, snapshot, restore, backup, read-back]
 related_issues:
   - https://github.com/marcusrbrown/infra/pull/2012
   - https://github.com/marcusrbrown/infra/pull/2019
   - https://github.com/marcusrbrown/infra/issues/2017
+  - https://github.com/marcusrbrown/infra/issues/2083
+  - https://github.com/marcusrbrown/infra/pull/2108
 related_docs:
   - docs/solutions/database-issues/tempo-volume-snapshot-torn-block-restore-quarantine-2026-11-22.md
   - docs/solutions/best-practices/remove-interrupted-restore-resume-path-instead-of-patching-2026-11-22.md
@@ -28,12 +32,13 @@ related_docs:
 
 ## Problem
 
-DigitalOcean's volume list and snapshot list can trail a completed change by seconds. A single read taken right after the change can omit a new object, still show the old attachment state, or answer in an unexpected shape. Code that treats that one read as proof of the change fails on a change that succeeded. The traces rollout hit this three times: provisioning (volume create), restore (volume detach) and the daily backup (snapshot create). Both `doctl` (provisioning, restore) and the REST API (the backup script) showed it.
+DigitalOcean's volume list and snapshot list can trail a completed change by seconds. A single read taken right after the change can omit a new object, still show the old attachment state, or answer in an unexpected shape. Code that treats that one read as proof of the change fails on a change that succeeded. The traces rollout hit this three times: provisioning (volume create), restore (volume detach) and the daily backup (snapshot create, in two forms: a malformed listing, then a clean listing that lacked the new snapshot). Both `doctl` (provisioning, restore) and the REST API (the backup script) showed it.
 
 ## Symptoms
 
 - Volume create and detach succeeded, but the immediate listings respectively omitted the volume and showed its old attachment.
 - Snapshot creation succeeded, but the immediate read-back was malformed.
+- Snapshot creation succeeded, but a later read-back parsed cleanly and did not list the new snapshot. The 2026-11-25 scheduled backup failed with `created-snapshot-not-listed` and opened #2083, although the snapshot existed. The 25 s window of six reads was too short.
 - In this probe, a volume created with `--desc` appeared in the list about 15 seconds after creation, while `volume get` returned it immediately.
 
 ## What Didn't Work
@@ -46,11 +51,12 @@ DigitalOcean's volume list and snapshot list can trail a completed change by sec
 
 `pollVolumeListing` in `apps/traces/server/provision.ts:381-393` makes at most 12 reads, five seconds apart, for create, attach and detach; the caller fails if the expected state remains absent.
 
-Backup read-back in `packages/cli/scripts/traces-backup.ts:364-379` (`readBackSnapshots`) makes at most six reads, five seconds apart, after creation. It retries malformed listings or a missing created ID; network, timeout and HTTP failures remain immediate. Without a create it reads once. Malformed-response errors identify the failing part, not response values.
+The backup read-back (`readBackSnapshots` and the `READBACK_*` constants in [`packages/cli/scripts/traces-backup.ts`](../../../packages/cli/scripts/traces-backup.ts)) retries malformed listings and listings that lack the new id. It fails network, timeout and HTTP errors at once, and it keeps the age and prune guards. Its window is its own, not the restore poll's.
 
 ## Prevention
 
 - **Rule, scoped to what was observed.** After `volume create`, `volume-action attach`, `volume-action detach` and a snapshot create, read the result back through a bounded poll on the expected state. Do not treat one list read as proof.
+- **A retry window is a measurement, not a constant.** Size it from the observed lag, record the basis, and revisit it after a not-listed failure. The first snapshot window came from a probe of the volume listing (about 15 seconds). The 2026-11-25 backup then needed longer (#2083, #2108). A run that passes under the old window shows only that the lag is intermittent.
 - **Known limit of the detach poll.** `detachVolume` accepts a listing that shows the volume without the droplet, and also a listing that omits the volume (`apps/traces/server/provision.ts:427-431`). In the second case it does not prove the detach.
 - **Audited read-after-write pairs left as single reads, on purpose:**
   - Firewall create then find, `ensureFirewall` at `apps/traces/server/provision.ts:553`. A miss throws before anything depends on the firewall.

@@ -3,10 +3,16 @@
 #
 # Absence is decided rule by rule, never by default:
 #   - A loss counter (export failures, ingest 503s, Tempo discards and truncation) is not exported until its first
-#     increment. No data therefore means no loss: noDataState OK, so an absent counter never alerts. The export
-#     failure rule joins its two counters with `or` over a `kind` label, not with `+` (which drops every series
-#     missing from one side) and not with one name regex (`increase` drops the metric name, so two counters of one
-#     exporter would collide as one labelset and the query would error).
+#     increment. No data therefore means no loss: noDataState OK, so an absent counter never alerts.
+#   - `increase()` of a series that is absent, then 1, then flat is 0, so each loss query is two halves joined by
+#     `or`: `increase(x[30m]) > 0` for a series that was there and rose, and `x unless x offset 30m` for a series that
+#     is present now and was absent 30 minutes ago. The second half needs `up{job=...} offset 30m == 1`: with no
+#     history (monitoring start-up, a target that was down) an old count is not a new failure and does not page.
+#     The same queries are mirrored in `config/prometheus/loss-rules.yml` and tested with promtool; a test fails
+#     when the two differ.
+#   - The export failure rule joins its two counters with `or` over a `kind` label, not with `+` (which drops every
+#     series missing from one side) and not with one name regex (`increase` drops the metric name, so two counters
+#     of one exporter would collide as one labelset and the query would error).
 #   - TracesTargetDown and ReporterStale read series that must always exist. No data means Prometheus is not
 #     scraping, or the reporter has recorded no run: noDataState Alerting.
 #   - Every other rule reads a gauge the reporter leaves out when it could not take the reading (that makes the
@@ -287,7 +293,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: 'sum by (exporter) (label_replace(increase(otelcol_exporter_send_failed_spans[30m]), "kind", "send", "", "") or label_replace(increase(otelcol_exporter_enqueue_failed_spans[30m]), "kind", "enqueue", "", ""))'
+              expr: '(sum by (exporter) (label_replace(increase(otelcol_exporter_send_failed_spans[30m]), "kind", "send", "", "") or label_replace(increase(otelcol_exporter_enqueue_failed_spans[30m]), "kind", "enqueue", "", "")) > 0) or (sum by (exporter) (label_replace(otelcol_exporter_send_failed_spans unless otelcol_exporter_send_failed_spans offset 30m, "kind", "send", "", "") or label_replace(otelcol_exporter_enqueue_failed_spans unless otelcol_exporter_enqueue_failed_spans offset 30m, "kind", "enqueue", "", "")) > 0 and on() (up{job="otelcol"} offset 30m == 1))'
               instant: true
               range: false
               intervalMs: 1000
@@ -336,7 +342,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: 'sum(increase(http_server_request_duration_count{http_response_status_code="503",http_route=""}[30m]))'
+              expr: '(sum(increase(http_server_request_duration_count{http_response_status_code="503",http_route=""}[30m])) > 0) or (sum(http_server_request_duration_count{http_response_status_code="503",http_route=""} unless http_server_request_duration_count{http_response_status_code="503",http_route=""} offset 30m) > 0 and on() (up{job="otelcol"} offset 30m == 1))'
               instant: true
               range: false
               intervalMs: 1000
@@ -390,7 +396,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: 'sum by (reason) (increase({__name__=~"tempo_discarded_spans(_total)?"}[30m]))'
+              expr: '(sum by (reason) (increase({__name__=~"tempo_discarded_spans(_total)?"}[30m])) > 0) or (sum by (reason) ({__name__=~"tempo_discarded_spans(_total)?"} unless {__name__=~"tempo_discarded_spans(_total)?"} offset 30m) > 0 and on() (up{job="tempo"} offset 30m == 1))'
               instant: true
               range: false
               intervalMs: 1000
@@ -439,7 +445,7 @@ groups:
               datasource:
                 type: prometheus
                 uid: prometheus
-              expr: 'sum(increase({__name__=~"tempo_distributor_attributes_truncated(_total)?"}[30m]))'
+              expr: '(sum(increase({__name__=~"tempo_distributor_attributes_truncated(_total)?"}[30m])) > 0) or (sum({__name__=~"tempo_distributor_attributes_truncated(_total)?"} unless {__name__=~"tempo_distributor_attributes_truncated(_total)?"} offset 30m) > 0 and on() (up{job="tempo"} offset 30m == 1))'
               instant: true
               range: false
               intervalMs: 1000

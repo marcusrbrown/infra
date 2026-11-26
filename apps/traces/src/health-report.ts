@@ -15,6 +15,12 @@
 //                                 Prometheus scrapes it over the compose network. Caddy never routes to it and
 //                                 nothing publishes it.
 //
+// Two sets of checks, one answer each. The ingest checks (the collector, Tempo, Langfuse, the disks and the age of the
+// data) decide whether traces are received and stored; the monitoring checks (Grafana and Prometheus) decide whether the
+// stack can tell anyone when it is not. `ok` is the ingest verdict, which the deploy gate and `traces ingest open` read, so
+// a dead Grafana or Prometheus can never hold or refuse healthy ingest. `/healthz` answers for both (`healthy`), so the
+// external monitor still reports a dead Grafana or Prometheus.
+//
 // Rules every check follows:
 //   - Fail closed. An unreachable dependency, a non-2xx, an unparsable body or a missing metric is
 //     `unknown` or `fail`, never a pass. The verdict passes only when every required check is `pass` or `warn`.
@@ -119,6 +125,7 @@ export const ENDPOINTS = {
   langfuseWeb: 'http://langfuse-web:3000/api/public/health',
   langfuseWorker: 'http://langfuse-worker:3030/api/health',
   grafanaHealth: 'http://grafana:3000/api/health',
+  prometheusReady: 'http://prometheus:9090/-/ready',
   clickhouse: 'http://clickhouse:8123/',
   objectStore: 'http://minio:9000',
 } as const
@@ -146,13 +153,19 @@ export interface CheckResult {
 }
 
 export interface Verdict {
+  /** The ingest verdict: every ingest check passes. What the deploy gate and `traces ingest open` read. */
   ok: boolean
+  /** Every monitoring check passes. A verdict missing one of them is not monitoring-ok. */
+  monitoringOk: boolean
   /** When the run finished, in epoch milliseconds. */
   at: number
   checks: CheckResult[]
 }
 
-/** The checks every verdict must carry. A verdict missing one cannot pass. */
+/** What a check is about: whether traces are received and stored, or whether the stack can raise an alarm. */
+export type CheckScope = 'ingest' | 'monitoring'
+
+/** The checks every ingest verdict must carry. A verdict missing one cannot pass. */
 export const REQUIRED_CHECKS = [
   'collector-health',
   'collector-queues',
@@ -163,13 +176,23 @@ export const REQUIRED_CHECKS = [
   'tempo-truncation',
   'langfuse-web',
   'langfuse-worker',
-  'grafana-health',
   'volume-space',
   'root-space',
   'data-age-clickhouse',
   'data-age-object-store',
   'data-age-tempo',
 ] as const
+
+/**
+ * The checks of the alerting path. They fail `/healthz` and nothing else: no ingest decision reads them. A verdict
+ * missing one cannot be monitoring-ok.
+ */
+export const MONITORING_CHECKS = ['grafana-health', 'prometheus-health'] as const
+
+/** The scope of a check. An id nobody has classified is an ingest check, so a new check fails closed. */
+export function checkScope(id: string): CheckScope {
+  return (MONITORING_CHECKS as readonly string[]).includes(id) ? 'monitoring' : 'ingest'
+}
 
 export type Probe<T> = {ok: true; value: T} | {ok: false; reason: string}
 
@@ -1210,6 +1233,14 @@ export async function checkGrafana(deps: ReporterDeps): Promise<CheckResult> {
     : result('grafana-health', 'fail', `grafana is unhealthy (${probe.reason})`)
 }
 
+/** Prometheus answers `/-/ready` once it has loaded its data and can serve queries. Grafana's alert rules read it. */
+export async function checkPrometheus(deps: ReporterDeps): Promise<CheckResult> {
+  const probe = await probeText(deps, ENDPOINTS.prometheusReady)
+  return probe.ok
+    ? result('prometheus-health', 'pass', 'prometheus is ready')
+    : result('prometheus-health', 'fail', `prometheus is not ready (${probe.reason})`)
+}
+
 // ─── ClickHouse (read-only user) ──────────────────────────────────────────────
 
 async function queryClickHouse(
@@ -1473,17 +1504,22 @@ export interface RunOutcome {
   gauges: Gauges
 }
 
+const passes = (entry: CheckResult): boolean => entry.status === 'pass' || entry.status === 'warn'
+
 /**
- * Assemble a verdict from check results. It passes only when every required check is present and is `pass` or
- * `warn`. A missing check, an unknown one or a failed one fails the verdict.
+ * Assemble a verdict from check results. The ingest verdict passes only when every required ingest check is present
+ * and is `pass` or `warn`: a missing check, an unknown one or a failed one fails it. Anything that is not a monitoring
+ * check counts as an ingest check, so an unclassified id fails closed. The monitoring verdict is the same rule over
+ * `MONITORING_CHECKS`, and is kept apart: it never touches `ok`.
  */
 export function assembleVerdict(results: readonly CheckResult[], at: number): Verdict {
   const byId = new Map(results.map(entry => [entry.id, entry]))
   const checks = REQUIRED_CHECKS.map(id => byId.get(id) ?? result(id, 'unknown', 'check did not run'))
-  const required: readonly string[] = REQUIRED_CHECKS
-  const extras = results.filter(entry => !required.includes(entry.id))
-  const all = [...checks, ...extras]
-  return {ok: all.every(entry => entry.status === 'pass' || entry.status === 'warn'), at, checks: all}
+  const monitoring = MONITORING_CHECKS.map(id => byId.get(id) ?? result(id, 'unknown', 'check did not run'))
+  const classified: readonly string[] = [...REQUIRED_CHECKS, ...MONITORING_CHECKS]
+  const extras = results.filter(entry => !classified.includes(entry.id))
+  const ingest = [...checks, ...extras]
+  return {ok: ingest.every(passes), monitoringOk: monitoring.every(passes), at, checks: [...ingest, ...monitoring]}
 }
 
 const COLLECTOR_COUNTER_PREFIXES = ['enqueue:', 'send:', 'http503:'] as const
@@ -1525,7 +1561,7 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
   const disks: Gauges['disk'] = {}
   const stores: Gauges['ages'] = {}
 
-  const [collector, tempo, langfuse, grafana, disk, ages] = await Promise.all([
+  const [collector, tempo, langfuse, monitoring, disk, ages] = await Promise.all([
     guarded(['collector-health', 'collector-queues', 'collector-failures', 'collector-refused'], async () => {
       const [health, metrics] = await Promise.all([
         checkCollectorHealth(deps),
@@ -1556,7 +1592,10 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
       return [ready, ...evaluated.results]
     }),
     guarded(['langfuse-web', 'langfuse-worker'], () => checkLangfuse(deps)),
-    guarded(['grafana-health'], async () => [await checkGrafana(deps)]),
+    guarded(['grafana-health', 'prometheus-health'], async () => {
+      const [grafana, prometheus] = await Promise.all([checkGrafana(deps), checkPrometheus(deps)])
+      return [grafana, prometheus]
+    }),
     guarded(['volume-space', 'root-space'], async () => {
       const [sentinel, volume, root] = await Promise.all([
         readFileText(deps, PATHS.volumeSentinel),
@@ -1600,7 +1639,7 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
     }),
   ])
 
-  const results = [...collector, ...tempo, ...langfuse, ...grafana, ...disk, ...ages]
+  const results = [...collector, ...tempo, ...langfuse, ...monitoring, ...disk, ...ages]
   const finishedAt = deps.now()
   const probes: Gauges['probes'] = {}
   for (const [target, id] of Object.entries(PROBE_TARGETS) as [ProbeTarget, string][]) {
@@ -1681,7 +1720,8 @@ export function createReporter(deps: ReporterDeps): Reporter {
   return {
     runOnce,
     health: () => {
-      const ok = verdict?.ok === true && isFresh()
+      // The public answer is for the whole stack: ingest and monitoring.
+      const ok = verdict?.ok === true && verdict.monitoringOk && isFresh()
       return {
         status: ok ? 200 : 503,
         body: JSON.stringify({ok, at: verdict === undefined ? null : new Date(verdict.at).toISOString()}),
@@ -1694,9 +1734,13 @@ export function createReporter(deps: ReporterDeps): Reporter {
         intervalMs: THRESHOLDS.intervalMs,
         ran: verdict !== undefined,
         stale: verdict === undefined ? true : !isFresh(),
+        // `ok` is the ingest verdict alone, which `traces ingest open` and the deploy gate read. `healthy` is what
+        // `/healthz` answers: ingest and monitoring.
         ok: verdict?.ok === true && isFresh(),
+        monitoringOk: verdict?.monitoringOk === true && isFresh(),
+        healthy: verdict?.ok === true && verdict.monitoringOk && isFresh(),
         at: verdict === undefined ? null : new Date(verdict.at).toISOString(),
-        checks: verdict?.checks ?? [],
+        checks: (verdict?.checks ?? []).map(entry => ({...entry, scope: checkScope(entry.id)})),
         ingest,
       }),
     metrics: () => renderMetrics(gauges),

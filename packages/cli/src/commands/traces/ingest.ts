@@ -242,7 +242,7 @@ async function openFlow(targets: Targets, ctx: ActionCtx, deps: IngestDeps): Pro
   }
   if (!isPassing(detail.detail)) {
     ctx.console.error('Refusing to open ingest: the health verdict is not passing. Nothing was changed.')
-    for (const line of failingLines(detail.detail)) ctx.console.error(`  ${line}`)
+    for (const line of failingLines(detail.detail, {scope: 'ingest'})) ctx.console.error(`  ${line}`)
     return false
   }
 

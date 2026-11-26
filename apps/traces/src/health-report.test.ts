@@ -15,6 +15,7 @@ import {
   CANARY_ONCE_FLAG,
   CANARY_PLACES,
   canaryOnceOutput,
+  checkScope,
   CLICKHOUSE_READER_USER,
   combineLangfuse,
   createReporter,
@@ -37,6 +38,7 @@ import {
   handlePublic,
   LANGFUSE_MARKER_LOCATIONS,
   METRIC_NAMES,
+  MONITORING_CHECKS,
   OBJECT_STORE,
   objectKeyTime,
   parsePrometheus,
@@ -156,6 +158,7 @@ interface Behaviour {
   langfuseWeb: number | 'throw'
   langfuseWorker: number | 'throw'
   grafana: number | 'throw'
+  prometheus: number | 'throw'
   canaryPost: number | 'throw'
   /** Places absent from the ClickHouse row, or `all` when the trace never arrives. Only materialised places can be absent. */
   rowMissing: readonly CanaryPlace[] | 'all'
@@ -187,6 +190,7 @@ function defaults(): Behaviour {
     langfuseWeb: 200,
     langfuseWorker: 200,
     grafana: 200,
+    prometheus: 200,
     canaryPost: 200,
     rowMissing: [],
     rawMissing: [],
@@ -256,6 +260,7 @@ function harness(overrides: Partial<Behaviour> = {}) {
     if (url === ENDPOINTS.langfuseWeb) return reply(behaviour.langfuseWeb, '{"status":"OK"}')
     if (url === ENDPOINTS.langfuseWorker) return reply(behaviour.langfuseWorker, '{"status":"ok"}')
     if (url === ENDPOINTS.grafanaHealth) return reply(behaviour.grafana, '{"database":"ok"}')
+    if (url === ENDPOINTS.prometheusReady) return reply(behaviour.prometheus, 'Prometheus Server is Ready.')
     if (url === ENDPOINTS.canaryReceiver) {
       state.posted = body
       return reply(behaviour.canaryPost, '{}')
@@ -1502,8 +1507,6 @@ describe('every probe fails closed', () => {
     ['tempo metrics unparsable', {tempoMetrics: 'garbage'}],
     ['langfuse web down', {langfuseWeb: 'throw'}],
     ['langfuse worker 500', {langfuseWorker: 500}],
-    ['grafana unreachable', {grafana: 'throw'}],
-    ['grafana 503', {grafana: 503}],
     ['clickhouse 500', {clickhouseStatus: 500}],
   ]
 
@@ -1511,6 +1514,7 @@ describe('every probe fails closed', () => {
     const out = await runOnce(overrides)
     expect(out.reporter.health().status).toBe(503)
     expect(record(JSON.parse(out.detail), 'detail').ok).toBe(false)
+    expect(record(JSON.parse(out.detail), 'detail').healthy).toBe(false)
   })
 
   it('a dependency that throws inside a check is unknown, not a crash and not a pass', async () => {
@@ -1922,29 +1926,114 @@ describe('the detail listener', () => {
   })
 })
 
-// ─── Grafana health ───────────────────────────────────────────────────────────
+// ─── Monitoring checks and the split verdict ──────────────────────────────────
 
-describe('the Grafana health check', () => {
-  it('is a required check, probed at the health endpoint Grafana serves', async () => {
-    expect((REQUIRED_CHECKS as readonly string[]).includes('grafana-health')).toBe(true)
+describe('the monitoring checks', () => {
+  const monitoringBreakages: [string, Partial<Behaviour>, string][] = [
+    ['grafana unreachable', {grafana: 'throw'}, 'grafana-health'],
+    ['grafana 503', {grafana: 503}, 'grafana-health'],
+    ['grafana 500', {grafana: 500}, 'grafana-health'],
+    ['prometheus unreachable', {prometheus: 'throw'}, 'prometheus-health'],
+    ['prometheus not ready (503)', {prometheus: 503}, 'prometheus-health'],
+  ]
+
+  it('are Grafana and Prometheus, each probed at the endpoint it serves, and are not ingest checks', async () => {
+    expect([...MONITORING_CHECKS]).toEqual(['grafana-health', 'prometheus-health'])
+    for (const id of MONITORING_CHECKS) expect((REQUIRED_CHECKS as readonly string[]).includes(id)).toBe(false)
     expect(ENDPOINTS.grafanaHealth).toBe('http://grafana:3000/api/health')
+    expect(ENDPOINTS.prometheusReady).toBe('http://prometheus:9090/-/ready')
     const out = await runOnce()
     expect(check(out.detail, 'grafana-health').status).toBe('pass')
+    expect(check(out.detail, 'prometheus-health').status).toBe('pass')
     expect(out.requests.some(entry => entry.url === ENDPOINTS.grafanaHealth)).toBe(true)
+    expect(out.requests.some(entry => entry.url === ENDPOINTS.prometheusReady)).toBe(true)
   })
 
-  it('fails the verdict and /healthz when Grafana is down, and names the check', async () => {
-    for (const grafana of ['throw', 500, 503] as const) {
-      const out = await runOnce({grafana})
-      expect(check(out.detail, 'grafana-health').status).toBe('fail')
-      expect(out.reporter.health().status).toBe(503)
-      expect(out.reporter.health().body).not.toContain('grafana')
+  it('gives every check its scope in /detail, and defaults an unknown id to ingest, so it fails closed', async () => {
+    const out = await runOnce()
+    const checks = record(JSON.parse(out.detail), 'detail').checks as (CheckResult & {scope: string})[]
+    for (const entry of checks) {
+      expect({id: entry.id, scope: entry.scope}).toEqual({
+        id: entry.id,
+        scope: (MONITORING_CHECKS as readonly string[]).includes(entry.id) ? 'monitoring' : 'ingest',
+      })
     }
+    expect(checks.filter(entry => entry.scope === 'monitoring').map(entry => entry.id)).toEqual([...MONITORING_CHECKS])
+    expect(checkScope('canary-send')).toBe('ingest')
+    expect(checkScope('run-deadline')).toBe('ingest')
+    expect(checkScope('something-new')).toBe('ingest')
   })
 
-  it('does not leak the probe error into the detail', async () => {
-    const out = await runOnce({grafana: 'throw'})
+  // The ingest verdict is what `ingest open` and the deploy gate read (`ok`). `/healthz` is the whole (`healthy`).
+  it.each(monitoringBreakages)(
+    '%s: /healthz fails, the ingest verdict stays passing and names the monitoring check',
+    async (_label, overrides, id) => {
+      const out = await runOnce(overrides)
+      const detail = record(JSON.parse(out.detail), 'detail')
+      expect(check(out.detail, id).status).toBe('fail')
+      expect(detail.ok).toBe(true)
+      expect(detail.monitoringOk).toBe(false)
+      expect(detail.healthy).toBe(false)
+      expect(out.reporter.health().status).toBe(503)
+      expect(JSON.parse(out.reporter.health().body)).toEqual({ok: false, at: new Date(NOW).toISOString()})
+    },
+  )
+
+  it('an ingest failure fails both the ingest verdict and /healthz, and leaves monitoring passing', async () => {
+    const out = await runOnce({langfuseWeb: 503})
+    const detail = record(JSON.parse(out.detail), 'detail')
+    expect(detail.ok).toBe(false)
+    expect(detail.monitoringOk).toBe(true)
+    expect(detail.healthy).toBe(false)
+    expect(out.reporter.health().status).toBe(503)
+  })
+
+  it('both passing: ok, monitoringOk, healthy and /healthz agree', async () => {
+    const out = await runOnce()
+    const detail = record(JSON.parse(out.detail), 'detail')
+    expect([detail.ok, detail.monitoringOk, detail.healthy]).toEqual([true, true, true])
+    expect(out.reporter.health().status).toBe(200)
+  })
+
+  it('a stale verdict is neither ok, monitoring ok nor healthy', async () => {
+    const world = harness()
+    const reporter = createReporter(world.deps)
+    await reporter.runOnce()
+    world.state.now += THRESHOLDS.staleAfterIntervals * THRESHOLDS.intervalMs + 1
+    const detail = record(JSON.parse(reporter.detail()), 'detail')
+    expect([detail.ok, detail.monitoringOk, detail.healthy]).toEqual([false, false, false])
+    expect(reporter.health().status).toBe(503)
+  })
+
+  it('before the first run: nothing is ok', () => {
+    const reporter = createReporter(harness().deps)
+    const detail = record(JSON.parse(reporter.detail()), 'detail')
+    expect([detail.ok, detail.monitoringOk, detail.healthy]).toEqual([false, false, false])
+  })
+
+  it('assembleVerdict splits the two: a missing monitoring check fails monitoring only', () => {
+    const ingest: CheckResult[] = REQUIRED_CHECKS.map(id => ({id, status: 'pass', detail: 'ok'}))
+    const monitoring: CheckResult[] = MONITORING_CHECKS.map(id => ({id, status: 'pass', detail: 'ok'}))
+    expect(assembleVerdict([...ingest, ...monitoring], NOW)).toMatchObject({ok: true, monitoringOk: true})
+    expect(assembleVerdict(ingest, NOW)).toMatchObject({ok: true, monitoringOk: false})
+    expect(assembleVerdict([...ingest.slice(1), ...monitoring], NOW)).toMatchObject({ok: false, monitoringOk: true})
+    expect(assembleVerdict([...ingest, ...monitoring.slice(1)], NOW)).toMatchObject({ok: true, monitoringOk: false})
+    const warned = monitoring.map(entry => ({...entry, status: 'warn' as const}))
+    expect(assembleVerdict([...ingest, ...warned], NOW).monitoringOk).toBe(true)
+    const unknown = monitoring.map(entry => ({...entry, status: 'unknown' as const}))
+    expect(assembleVerdict([...ingest, ...unknown], NOW).monitoringOk).toBe(false)
+  })
+
+  it('does not leak a probe error into the detail', async () => {
+    const out = await runOnce({grafana: 'throw', prometheus: 'throw'})
     expect(out.detail).not.toContain('ECONNREFUSED')
+  })
+
+  it('a monitoring failure still exports every gauge, and Grafana reads 0 on the probe gauge', async () => {
+    const samples = exposition((await runOnce({grafana: 500, prometheus: 503})).reporter.metrics())
+    expect(samples[`${METRIC_NAMES.probeUp}{target="grafana"}`]).toBe(0)
+    expect(samples[`${METRIC_NAMES.probeUp}{target="langfuse-web"}`]).toBe(1)
+    expect(samples[`${METRIC_NAMES.diskUsedRatio}{mount="volume"}`]).toBe(0.4)
   })
 })
 

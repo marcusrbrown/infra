@@ -300,6 +300,7 @@ describe('traces compose: health reporter', () => {
     const published: Record<string, number[]> = {
       collector: [13133, 8888, 4414],
       tempo: [3200],
+      prometheus: [9090],
       'langfuse-web': [3000],
       'langfuse-worker': [3030],
       grafana: [3000],
@@ -872,6 +873,12 @@ describe('Grafana alerting provisioning', async () => {
     expect(failures).toContain('sum by (exporter)')
     expect(failures).toContain('increase(otelcol_exporter_send_failed_spans[30m])')
     expect(failures).toContain('increase(otelcol_exporter_enqueue_failed_spans[30m])')
+    expect(failures).toContain(
+      'otelcol_exporter_send_failed_spans unless otelcol_exporter_send_failed_spans offset 30m',
+    )
+    expect(failures).toContain(
+      'otelcol_exporter_enqueue_failed_spans unless otelcol_exporter_enqueue_failed_spans offset 30m',
+    )
     // Joined by `or` over a distinguishing label. One name regex would make `increase` (which drops the metric name)
     // return two series with one labelset, which Prometheus rejects as an error.
     expect(failures).toMatch(/label_replace\(increase\(otelcol_exporter_send_failed_spans.*\) or label_replace\(/)
@@ -881,6 +888,31 @@ describe('Grafana alerting provisioning', async () => {
   it('excludes the canary route from the 503 rule, as the reporter does', () => {
     expect(rule('IngestRefused503').expr).toContain('http_response_status_code="503"')
     expect(rule('IngestRefused503').expr).toContain('http_route=""')
+    // In every selector: once in the increase half, twice in the new-series half (the series and its offset).
+    expect(rule('IngestRefused503').expr.match(/http_route=""/g)).toHaveLength(3)
+  })
+
+  // `increase()` of a series that goes absent, then 1, then flat is 0, so the first failure on a new series would
+  // never alert. Each loss rule also reads the series that is present now and was absent 30 minutes ago, and only
+  // when the target was scraped then, so monitoring start-up does not page on old counts. promtool proves it
+  // (`config/prometheus/loss-rules.test.ts`); this pins the shape.
+  it('reads each loss counter as an increase and as a series new in the window, behind a 30 minute scrape guard', () => {
+    const guards: Record<string, string> = {
+      CollectorExportFailures: 'otelcol',
+      IngestRefused503: 'otelcol',
+      TempoDiscards: 'tempo',
+      TempoAttributeTruncation: 'tempo',
+    }
+    for (const [title, job] of Object.entries(guards)) {
+      const {expr} = rule(title)
+      expect({title, increase: /^\(.*increase\(.*\[30m\].*\) > 0\) or \(/.test(expr)}).toEqual({title, increase: true})
+      expect({title, unless: expr.includes(' unless ')}).toEqual({title, unless: true})
+      expect({title, offset: expr.includes(' offset 30m')}).toEqual({title, offset: true})
+      expect(expr.endsWith(`and on() (up{job="${job}"} offset 30m == 1))`)).toBe(true)
+    }
+    // The label a message names survives both halves.
+    expect(rule('TempoDiscards').expr.match(/sum by \(reason\)/g)).toHaveLength(2)
+    expect(rule('CollectorExportFailures').expr.match(/sum by \(exporter\)/g)).toHaveLength(2)
   })
 
   it('takes its thresholds from the reporter, so the alert and the verdict agree', () => {

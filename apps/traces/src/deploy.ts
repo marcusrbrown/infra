@@ -13,12 +13,14 @@
 //      their configuration) is about to change, hold the route (503), and prove it from inside the host
 //   6. write directories, deny-all token files (only if absent), secret files, configs and the reporter source
 //   7. prune images, check free space, pull
-//   8. start the stores and Langfuse, assert and read back retention, start Tempo, Grafana, Prometheus, the collector
-//      and the reporter, verify the collector's image digest
+//   8. start the stores and Langfuse, assert and read back retention, start Tempo, Grafana, the collector and the
+//      reporter, verify the collector's image digest
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
 //      `true`; otherwise off (first bring-up) or held (it was open before). The canary gate sends the deploy's one
 //      canary (the reporter's `--canary-once` mode, by exec) once the reporter's verdict is fresh
-//  10. remove the deploy marker, which ends the route's work. Only then check Grafana's sign-in (the password file
+//  10. start Prometheus, then remove the deploy marker, which ends the route's work. Prometheus is monitoring, not the
+//      route: it starts only after the route is decided, as an operator gate (`prometheus-ready`), so a failure to
+//      start it fails the run and never holds or closes ingest. Only then check Grafana's sign-in (the password file
 //      works) and its provisioned alerting (the Discord contact point and the rule groups exist): read-only, after the
 //      route is final, and a failure fails the run (`OperatorSurfaceError`) without touching the route
 //
@@ -1518,12 +1520,17 @@ export interface ReporterCheck {
   id: string
   status: 'pass' | 'warn' | 'fail' | 'unknown'
   detail: string
+  /** Absent from a reporter that predates the split; read as `ingest`. */
+  scope?: 'ingest' | 'monitoring'
 }
 
 export interface ReporterDetail {
   ran: boolean
   stale: boolean
+  /** The ingest verdict. The `reporter-verdict` gate reads this and nothing about monitoring. */
   ok: boolean
+  /** Grafana and Prometheus. Informational here: it never reaches a gate. */
+  monitoringOk?: boolean
   at: string | null
   checks: ReporterCheck[]
 }
@@ -1546,9 +1553,17 @@ export function parseReporterDetail(result: RunResult): ReporterDetail | undefin
   ) {
     return undefined
   }
+  if (body.monitoringOk !== undefined && typeof body.monitoringOk !== 'boolean') return undefined
   const checks = readChecks(body.checks)
   if (checks === undefined) return undefined
-  return {ran: body.ran, stale: body.stale, ok: body.ok, at: body.at, checks}
+  return {
+    ran: body.ran,
+    stale: body.stale,
+    ok: body.ok,
+    ...(body.monitoringOk === undefined ? {} : {monitoringOk: body.monitoringOk}),
+    at: body.at,
+    checks,
+  }
 }
 
 /** The JSON object before the sentinel line, from a command that exited 0. Anything else is `undefined`. */
@@ -1577,7 +1592,13 @@ function readChecks(value: unknown): ReporterCheck[] | undefined {
       return undefined
     }
     if (!CHECK_STATUSES.includes(check.status)) return undefined
-    checks.push({id: check.id, status: check.status as ReporterCheck['status'], detail: check.detail})
+    if (check.scope !== undefined && check.scope !== 'ingest' && check.scope !== 'monitoring') return undefined
+    checks.push({
+      id: check.id,
+      status: check.status as ReporterCheck['status'],
+      detail: check.detail,
+      ...(check.scope === undefined ? {} : {scope: check.scope}),
+    })
   }
   return checks
 }
@@ -1627,6 +1648,7 @@ export type GateId =
   | 'bootstrap-variables'
   | 'grafana-signin'
   | 'grafana-alerting'
+  | 'prometheus-ready'
 
 export interface GateResult {
   id: GateId
@@ -1668,7 +1690,9 @@ export interface GateInputs {
 }
 
 function failingChecks(detail: ReporterDetail): string {
+  // Only ingest checks: a failing monitoring check is not why this verdict fails.
   const lines = detail.checks
+    .filter(check => check.scope !== 'monitoring')
     .filter(check => check.status === 'fail' || check.status === 'unknown')
     .map(check => `${check.id}: ${check.detail}`)
   if (!detail.ran) lines.push('the reporter has not finished a run')
@@ -2465,11 +2489,46 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
     }
   }
 
+  /**
+   * Prometheus is monitoring, not the route. It starts here, after the route is decided and proven, and its failure is
+   * a result and not an exception: it must not reach the failure handler below, which would hold the route. The steps
+   * are guarded like every other change to the host (a refusal is the one thing that is rethrown), and it is recreated
+   * on every deploy, as the reporter is, so a changed `prometheus.yml` needs no pending-restart record. Nothing else
+   * waits for it: the alert rules read it, and the reporter's `prometheus-health` check says when it is down.
+   */
+  const startPrometheus = async (): Promise<GateResult> => {
+    log(
+      '==> Starting Prometheus (after the route is decided; a failure here fails the run and never touches the route)',
+    )
+    const gate = (pass: boolean, detail: string): GateResult => ({
+      id: 'prometheus-ready',
+      status: pass ? 'pass' : 'fail',
+      detail,
+      kind: 'operator',
+    })
+    try {
+      await sh('Create the Prometheus container', createPrometheusScript(deployId), [
+        STEP_SENTINEL('create-prometheus'),
+      ])
+      await sh('Prepare the Prometheus data volume', prometheusVolumeScript(deployId), [PROMETHEUS_VOLUME_SENTINEL])
+      await sh('Start Prometheus', upScript(deployId, 'up-prometheus', ['prometheus'], {force: true}), [
+        STEP_SENTINEL('up-prometheus'),
+      ])
+      return gate(true, 'Prometheus started and reports healthy')
+    } catch (error) {
+      // Another deploy owns the host, or its step is running: that is not Prometheus, and it ends this deploy.
+      if (ownership.overtaken || error instanceof DeployStepBusyError) throw error
+      return gate(false, `Prometheus did not start (${clip(errorMessage(error))}). Ingest is not affected.`)
+    }
+  }
+
   /** The very last step of a deploy that evaluated every gate and left the route in its final state. */
   const finish = async (result: DeployResult): Promise<DeployResult> => {
+    const prometheus = await startPrometheus()
+    for (const line of describeGates([prometheus])) log(`  ${line}`)
     // Compare-and-delete under the ingest lock: only the deploy that owns the marker removes it.
     await sh('Remove the deploy marker', removeOwnFileScript(deployId, MARKER_FILE), [REMOVED_SENTINEL])
-    return result
+    return {...result, gates: [...result.gates, prometheus]}
   }
 
   // `compare`: nothing on the host has changed yet. `stage`: files and the route may have. `apply`: the stack has.
@@ -2634,9 +2693,6 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
     log('==> Starting the collector container and its queue volume')
     await sh('Create the collector container', createCollectorScript(deployId), [STEP_SENTINEL('create-collector')])
     await sh('Prepare the collector queue volume', queueVolumeScript(deployId), [QUEUE_SENTINEL])
-    log('==> Starting the Prometheus container and its data volume')
-    await sh('Create the Prometheus container', createPrometheusScript(deployId), [STEP_SENTINEL('create-prometheus')])
-    await sh('Prepare the Prometheus data volume', prometheusVolumeScript(deployId), [PROMETHEUS_VOLUME_SENTINEL])
 
     const privateServices: Service[] = ['postgres', 'redis', 'minio', 'clickhouse', 'langfuse-web', 'langfuse-worker']
     log('==> Starting the stores and Langfuse')
@@ -2665,15 +2721,15 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       }
     }
 
-    log('==> Starting Tempo, Grafana, the collector, Prometheus and the reporter')
-    const publicServices: Service[] = ['tempo', 'grafana', 'collector', 'prometheus']
+    log('==> Starting Tempo, Grafana, the collector and the reporter')
+    const publicServices: Service[] = ['tempo', 'grafana', 'collector']
     const staleOthers = stale(publicServices)
     if (staleOthers.length > 0) {
       await sh('Recreate changed services', upScript(deployId, 'up-stale-public', staleOthers, {force: true}), [
         STEP_SENTINEL('up-stale-public'),
       ])
     }
-    await sh('Start Tempo, Grafana, the collector and Prometheus', upScript(deployId, 'up-public', publicServices), [
+    await sh('Start Tempo, Grafana and the collector', upScript(deployId, 'up-public', publicServices), [
       STEP_SENTINEL('up-public'),
     ])
 

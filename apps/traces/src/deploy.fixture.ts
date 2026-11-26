@@ -607,15 +607,19 @@ export class FakeHost {
       'tempo-truncation',
       'langfuse-web',
       'langfuse-worker',
-      'grafana-health',
       'volume-space',
       'root-space',
       'data-age-clickhouse',
       'data-age-object-store',
       'data-age-tempo',
     ]
-    const checks = this.checksFor(required)
-    const allPass = checks.every(check => check.status === 'pass' || check.status === 'warn')
+    const passes = (check: {status: string}): boolean => check.status === 'pass' || check.status === 'warn'
+    const checks = this.checksFor(required).map(check => ({...check, scope: 'ingest'}))
+    const monitoring = this.checksFor(['grafana-health', 'prometheus-health']).map(check => ({
+      ...check,
+      scope: 'monitoring',
+    }))
+    const allPass = checks.every(passes)
     return {
       schemaVersion: 1,
       generatedAt: new Date((this.clock + 60) * 1000).toISOString(),
@@ -623,8 +627,9 @@ export class FakeHost {
       ran: this.options.verdict?.ran ?? true,
       stale: this.options.verdict?.stale ?? false,
       ok: this.options.verdict?.ok ?? allPass,
+      monitoringOk: monitoring.every(passes),
       at: new Date(this.reporterAt * 1000).toISOString(),
-      checks,
+      checks: [...checks, ...monitoring],
     }
   }
 

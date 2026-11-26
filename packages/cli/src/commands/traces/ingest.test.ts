@@ -405,6 +405,48 @@ describe('traces ingest open', () => {
     expect(err(captured)).toContain('Refusing to open ingest')
   })
 
+  // A dead Grafana or Prometheus is the monitoring verdict. It must not keep an operator from opening healthy ingest.
+  it('opens when only a monitoring check fails: the ingest verdict is what it reads', async () => {
+    const detail = detailOutput(
+      detailBody({
+        ok: true,
+        monitoringOk: false,
+        checks: [
+          {id: 'collector-health', status: 'pass', detail: 'collector reports healthy', scope: 'ingest'},
+          {id: 'grafana-health', status: 'fail', detail: 'grafana is unhealthy (http-503)', scope: 'monitoring'},
+          {id: 'prometheus-health', status: 'fail', detail: 'prometheus is not ready', scope: 'monitoring'},
+        ],
+      }),
+    )
+    const world = host({detail})
+    const {fetchFn} = publicEndpoint([401])
+    const {ctx, captured} = createCapturedCtx()
+    await tracesIngestOpenAction({}, ctx, deps(world.spawn, fetchFn))
+    expect(world.calls.map(call => call.command)).toContain(REMOTE_COMMANDS.writeIngestState('open'))
+    expect(out(captured)).toContain('Ingest is open')
+    expect(captured.exit).toBeNull()
+  })
+
+  it('names only the ingest checks when it refuses, even if monitoring fails too', async () => {
+    const detail = detailOutput(
+      detailBody({
+        ok: false,
+        monitoringOk: false,
+        checks: [
+          {id: 'langfuse-worker', status: 'fail', detail: 'langfuse worker is unhealthy (http-503)', scope: 'ingest'},
+          {id: 'grafana-health', status: 'fail', detail: 'grafana is unhealthy (http-503)', scope: 'monitoring'},
+        ],
+      }),
+    )
+    const world = host({detail})
+    const {ctx, captured} = createCapturedCtx()
+    await expect(
+      tracesIngestOpenAction({}, ctx, deps(world.spawn, publicEndpoint([401]).fetchFn)),
+    ).rejects.toBeInstanceOf(MockProcessExit)
+    expect(err(captured)).toContain('langfuse-worker: langfuse worker is unhealthy (http-503)')
+    expect(err(captured)).not.toContain('grafana-health')
+  })
+
   it('reports why the verdict is not passing', async () => {
     const detail = detailOutput(
       detailBody({

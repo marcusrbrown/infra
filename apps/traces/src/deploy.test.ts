@@ -479,7 +479,17 @@ describe('what lands on the host', () => {
       }
     }
     walk('config', '')
-    expect([...locals.filter(local => local.startsWith('config/'))].sort()).toEqual([...found].sort())
+    // The mirror of the loss rules and its promtool cases are tests: Prometheus never loads them, so deploy never
+    // uploads them, and nothing may mount them.
+    const testOnly = ['config/prometheus/loss-rules.yml', 'config/prometheus/loss-rules.test.yml']
+    for (const file of testOnly) {
+      expect(found).toContain(file)
+      expect(locals).not.toContain(file)
+    }
+    expect(readFileSync(join(APP, 'docker-compose.yaml'), 'utf8')).not.toContain('loss-rules')
+    expect([...locals.filter(local => local.startsWith('config/'))].sort()).toEqual(
+      found.filter(file => !testOnly.includes(file)).sort(),
+    )
     expect(locals).toContain('docker-compose.yaml')
     expect(UPLOADED_FILES.find(file => file.local === 'src/health-report.ts')?.remote).toBe(
       'health-reporter/health-report.ts',
@@ -1336,8 +1346,6 @@ describe('first deploy', () => {
       'pull',
       'create-collector',
       'queue-volume',
-      'create-prometheus',
-      'prometheus-volume',
       'up-private',
       'retention-read-ttl',
       'up-public',
@@ -1349,6 +1357,9 @@ describe('first deploy', () => {
       'reporter-canary',
       'bootstrap-hygiene',
       'raw:set-state:open',
+      'create-prometheus',
+      'prometheus-volume',
+      'up-prometheus',
       'remove:.deploy-in-progress',
       'grafana-signin',
       'grafana-alerting',
@@ -1366,15 +1377,24 @@ describe('first deploy', () => {
     expect(host.indexOf('queue-volume')).toBeLessThan(host.indexOf('up-public'))
   })
 
-  it('creates the Prometheus container and gives its data volume to its user before it starts, with the other public services', async () => {
+  it('creates the Prometheus container and gives its data volume to its user before it starts, after the route is set', async () => {
     const host = new FakeHost()
     await run(host)
     expect(host.indexOf('create-prometheus')).toBeLessThan(host.indexOf('prometheus-volume'))
-    expect(host.indexOf('prometheus-volume')).toBeLessThan(host.indexOf('up-public'))
+    expect(host.indexOf('prometheus-volume')).toBeLessThan(host.indexOf('up-prometheus'))
+    expect(host.indexOf('create-prometheus')).toBeGreaterThan(host.indexOf('raw:set-state:open'))
+    expect(host.indexOf('up-prometheus')).toBeLessThan(host.indexOf('remove:.deploy-in-progress'))
+    // The route-critical starts name no Prometheus: a service the route does not depend on is not in them.
+    for (const step of ['up-private', 'up-public', 'up-caddy', 'up-reporter']) {
+      expect({step, prometheus: host.calls.find(call => call.step === step)?.command.includes('prometheus')}).toEqual({
+        step,
+        prometheus: false,
+      })
+    }
     const started = host.calls.find(call => call.step === 'up-public')
-    expect(started?.command).toMatch(/--wait-timeout 600 tempo grafana collector prometheus\n/)
-    // The reporter comes up last, after Prometheus, so its first run is newer than every change.
-    expect(host.indexOf('up-reporter')).toBeGreaterThan(host.indexOf('up-public'))
+    expect(started?.command).toMatch(/--wait-timeout 600 tempo grafana collector\n/)
+    expect(host.unguarded).toEqual([])
+    expect(host.unlocked).toEqual([])
   })
 
   it('writes the .env with the planned state off and no ingest-state line in the content', async () => {
@@ -1959,6 +1979,176 @@ describe('the Grafana sign-in check', () => {
   })
 })
 
+// ─── Monitoring is not the route ──────────────────────────────────────────────
+//
+// Prometheus and Grafana exist to alert. Neither is on the path of a trace, so a failure of either must never hold,
+// close or keep closed a route whose ingest checks pass. Prometheus starts after the route is decided, as an operator
+// gate, and the reporter's ingest verdict (`ok`) is what the deploy and `traces ingest open` read.
+
+describe('Prometheus starts after the route is decided', () => {
+  const newImage = {TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}
+  const prometheusSteps = ['create-prometheus', 'prometheus-volume', 'up-prometheus']
+
+  it('passes as an operator gate named prometheus-ready, and leaves the route open', async () => {
+    const host = new FakeHost()
+    const {result, logs} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(result.gates.find(gate => gate.id === 'prometheus-ready')).toMatchObject({status: 'pass', kind: 'operator'})
+    expect(logs.join('\n')).toContain('✓ prometheus-ready')
+    expect(mayOpen(result.gates)).toBe(true)
+  })
+
+  it('runs three guarded steps, under the step lock and the ownership check, before the marker goes', async () => {
+    const host = new FakeHost()
+    await run(host)
+    for (const step of prometheusSteps) {
+      expect({step, ran: host.count(step)}).toEqual({step, ran: 1})
+      expect(host.indexOf(step)).toBeLessThan(host.indexOf('remove:.deploy-in-progress'))
+    }
+    expect(host.unguarded).toEqual([])
+    expect(host.unlocked).toEqual([])
+    expect(host.calls.find(call => call.step === 'up-prometheus')?.command).toContain(
+      '--wait --wait-timeout 600 --force-recreate --no-deps prometheus\n',
+    )
+  })
+
+  it.each(prometheusSteps)(
+    'a failing %s fails the run as an operator gate, and never holds or closes an open route',
+    async step => {
+      const host = await openStack()
+      host.options.override = failAt(step)
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect(error.message).toContain('prometheus-ready')
+      expect((error as OperatorSurfaceError).ingest).toBe('open')
+      expect((error as OperatorSurfaceError).result.gates.find(gate => gate.id === 'prometheus-ready')).toMatchObject({
+        status: 'fail',
+        kind: 'operator',
+      })
+      // The route was open before and is open after; the only state change in the whole history is the first open.
+      expect(host.served).toBe('open')
+      expect(host.setStates()).toEqual(['open'])
+      // The deploy still finished: its marker is gone.
+      expect(host.marker).toBeUndefined()
+    },
+  )
+
+  it('a start that exits non-zero because Prometheus is unhealthy fails the same way', async () => {
+    const host = await openStack()
+    host.options.override = step =>
+      step === 'up-prometheus' ? {exitCode: 1, stdout: '', stderr: 'container prometheus is unhealthy'} : undefined
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(error.message).toContain('prometheus-ready')
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('an update that held the route reopens it even when Prometheus then fails to start', async () => {
+    const host = await openStack()
+    host.options.override = failAt('up-prometheus')
+    const error = await failure(host, baseEnv(newImage))
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(host.setStates()).toEqual(['open', 'held', 'open'])
+    expect(host.served).toBe('open')
+    expect(host.steps.lastIndexOf('up-prometheus')).toBeGreaterThan(host.steps.lastIndexOf('raw:set-state:open'))
+  })
+
+  it('names Prometheus in the error, and says the route was not changed', async () => {
+    const host = new FakeHost({override: failAt('up-prometheus')})
+    const error = await failure(host)
+    expect(error.message).toContain('prometheus-ready')
+    expect(error.message).toContain('this failure did not change the route')
+  })
+
+  it('also runs when the route stays off (no key pair), and fails the run the same way', async () => {
+    const host = new FakeHost()
+    const {result} = await run(host, baseEnv(withoutKey))
+    expect(result.ingest).toBe('off')
+    expect(host.count('up-prometheus')).toBe(1)
+    const failing = new FakeHost({override: failAt('up-prometheus')})
+    const error = await failure(failing, baseEnv(withoutKey))
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect((error as OperatorSurfaceError).ingest).toBe('off')
+    expect(failing.setStates()).toEqual([])
+  })
+
+  it('is not started when a safety gate failed: that deploy fails first and the route is held', async () => {
+    const host = new FakeHost({checkStatus: {'canary-langfuse': 'fail'}})
+    const error = await failure(host)
+    expect(error).not.toBeInstanceOf(OperatorSurfaceError)
+    expect(host.count('up-prometheus')).toBe(0)
+    // The marker stays: the failed deploy is unfinished, so the next one holds an open route first.
+    expect(host.marker).toBeDefined()
+  })
+
+  it('leaves a deploy that was overtaken alone: no hold, no probe, no further step', async () => {
+    const host = new FakeHost()
+    host.options.inFlight = step => {
+      if (step === 'up-prometheus') host.marker = `${ID_B} 2023-11-14T22:13:20.000Z\n`
+      return undefined
+    }
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(DeployOvertakenError)
+    // The one step after it is the marker removal, which refused: nothing else ran.
+    expect(host.steps.slice(host.steps.lastIndexOf('up-prometheus') + 1).filter(step => step !== 'ssh-exit')).toEqual([
+      'remove:.deploy-in-progress',
+    ])
+    expect(host.refused).toEqual(['remove:.deploy-in-progress'])
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('does not stop the verdict gate, which reads the ingest verdict', async () => {
+    const host = new FakeHost({checkStatus: {'grafana-health': 'fail', 'prometheus-health': 'fail'}})
+    const {result} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(result.gates.find(gate => gate.id === 'reporter-verdict')).toMatchObject({status: 'pass'})
+    expect(host.setStates()).toEqual(['open'])
+  })
+})
+
+describe('the reporter verdict the deploy reads is the ingest verdict', () => {
+  const parse = (detail: Record<string, unknown>) =>
+    parseReporterDetail({exitCode: 0, stdout: `${JSON.stringify(detail)}\nTRACES_DETAIL_END\n`, stderr: ''})
+  const body = {schemaVersion: 1, ran: true, stale: false, ok: true, at: '2026-11-20T11:58:00.000Z'}
+
+  it('opens with a passing ingest verdict while Grafana and Prometheus are failing', async () => {
+    const host = new FakeHost({checkStatus: {'grafana-health': 'fail', 'prometheus-health': 'unknown'}})
+    const {result} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(host.served).toBe('open')
+  })
+
+  it('still fails the gate when an ingest check fails, and names it and not the monitoring checks', async () => {
+    const host = new FakeHost({
+      checkStatus: {'langfuse-worker': 'fail', 'grafana-health': 'fail'},
+      verdict: {ok: false},
+    })
+    const error = await failure(host)
+    expect(error.message).toContain('langfuse-worker')
+    expect(error.message).not.toContain('grafana-health')
+  })
+
+  it('keeps the scope and the monitoring flag when it parses the answer', () => {
+    const parsed = parse({
+      ...body,
+      monitoringOk: false,
+      checks: [
+        {id: 'collector-health', status: 'pass', detail: 'x', scope: 'ingest'},
+        {id: 'grafana-health', status: 'fail', detail: 'y', scope: 'monitoring'},
+      ],
+    })
+    expect(parsed?.monitoringOk).toBe(false)
+    expect(parsed?.checks.map(entry => entry.scope)).toEqual(['ingest', 'monitoring'])
+  })
+
+  it('reads a reporter without the split fields, and refuses a scope or a flag of the wrong kind', () => {
+    expect(parse({...body, checks: [{id: 'a', status: 'pass', detail: 'x'}]})).toMatchObject({ok: true})
+    expect(parse({...body, checks: [{id: 'a', status: 'pass', detail: 'x', scope: 'other'}]})).toBeUndefined()
+    expect(parse({...body, monitoringOk: 'yes', checks: []})).toBeUndefined()
+  })
+})
+
 describe('the Grafana alerting check', () => {
   const GRAFANA_PASSWORD = baseEnv().TRACES_GRAFANA_ADMIN_PASSWORD ?? ''
   const WEBHOOK = baseEnv().TRACES_DISCORD_WEBHOOK_URL ?? ''
@@ -2296,8 +2486,7 @@ describe('holding the route', () => {
     expect(host.count('up-stale-private')).toBe(0)
   })
 
-  it.each<[string, 'prometheus' | 'grafana']>([
-    ['config/prometheus/prometheus.yml', 'prometheus'],
+  it.each<[string, 'grafana']>([
     ['config/grafana/alerting/rules.yaml', 'grafana'],
     ['config/grafana/alerting/contact-points.yaml', 'grafana'],
     ['config/grafana/datasources/prometheus.yaml', 'grafana'],
@@ -2313,6 +2502,20 @@ describe('holding the route', () => {
     const stale = host.calls.findLast(call => call.step === 'up-stale-public')
     expect(stale?.command).toContain(`--force-recreate --no-deps ${service}\n`)
     expect(host.count('up-stale-private')).toBe(0)
+  })
+
+  it('does not hold when only the Prometheus config changes: it is recreated after the route, and on every deploy', async () => {
+    const host = await openStack()
+    const t = testDeps(host, {
+      readFile: async relative => `# ${relative}${relative === 'config/prometheus/prometheus.yml' ? ' changed' : ''}\n`,
+    })
+    const result = await deploy({env: baseEnv(), deps: t.deps})
+    expect(result.changed).toEqual(['prometheus'])
+    expect(result.heldForUpdate).toBe(false)
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.count('up-stale-public')).toBe(0)
+    const started = host.calls.findLast(call => call.step === 'up-prometheus')
+    expect(started?.command).toContain('--force-recreate --no-deps prometheus\n')
   })
 
   it('treats a rotated Discord webhook as a change to .env, like every other secret in it', async () => {

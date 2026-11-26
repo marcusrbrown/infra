@@ -31,12 +31,14 @@ import {
   closeMasterArgv,
   compareFileScript,
   createCollectorScript,
+  createEmbedderScript,
   createPrometheusScript,
   deploy,
   DEPLOY_OVERTAKEN_SENTINEL,
   DeployOvertakenError,
   diskScript,
   driftScript,
+  embedderVolumeScript,
   evaluateGates,
   evaluateGrafana,
   evaluateGrafanaAlerting,
@@ -49,6 +51,7 @@ import {
   grafanaSignInScript,
   hygieneScript,
   INGEST_SERVICES,
+  INSIGHT_SERVICES,
   langfuseBasicValue,
   mayOpen,
   MONITORING_SERVICES,
@@ -100,6 +103,7 @@ import {
 } from './deploy.fixture'
 import {CANARY_ONCE_FLAG, PATHS} from './health-report'
 import {
+  EMBEDDER_USER_ID,
   GRAFANA_USER_ID,
   PROMETHEUS_USER_ID,
   SENDER_GROUPS,
@@ -574,6 +578,8 @@ describe('remote scripts', () => {
     queue: queueVolumeScript(ID_A),
     createPrometheus: createPrometheusScript(ID_A),
     prometheusVolume: prometheusVolumeScript(ID_A),
+    createEmbedder: createEmbedderScript(ID_A),
+    embedderVolume: embedderVolumeScript(ID_A),
     digest: runningDigestScript('collector'),
     bootstrap: bootstrapProbeScript(),
     hygiene: hygieneScript(),
@@ -715,6 +721,20 @@ describe('remote scripts', () => {
     expect(script).not.toContain('traces_collector_queue')
     expect(scripts.createPrometheus).toContain('create --no-recreate prometheus')
     expect(scripts.createPrometheus).not.toContain('collector')
+  })
+
+  it('gives the embedder its own model volume to its own user, once, and reads the owner back', () => {
+    const script = scripts.embedderVolume ?? ''
+    expect(EMBEDDER_USER_ID).toBe(65_534)
+    expect(script).toContain('docker volume inspect traces_embedder_models')
+    expect(script).toContain(`chown ${EMBEDDER_USER_ID}:${EMBEDDER_USER_ID} "$mp"`)
+    expect(script).toContain(`${TRACES_DOCKER_ROOT}/volumes/*/_data`)
+    expect(script).toContain('stat -c')
+    expect(script).toContain('TRACES_EMBEDDER_VOLUME_READY')
+    expect(script).not.toContain('traces_collector_queue')
+    expect(script).not.toContain('traces_prometheus_data')
+    expect(scripts.createEmbedder).toContain('create --no-recreate embedder')
+    expect(scripts.createEmbedder).not.toContain('collector')
   })
 
   it('check Grafana sign-in on its loopback port with the password read from the file on the host', () => {
@@ -1362,6 +1382,7 @@ describe('first deploy', () => {
       'create-prometheus',
       'prometheus-volume',
       'up-prometheus',
+      'up-embedder',
       'remove:.deploy-in-progress',
       'grafana-signin',
       'grafana-alerting',
@@ -1969,10 +1990,11 @@ describe('the Grafana sign-in check', () => {
 // the reporter's ingest verdict (`ok`) is what the deploy and `traces ingest open` read.
 
 describe('the services split into ingest and monitoring', () => {
-  it('names two monitoring services, which are no gated service and no ingest service', () => {
+  it('names two monitoring services and one insight service, which are no gated service and no ingest service', () => {
     expect([...MONITORING_SERVICES]).toEqual(['grafana', 'prometheus'])
-    expect([...INGEST_SERVICES, ...MONITORING_SERVICES].sort()).toEqual([...SERVICES].sort())
-    for (const service of MONITORING_SERVICES) {
+    expect([...INSIGHT_SERVICES]).toEqual(['embedder'])
+    expect([...INGEST_SERVICES, ...MONITORING_SERVICES, ...INSIGHT_SERVICES].sort()).toEqual([...SERVICES].sort())
+    for (const service of [...MONITORING_SERVICES, ...INSIGHT_SERVICES]) {
       expect(INGEST_SERVICES as readonly string[]).not.toContain(service)
       expect(GATED_SERVICES as readonly string[]).not.toContain(service)
     }
@@ -1980,24 +2002,29 @@ describe('the services split into ingest and monitoring', () => {
 
   // The route-critical `up` starts named services only, but a `depends_on` on a monitoring service in the compose
   // file would still tie an ingest service to it.
-  it('has no ingest service that depends on a monitoring service', () => {
+  it('has no ingest service that depends on a monitoring or an insight service', () => {
     const compose = Bun.YAML.parse(readFileSync(join(APP, 'docker-compose.yaml'), 'utf8')) as {
       services: Record<string, {depends_on?: string[] | Record<string, unknown>}>
     }
     for (const name of INGEST_SERVICES) {
       const deps = compose.services[name]?.depends_on
       const needs = deps === undefined ? [] : Array.isArray(deps) ? deps : Object.keys(deps)
-      expect({name, needs: needs.filter(need => (MONITORING_SERVICES as readonly string[]).includes(need))}).toEqual({
+      expect({
         name,
-        needs: [],
-      })
+        needs: needs.filter(need =>
+          ([...MONITORING_SERVICES, ...INSIGHT_SERVICES] as readonly string[]).includes(need),
+        ),
+      }).toEqual({name, needs: []})
     }
   })
 
   it('pulls only the ingest services in the route-critical pull, and only the named one in a monitoring pull', () => {
     const ingest = pullScript(ID_A)
     expect(/ pull ([^\n]+)\n/.exec(ingest)?.[1]?.split(' ')).toEqual([...INGEST_SERVICES])
-    for (const service of MONITORING_SERVICES) expect(ingest).not.toMatch(new RegExp(String.raw`\b${service}\b`))
+    for (const service of [...MONITORING_SERVICES, ...INSIGHT_SERVICES]) {
+      expect(ingest).not.toMatch(new RegExp(String.raw`\b${service}\b`))
+    }
+    expect(pullScript(ID_A, 'pull-embedder', ['embedder'])).toMatch(/ pull embedder\n/)
     expect(pullScript(ID_A, 'pull-grafana', ['grafana'])).toMatch(/ pull grafana\n/)
     expect(pullScript(ID_A, 'pull-grafana', ['grafana'])).toContain('# traces-step:pull-grafana')
     expect(() => pullScript(ID_A, 'pull-x', ['nope' as never])).toThrow('Unknown service')
@@ -2304,6 +2331,168 @@ describe('Prometheus and Grafana start after the route is decided', () => {
         '--force-recreate --no-deps prometheus\n',
       )
     })
+  })
+})
+
+// The embedder serves Langfuse Topics, an insight feature. No trace passes through it, so it is the last of the services
+// that start after the route is decided, and its failure is the operator gate `embedder-ready`: it fails the run and
+// never holds, closes or keeps closed the route.
+describe('the Topics embedder starts after the route is decided', () => {
+  const newImage = {TRACES_COLLECTOR_IMAGE: `ghcr.io/example/repo/traces-collector@${OTHER_DIGEST}`}
+  const embedderSteps = ['pull-embedder', 'create-embedder', 'embedder-volume', 'up-embedder'] as const
+  const gateOf = (error: Error, id: string) => (error as OperatorSurfaceError).result.gates.find(gate => gate.id === id)
+  const ranSince = (host: FakeHost, mark: number, step: string): number =>
+    host.steps.slice(mark).filter(entry => entry === step).length
+
+  it('passes as an operator gate, and leaves the route open', async () => {
+    const host = new FakeHost()
+    const {result, logs} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(result.gates.find(gate => gate.id === 'embedder-ready')).toMatchObject({status: 'pass', kind: 'operator'})
+    expect(logs.join('\n')).toContain('✓ embedder-ready')
+    expect(mayOpen(result.gates)).toBe(true)
+  })
+
+  it('runs every step once, guarded and under the step lock, after the route and Grafana, before the marker goes', async () => {
+    const host = new FakeHost()
+    await run(host)
+    for (const step of embedderSteps) {
+      expect({step, ran: host.count(step)}).toEqual({step, ran: 1})
+      expect(host.indexOf(step)).toBeGreaterThan(host.indexOf('raw:set-state:open'))
+      expect(host.indexOf(step)).toBeGreaterThan(host.indexOf('up-grafana'))
+      expect(host.indexOf(step)).toBeLessThan(host.indexOf('remove:.deploy-in-progress'))
+    }
+    expect(host.indexOf('pull-embedder')).toBeLessThan(host.indexOf('create-embedder'))
+    expect(host.indexOf('create-embedder')).toBeLessThan(host.indexOf('embedder-volume'))
+    expect(host.indexOf('embedder-volume')).toBeLessThan(host.indexOf('up-embedder'))
+    expect(host.unguarded).toEqual([])
+    expect(host.unlocked).toEqual([])
+    expect(host.calls.find(call => call.step === 'up-embedder')?.command).toContain(
+      '--wait --wait-timeout 600 --force-recreate --no-deps embedder\n',
+    )
+  })
+
+  it('takes the embedder into no route-critical pull or start', async () => {
+    const host = new FakeHost()
+    await run(host)
+    for (const step of ['pull', 'up-private', 'up-public', 'up-caddy', 'up-reporter', 'up-stale-private']) {
+      const command = host.calls.find(call => call.step === step)?.command ?? ''
+      expect({step, named: /\bembedder\b/.test(command)}).toEqual({step, named: false})
+    }
+    for (const step of ['pull', 'up-private', 'up-public', 'up-reporter', 'up-caddy']) {
+      expect(host.indexOf(step)).toBeLessThan(host.indexOf('raw:set-state:open'))
+    }
+  })
+
+  // An image pull that fails (registry down, no disk), a model that cannot be fetched so the start never turns healthy,
+  // a volume that cannot be handed over: each is an insight failure and none holds ingest.
+  it.each(embedderSteps)(
+    'a failing %s fails the run as an operator gate, and never holds or closes an open route',
+    async step => {
+      const host = await openStack()
+      host.options.override = failAt(step)
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect(error.message).toContain('embedder-ready')
+      expect((error as OperatorSurfaceError).ingest).toBe('open')
+      expect(gateOf(error, 'embedder-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+      expect(host.served).toBe('open')
+      expect(host.setStates()).toEqual(['open'])
+      expect(host.marker).toBeUndefined()
+    },
+  )
+
+  it('a start that never turns healthy (the model did not download) on a deploy that holds the route: held, reopened, run failed', async () => {
+    const host = await openStack()
+    host.options.override = step =>
+      step === 'up-embedder'
+        ? {exitCode: 1, stdout: '', stderr: 'dependency failed to start: embedder is unhealthy'}
+        : undefined
+    const error = await failure(host, baseEnv(newImage))
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(error.message).toContain('embedder-ready')
+    expect(host.setStates()).toEqual(['open', 'held', 'open'])
+    expect(host.served).toBe('open')
+  })
+
+  it('does not start a service whose image did not pull', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.override = failAt('pull-embedder')
+    await failure(host)
+    expect(ranSince(host, mark, 'create-embedder')).toBe(0)
+    expect(ranSince(host, mark, 'up-embedder')).toBe(0)
+  })
+
+  it('is independent of Prometheus and Grafana: each is started when another failed', async () => {
+    const first = await openStack()
+    const mark = first.calls.length
+    first.options.override = step => (['pull-prometheus', 'up-grafana'].includes(step) ? failAt(step)(step) : undefined)
+    const error = await failure(first)
+    expect(error.message).toContain('prometheus-ready')
+    expect(error.message).toContain('grafana-ready')
+    expect(gateOf(error, 'embedder-ready')).toMatchObject({status: 'pass'})
+    expect(ranSince(first, mark, 'up-embedder')).toBe(1)
+    const second = await openStack()
+    const secondMark = second.calls.length
+    second.options.override = failAt('pull-embedder')
+    await failure(second)
+    expect(ranSince(second, secondMark, 'up-prometheus')).toBe(1)
+    expect(ranSince(second, secondMark, 'up-grafana')).toBe(1)
+  })
+
+  it('still runs the Grafana checks when only the embedder failed', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.override = failAt('up-embedder')
+    const error = await failure(host)
+    expect(ranSince(host, mark, 'grafana-signin')).toBeGreaterThan(0)
+    expect(gateOf(error, 'grafana-signin')).toMatchObject({status: 'pass'})
+  })
+
+  it('also runs when the route stays off (no key pair), and fails the run the same way', async () => {
+    const host = new FakeHost()
+    await run(host, baseEnv(withoutKey))
+    expect(host.count('up-embedder')).toBe(1)
+    const failing = new FakeHost({override: failAt('up-embedder')})
+    const error = await failure(failing, baseEnv(withoutKey))
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect((error as OperatorSurfaceError).ingest).toBe('off')
+    expect(failing.setStates()).toEqual([])
+  })
+
+  it('is not started when a safety gate failed: that deploy fails first and the route is held', async () => {
+    const host = new FakeHost({checkStatus: {'canary-langfuse': 'fail'}})
+    const error = await failure(host)
+    expect(error).not.toBeInstanceOf(OperatorSurfaceError)
+    for (const step of embedderSteps) expect({step, ran: host.count(step)}).toEqual({step, ran: 0})
+  })
+
+  it('a deploy overtaken while the embedder starts ends as overtaken, not as an insight failure', async () => {
+    const host = new FakeHost()
+    host.options.inFlight = step => {
+      if (step === 'pull-embedder') host.marker = `${ID_B} 2023-11-14T22:13:20.000Z\n`
+      return undefined
+    }
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(DeployOvertakenError)
+    expect(host.refused).toEqual(['create-embedder'])
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('does not stop the verdict gate or the route when the embedder is the only unhealthy check', async () => {
+    const host = new FakeHost({checkStatus: {'embedder-health': 'fail'}})
+    const {result} = await run(host)
+    expect(result.ingest).toBe('open')
+    expect(result.gates.find(gate => gate.id === 'reporter-verdict')).toMatchObject({status: 'pass'})
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('says in the error which service failed and that the route was not changed', async () => {
+    const host = new FakeHost({override: failAt('up-embedder')})
+    const error = await failure(host)
+    expect(error.message).toContain('embedder-ready')
+    expect(error.message).toContain('this failure did not change the route')
   })
 })
 
@@ -3104,6 +3293,8 @@ describe('a failure while the files are compared with the host', () => {
       'queue-volume',
       'create-prometheus',
       'prometheus-volume',
+      'create-embedder',
+      'embedder-volume',
     ].includes(step)
 
   function expectNothingChanged(host: FakeHost, start: number): void {
@@ -3778,7 +3969,7 @@ describe('retention', () => {
   it('asserts the TTL and the lifecycle rules after the stores are up and before Tempo and the collector start', async () => {
     const host = new FakeHost()
     const {result} = await run(host)
-    expect(result.retention.altered).toEqual(['events_full', 'events_core'])
+    expect(result.retention.altered).toEqual(['events_full', 'events_core', 'topic_facet_summaries'])
     expect(result.retention.prefixes).toEqual(['events/', 'media/'])
     expect(host.rules).toEqual([
       {Prefix: 'events/', Days: 30},
@@ -3816,8 +4007,35 @@ describe('retention', () => {
     expect(host.count('up-public')).toBe(0)
   })
 
+  // Langfuse Topics writes an LLM summary of each trace's content into this table. Without a TTL on it the deploy does
+  // not pass: it waits for the migrations, then fails and names the table.
+  it('fails and names the Topics summary table when Langfuse has not created it', async () => {
+    const host = new FakeHost({tables: {events_full: undefined, events_core: undefined}})
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(AppliedButUnverifiedError)
+    expect(error.message).toContain('topic_facet_summaries')
+    expect(host.count('up-public')).toBe(0)
+  })
+
+  it('sets the 30-day TTL on the Topics tables that exist, counted from unit_start_time', async () => {
+    const host = new FakeHost({
+      tables: {
+        events_full: undefined,
+        events_core: undefined,
+        topic_facet_summaries: undefined,
+        topic_assignments: undefined,
+        topic_assignments_by_trace: undefined,
+      },
+    })
+    await run(host)
+    for (const name of ['topic_facet_summaries', 'topic_assignments', 'topic_assignments_by_trace']) {
+      expect({name, ttl: host.tables.get(name)}).toEqual({name, ttl: 'toDateTime(unit_start_time) + toIntervalDay(30)'})
+    }
+    expect(host.tables.has('topics')).toBe(false)
+  })
+
   it('succeeds once a table that was missing appears on a retry', async () => {
-    const host = new FakeHost({tables: {events_full: undefined}})
+    const host = new FakeHost({tables: {events_full: undefined, topic_facet_summaries: undefined}})
     const t = testDeps(host, {
       sleep: async () => {
         host.tables.set('events_core', undefined)
@@ -4490,6 +4708,8 @@ describe('overlapping deploys: the newest one owns the host', () => {
       'queue-volume',
       'create-prometheus',
       'prometheus-volume',
+      'create-embedder',
+      'embedder-volume',
       'up-private',
       'up-stale-private',
       'up-public',
@@ -4525,6 +4745,8 @@ const MUTATING_SCRIPTS: Record<string, string[]> = {
   queueVolumeScript: [queueVolumeScript(ID_A)],
   createPrometheusScript: [createPrometheusScript(ID_A)],
   prometheusVolumeScript: [prometheusVolumeScript(ID_A)],
+  createEmbedderScript: [createEmbedderScript(ID_A)],
+  embedderVolumeScript: [embedderVolumeScript(ID_A)],
   canaryScript: [canaryScript(ID_A)],
   setIngestStateCommand: (['off', 'held', 'open'] as const).map(state => setIngestStateCommand(state, ID_A)),
   applyTtlScript: [applyTtlScript(ownershipPrelude(ID_A))],

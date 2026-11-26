@@ -20,7 +20,7 @@
 #   - Every other rule reads a gauge the reporter leaves out when it could not take the reading (that makes the
 #     verdict `unknown`, which fails the health path, which the external monitor reports). noDataState OK.
 #   - A query that fails keeps the rule's last state (KeepLast), so a Prometheus outage neither resolves a firing
-#     alert nor starts thirteen new ones. TracesTargetDown alone fires on a failing query: it is the rule that says
+#     alert nor starts fourteen new ones. TracesTargetDown alone fires on a failing query: it is the rule that says
 #     the monitoring cannot see.
 #
 # Messages are fixed text, the rule's own labels and numbers. The `$` in the templates is not expanded: Grafana
@@ -178,6 +178,55 @@ groups:
           description: 'The health reporter has found {{ $labels.target }} unhealthy for 5 minutes. The health path also fails, which the external monitor reports.'
         labels:
           severity: critical
+        isPaused: false
+      - uid: traces-embedder-down
+        title: EmbedderDown
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'traces_probe_up{target="embedder"}'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B < 1
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 5m
+        annotations:
+          summary: The Topics embedder is unhealthy
+          description: 'The health reporter has found {{ $labels.target }} unhealthy for 5 minutes. Langfuse Topics cannot embed summaries until it is back; ingest is not affected. The health path also fails, which the external monitor reports.'
+        labels:
+          severity: warning
         isPaused: false
       - uid: traces-reporter-stale
         title: ReporterStale

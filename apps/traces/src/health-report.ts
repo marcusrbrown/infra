@@ -16,10 +16,10 @@
 //                                 nothing publishes it.
 //
 // Two sets of checks, one answer each. The ingest checks (the collector, Tempo, Langfuse, the disks and the age of the
-// data) decide whether traces are received and stored; the monitoring checks (Grafana and Prometheus) decide whether the
-// stack can tell anyone when it is not. `ok` is the ingest verdict, which the deploy gate and `traces ingest open` read, so
-// a dead Grafana or Prometheus can never hold or refuse healthy ingest. `/healthz` answers for both (`healthy`), so the
-// external monitor still reports a dead Grafana or Prometheus.
+// data) decide whether traces are received and stored; the monitoring checks (Grafana, Prometheus and the Topics embedder)
+// decide whether the stack can tell anyone when it is not, and whether its optional insight feature works. `ok` is the
+// ingest verdict, which the deploy gate and `traces ingest open` read, so a dead Grafana, Prometheus or embedder can never
+// hold or refuse healthy ingest. `/healthz` answers for both (`healthy`), so the external monitor still reports them.
 //
 // Rules every check follows:
 //   - Fail closed. An unreachable dependency, a non-2xx, an unparsable body or a missing metric is
@@ -126,6 +126,7 @@ export const ENDPOINTS = {
   langfuseWorker: 'http://langfuse-worker:3030/api/health',
   grafanaHealth: 'http://grafana:3000/api/health',
   prometheusReady: 'http://prometheus:9090/-/ready',
+  embedderHealth: 'http://embedder:8080/health',
   clickhouse: 'http://clickhouse:8123/',
   objectStore: 'http://minio:9000',
 } as const
@@ -184,10 +185,10 @@ export const REQUIRED_CHECKS = [
 ] as const
 
 /**
- * The checks of the alerting path. They fail `/healthz` and nothing else: no ingest decision reads them. A verdict
- * missing one cannot be monitoring-ok.
+ * The checks of the alerting path and of the optional Topics embedder. They fail `/healthz` and nothing else: no
+ * ingest decision reads them. A verdict missing one cannot be monitoring-ok.
  */
-export const MONITORING_CHECKS = ['grafana-health', 'prometheus-health'] as const
+export const MONITORING_CHECKS = ['grafana-health', 'prometheus-health', 'embedder-health'] as const
 
 /** The scope of a check. An id nobody has classified is an ingest check, so a new check fails closed. */
 export function checkScope(id: string): CheckScope {
@@ -211,6 +212,7 @@ export const PROBE_TARGETS = {
   'langfuse-web': 'langfuse-web',
   'langfuse-worker': 'langfuse-worker',
   grafana: 'grafana-health',
+  embedder: 'embedder-health',
 } as const
 
 export type ProbeTarget = keyof typeof PROBE_TARGETS
@@ -1241,6 +1243,14 @@ export async function checkPrometheus(deps: ReporterDeps): Promise<CheckResult> 
     : result('prometheus-health', 'fail', `prometheus is not ready (${probe.reason})`)
 }
 
+/** The Topics embedder answers `/health` once its model is loaded. Langfuse's embedding connection depends on it. */
+export async function checkEmbedder(deps: ReporterDeps): Promise<CheckResult> {
+  const probe = await probeText(deps, ENDPOINTS.embedderHealth)
+  return probe.ok
+    ? result('embedder-health', 'pass', 'embedder is healthy')
+    : result('embedder-health', 'fail', `embedder is unhealthy (${probe.reason})`)
+}
+
 // ─── ClickHouse (read-only user) ──────────────────────────────────────────────
 
 async function queryClickHouse(
@@ -1592,9 +1602,13 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
       return [ready, ...evaluated.results]
     }),
     guarded(['langfuse-web', 'langfuse-worker'], () => checkLangfuse(deps)),
-    guarded(['grafana-health', 'prometheus-health'], async () => {
-      const [grafana, prometheus] = await Promise.all([checkGrafana(deps), checkPrometheus(deps)])
-      return [grafana, prometheus]
+    guarded(['grafana-health', 'prometheus-health', 'embedder-health'], async () => {
+      const [grafana, prometheus, embedder] = await Promise.all([
+        checkGrafana(deps),
+        checkPrometheus(deps),
+        checkEmbedder(deps),
+      ])
+      return [grafana, prometheus, embedder]
     }),
     guarded(['volume-space', 'root-space'], async () => {
       const [sentinel, volume, root] = await Promise.all([

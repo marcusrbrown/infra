@@ -5,6 +5,8 @@
 #   - no AI gateway service
 #   - nothing is published except Caddy (80, 443) and, on 127.0.0.1 only, Langfuse web and Grafana
 #   - Prometheus and Grafana-managed alert rules added: failures reach a Discord webhook as fixed text and numbers
+#   - a Topics embedder (Text Embeddings Inference, CPU) on the backend network only: Langfuse Topics needs an embedding
+#     connection and the proxy has none. It is optional: no trace passes through it and nothing waits for it
 #   - two networks (see below), healthchecks, a log size limit and `restart: unless-stopped` everywhere
 #   - telemetry and outbound update checks are off wherever a setting exists
 #   - secrets are interpolated from the host `.env` or read from files, never written here
@@ -13,8 +15,8 @@
 #   edge     Caddy, the collector, Langfuse web, Tempo, Prometheus, the health reporter. The internet-facing,
 #            custom-built collector can reach nothing else (Prometheus answers read-only queries and has no
 #            management endpoint on).
-#   backend  Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, Tempo, Prometheus, the
-#            health reporter. The reporter bridges both: it reads the collector and Tempo on edge, and
+#   backend  Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, the Topics embedder, Tempo,
+#            Prometheus, the health reporter. The reporter bridges both: it reads the collector and Tempo on edge, and
 #            ClickHouse, MinIO, the Langfuse worker and Grafana on backend. Prometheus bridges both: it scrapes
 #            the collector, Tempo and the reporter on edge, and Grafana queries it on backend.
 #
@@ -71,6 +73,11 @@ x-langfuse-env:
   REDIS_HOST: redis
   REDIS_PORT: '6379'
   REDIS_AUTH: ${REDIS_AUTH:?}
+  # Topics: LLM connections (summary, embedding, naming) may reach these two hosts and no other. Langfuse blocks private
+  # addresses by default; a listed host skips that check, which is how the Docker service name `embedder` is allowed.
+  # `cliproxy.fro.bot` is the operator's proxy for the summary and naming models. Web checks a connection when it is
+  # saved, the worker when it calls. No private-address exemption is set.
+  LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS: embedder,cliproxy.fro.bot
 
 x-langfuse-depends-on: &langfuse-depends-on
   postgres:
@@ -169,6 +176,12 @@ services:
     depends_on: *langfuse-depends-on
     environment:
       <<: *langfuse-env
+      # Events dispatch (on by default) stores each routed trace's whole transcript under the event-upload prefix for
+      # Topics. The cleaner deletes those objects after three days; the 30-day rule on `events/` is the backstop.
+      LANGFUSE_EVENTS_DISPATCH_TRANSCRIPT_CLEANER_ENABLED: 'true'
+      # Each Topics job makes one summary call (the proxy) and one embedding call (the embedder). The default is 20 jobs
+      # at once; four keeps a backfill from flooding the proxy or starving the CPU the stores share.
+      LANGFUSE_TOPICS_TRACE_QUEUE_PROCESSING_CONCURRENCY: '4'
     networks: [backend]
     healthcheck:
       test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:3030/api/health || exit 1']
@@ -360,6 +373,46 @@ services:
       start_period: 30s
     logging: *logging
 
+  # OpenAI-compatible `POST /v1/embeddings` for Langfuse Topics, from a small model on this host. Langfuse reaches it as
+  # http://embedder:8080/v1 (the host is on the LLM allow-list above); nothing else does. Optional, like Grafana and
+  # Prometheus: no trace passes through it, nothing depends on it, and deploy pulls and starts it after the route is set.
+  # The model is pinned by revision (a commit, never a branch). With no copy in the volume the first start reads
+  # BAAI/bge-small-en-v1.5 (133 MB) from huggingface.co at that revision, once. Later starts read the volume and come up
+  # with no network at all (tested), but each start still asks huggingface.co for two optional weight files this model
+  # does not have, and TEI tolerates the refusal; no setting turns that off. No token and no tracing endpoint is set,
+  # and the router has no usage reporting. `EMBEDDER_USER_ID` in
+  # src/host.ts is `nobody`, and deploy gives the volume to it (a test pins both). Output is 384 dimensions.
+  embedder:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d
+    restart: unless-stopped
+    user: '65534:65534'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 1g
+    cpus: 2
+    command:
+      - --model-id=BAAI/bge-small-en-v1.5
+      - --revision=5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
+      - --port=8080
+      # Langfuse's OpenAI-compatible adapter sends up to 2048 inputs per request; the router's default is 32.
+      - --max-client-batch-size=2048
+    environment:
+      RAYON_NUM_THREADS: '2'
+    tmpfs:
+      - /tmp
+    volumes:
+      - embedder_models:/data
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, 'curl -fsS http://127.0.0.1:8080/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      # The first start downloads the model before it answers.
+      start_period: 300s
+    logging: *logging
+
   # Reads every dependency and runs a canary through the collector's private receiver; Caddy proxies only
   # /healthz to it. A small Bun script from a pinned image, with its source mounted read-only: no build step,
   # no dependencies, no Docker socket, no published port, no root. It starts without waiting for the stack, so a
@@ -419,3 +472,4 @@ volumes:
   tempo_data: {}
   prometheus_data: {}
   grafana_data: {}
+  embedder_models: {}

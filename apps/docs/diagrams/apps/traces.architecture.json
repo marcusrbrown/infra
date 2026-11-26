@@ -81,6 +81,14 @@
       "size": [170, 60]
     },
     {
+      "id": "embedder",
+      "type": "backend",
+      "label": "Topics embedder",
+      "sublabel": "local model, internal only",
+      "pos": [790, 160],
+      "size": [170, 60]
+    },
+    {
       "id": "discord",
       "type": "external",
       "label": "Discord",
@@ -141,6 +149,7 @@
         "tempo",
         "grafana",
         "prometheus",
+        "embedder",
         "worker",
         "clickhouse",
         "postgres",
@@ -169,7 +178,8 @@
     {"id": "scrape-collector", "from": "prometheus", "to": "collector", "label": "scrape", "variant": "dashed"},
     {"id": "scrape-reporter", "from": "prometheus", "to": "reporter", "label": "scrape", "variant": "dashed"},
     {"id": "promql", "from": "grafana", "to": "prometheus", "label": "PromQL"},
-    {"id": "alert", "from": "grafana", "to": "discord", "label": "alert webhook", "variant": "security"}
+    {"id": "alert", "from": "grafana", "to": "discord", "label": "alert webhook", "variant": "security"},
+    {"id": "embed", "from": "worker", "to": "embedder", "label": "Topics embeddings", "variant": "dashed"}
   ],
   "cards": [
     {
@@ -188,6 +198,7 @@
         "Langfuse holds whole traces, content included",
         "Tempo holds a keep-list of attributes plus span names and error text",
         "Only Caddy is published; Langfuse and Grafana are reached over SSH",
+        "Topics, when in use, sends capped transcripts to a zero-retention model through the operator's proxy; the embedder stays on the host",
         "Grafana alert rules post fixed text and numbers to a Discord webhook, never trace content"
       ]
     },

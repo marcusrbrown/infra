@@ -174,6 +174,21 @@ describe('the ingest verdict and the monitoring verdict', () => {
     expect(failingLines(monitoringDown)).toContain('grafana-health: grafana is unhealthy (http-503)')
     expect(failingLines(monitoringDown, {scope: 'ingest'})).toEqual([])
   })
+
+  // The Topics embedder is probed in the monitoring scope: a dead one fails the health path, never an open.
+  it('treats a failing embedder check as monitoring: healthy is false, the ingest verdict still passes', () => {
+    const embedderDown = detailOf({
+      ok: true,
+      monitoringOk: false,
+      checks: [
+        {id: 'embedder-health', status: 'fail', detail: 'embedder is unhealthy (http-503)', scope: 'monitoring'},
+      ],
+    })
+    expect(isPassing(embedderDown)).toBe(true)
+    expect(isHealthy(embedderDown)).toBe(false)
+    expect(failingLines(embedderDown)).toContain('embedder-health: embedder is unhealthy (http-503)')
+    expect(failingLines(embedderDown, {scope: 'ingest'})).toEqual([])
+  })
 })
 
 describe('isPassing', () => {

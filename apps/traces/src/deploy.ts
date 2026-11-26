@@ -12,16 +12,17 @@
 //   5. compare every file with the host. If ingest is open and a gated service (the collector, a backend or
 //      their configuration) is about to change, hold the route (503), and prove it from inside the host
 //   6. write directories, deny-all token files (only if absent), secret files, configs and the reporter source
-//   7. prune images, check free space, pull the ingest services (never Grafana or Prometheus)
+//   7. prune images, check free space, pull the ingest services (never Grafana, Prometheus or the Topics embedder)
 //   8. start the stores and Langfuse, assert and read back retention, start Tempo, the collector and the reporter,
 //      verify the collector's image digest
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
 //      `true`; otherwise off (first bring-up) or held (it was open before). The canary gate sends the deploy's one
 //      canary (the reporter's `--canary-once` mode, by exec) once the reporter's verdict is fresh
-//  10. pull and start the monitoring services, Prometheus and then Grafana, then remove the deploy marker, which ends
-//      the route's work. They are monitoring, not the route: they are pulled and started only after the route is decided,
-//      each as an operator gate (`prometheus-ready`, `grafana-ready`), so a failed pull or start fails the run and never
-//      holds or closes ingest. Both are recreated on every deploy, so a changed file of theirs is applied here. Only
+//  10. pull and start the services that are not the route, Prometheus, Grafana and then the Topics embedder, then remove
+//      the deploy marker, which ends the route's work. They are monitoring and an insight feature, not the route: they
+//      are pulled and started only after the route is decided, each as an operator gate (`prometheus-ready`,
+//      `grafana-ready`, `embedder-ready`), so a failed pull or start fails the run and never holds or closes ingest. All
+//      three are recreated on every deploy, so a changed file of theirs is applied here. Only
 //      then check Grafana's sign-in (the password file works) and its provisioned alerting (the Discord contact point
 //      and the rule groups exist), unless Grafana did not start: read-only, after the route is final, and a failure
 //      fails the run (`OperatorSurfaceError`) without touching the route
@@ -61,6 +62,7 @@ import {materializeIdentityFile} from '@marcusrbrown/infra-shared/server/droplet
 
 import {bashCommand, checkTracesStorage, shellQuote} from '../server/provision'
 import {
+  EMBEDDER_USER_ID,
   GRAFANA_USER_ID,
   PROMETHEUS_USER_ID,
   SENDER_GROUPS,
@@ -298,6 +300,7 @@ export const SERVICES = [
   'tempo',
   'grafana',
   'prometheus',
+  'embedder',
   'health-reporter',
 ] as const
 
@@ -310,15 +313,24 @@ export type Service = (typeof SERVICES)[number]
  */
 export const MONITORING_SERVICES = ['grafana', 'prometheus'] as const satisfies readonly Service[]
 
+/**
+ * The services of optional insight features. The Topics embedder serves Langfuse's embedding connection: no trace passes
+ * through it, nothing in the compose file depends on it, it holds no trace content and it is not gated. It is the same
+ * kind of thing as the monitoring services for the route's purposes (pulled and started after the route is decided, as an
+ * operator gate), and a separate list because it is not monitoring: the reporter probes it, but it raises no alarm.
+ */
+export const INSIGHT_SERVICES = ['embedder'] as const satisfies readonly Service[]
+
+/** Every service that starts after the route is decided, never before: the monitoring and the insight services. */
+const POST_ROUTE_SERVICES: readonly string[] = [...MONITORING_SERVICES, ...INSIGHT_SERVICES]
+
 /** Every other service: the ones the route depends on. The route-critical pull and start cover these and no others. */
-export const INGEST_SERVICES: readonly Service[] = SERVICES.filter(
-  service => !(MONITORING_SERVICES as readonly string[]).includes(service),
-)
+export const INGEST_SERVICES: readonly Service[] = SERVICES.filter(service => !POST_ROUTE_SERVICES.includes(service))
 
 /**
  * The services whose change puts data or the public route at risk: the collector, the backends and their
- * configuration, and Caddy (its configuration is the route). Grafana, Prometheus and the health reporter are not
- * gated: none of them is on the path of a trace, and none holds trace content.
+ * configuration, and Caddy (its configuration is the route). Grafana, Prometheus, the embedder and the health reporter
+ * are not gated: none of them is on the path of a trace, and none holds trace content.
  * On an open route a change to any of these holds the route first and reopens it only after the gates pass.
  */
 export const GATED_SERVICES: readonly Service[] = [
@@ -344,9 +356,11 @@ const COLLECTOR_GID = '65532'
 const GRAFANA_UID = String(GRAFANA_USER_ID)
 const REPORTER_UID = String(TEMPO_USER_ID)
 const PROMETHEUS_UID = String(PROMETHEUS_USER_ID)
+const EMBEDDER_UID = String(EMBEDDER_USER_ID)
 
 const COMPOSE_PROJECT_VOLUME = 'traces_collector_queue'
 const PROMETHEUS_PROJECT_VOLUME = 'traces_prometheus_data'
+const EMBEDDER_PROJECT_VOLUME = 'traces_embedder_models'
 
 /** Fixed Langfuse bootstrap identifiers: one organisation, one project, one user. */
 const INIT = {
@@ -1261,6 +1275,7 @@ export function createCollectorScript(id: string): string {
 
 export const QUEUE_SENTINEL = 'TRACES_QUEUE_VOLUME_READY'
 export const PROMETHEUS_VOLUME_SENTINEL = 'TRACES_PROMETHEUS_VOLUME_READY'
+export const EMBEDDER_VOLUME_SENTINEL = 'TRACES_EMBEDDER_VOLUME_READY'
 
 /**
  * Give a named volume's directory to the user its container runs as, and read the owner back. The directory must be
@@ -1312,6 +1327,23 @@ export function prometheusVolumeScript(id: string): string {
     'prometheus-volume',
     id,
     volumeOwnerBody('prometheus data', PROMETHEUS_PROJECT_VOLUME, PROMETHEUS_UID, PROMETHEUS_VOLUME_SENTINEL),
+  )
+}
+
+/** Create (never recreate) the embedder container, which also creates its model volume. */
+export function createEmbedderScript(id: string): string {
+  return composeStep('create-embedder', id, `${COMPOSE} create --no-recreate embedder`)
+}
+
+/**
+ * The embedder runs as `nobody` (65534) with a read-only root, and a fresh named volume is root-owned, so its first start
+ * could not write the model it downloads. Ownership is set here, once, as for Prometheus's data volume.
+ */
+export function embedderVolumeScript(id: string): string {
+  return guardedStep(
+    'embedder-volume',
+    id,
+    volumeOwnerBody('embedder models', EMBEDDER_PROJECT_VOLUME, EMBEDDER_UID, EMBEDDER_VOLUME_SENTINEL),
   )
 }
 
@@ -1385,7 +1417,7 @@ export const ALERT_CONTACT_POINT_UID = 'traces-discord'
 
 /** The rule groups the rules file provisions and how many rules each holds; pinned to `rules.yaml` by a test. */
 export const ALERT_RULE_GROUPS: readonly {name: string; rules: number}[] = [
-  {name: 'stack', rules: 4},
+  {name: 'stack', rules: 5},
   {name: 'collector', rules: 3},
   {name: 'tempo', rules: 2},
   {name: 'storage', rules: 4},
@@ -1549,7 +1581,7 @@ export interface ReporterDetail {
   stale: boolean
   /** The ingest verdict. The `reporter-verdict` gate reads this and nothing about monitoring. */
   ok: boolean
-  /** Grafana and Prometheus. Informational here: it never reaches a gate. */
+  /** Grafana, Prometheus and the embedder. Informational here: it never reaches a gate. */
   monitoringOk?: boolean
   at: string | null
   checks: ReporterCheck[]
@@ -1670,6 +1702,7 @@ export type GateId =
   | 'grafana-alerting'
   | 'prometheus-ready'
   | 'grafana-ready'
+  | 'embedder-ready'
 
 export interface GateResult {
   id: GateId
@@ -2525,7 +2558,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
   }
 
   /**
-   * One monitoring service: pulled, then started, as an operator gate. Its failure (a registry that does not answer, a
+   * One post-route service (monitoring or insight): pulled, then started, as an operator gate. Its failure (a registry that does not answer, a
    * digest that is not there, a start that does not come up healthy, a volume that cannot be handed over) is a result
    * and not an exception: it must not reach the failure handler below, which would hold the route. Every step is
    * guarded like any other change to the host, and a refusal (another deploy owns the host, or its step is running)
@@ -2533,8 +2566,8 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
    * is, so a changed file of its own (`prometheus.yml`, a Grafana provisioning file) is applied here, and a start that
    * failed last time is retried even though the files then match the host's: no pending-restart record is needed.
    */
-  const startMonitoringService = async (
-    id: 'prometheus-ready' | 'grafana-ready',
+  const startPostRouteService = async (
+    id: 'prometheus-ready' | 'grafana-ready' | 'embedder-ready',
     label: string,
     run: () => Promise<unknown>,
   ): Promise<GateResult> => {
@@ -2554,15 +2587,16 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
   }
 
   /**
-   * Prometheus and Grafana, after the route is decided and proven. Nothing here is in the route-critical pull or start.
-   * The two are independent: one failing does not stop the other. Prometheus goes first, because Grafana's alert rules
-   * read it.
+   * Prometheus, Grafana and the Topics embedder, after the route is decided and proven. Nothing here is in the
+   * route-critical pull or start. The three are independent: one failing does not stop another. Prometheus goes first,
+   * because Grafana's alert rules read it; the embedder goes last, because its first start can take minutes (it reads
+   * its model once) and nothing waits for it.
    */
-  const startMonitoring = async (): Promise<GateResult[]> => {
+  const startPostRoute = async (): Promise<GateResult[]> => {
     log(
-      '==> Pulling and starting Prometheus and Grafana (after the route is decided; a failure here fails the run and never touches the route)',
+      '==> Pulling and starting Prometheus, Grafana and the Topics embedder (after the route is decided; a failure here fails the run and never touches the route)',
     )
-    const prometheus = await startMonitoringService('prometheus-ready', 'Prometheus', async () => {
+    const prometheus = await startPostRouteService('prometheus-ready', 'Prometheus', async () => {
       await sh('Pull the Prometheus image', pullScript(deployId, 'pull-prometheus', ['prometheus']), [
         STEP_SENTINEL('pull-prometheus'),
       ])
@@ -2574,7 +2608,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
         STEP_SENTINEL('up-prometheus'),
       ])
     })
-    const grafana = await startMonitoringService('grafana-ready', 'Grafana', async () => {
+    const grafana = await startPostRouteService('grafana-ready', 'Grafana', async () => {
       await sh('Pull the Grafana image', pullScript(deployId, 'pull-grafana', ['grafana']), [
         STEP_SENTINEL('pull-grafana'),
       ])
@@ -2582,12 +2616,22 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
         STEP_SENTINEL('up-grafana'),
       ])
     })
-    return [prometheus, grafana]
+    const embedder = await startPostRouteService('embedder-ready', 'The Topics embedder', async () => {
+      await sh('Pull the embedder image', pullScript(deployId, 'pull-embedder', ['embedder']), [
+        STEP_SENTINEL('pull-embedder'),
+      ])
+      await sh('Create the embedder container', createEmbedderScript(deployId), [STEP_SENTINEL('create-embedder')])
+      await sh('Prepare the embedder model volume', embedderVolumeScript(deployId), [EMBEDDER_VOLUME_SENTINEL])
+      await sh('Start the embedder', upScript(deployId, 'up-embedder', ['embedder'], {force: true}), [
+        STEP_SENTINEL('up-embedder'),
+      ])
+    })
+    return [prometheus, grafana, embedder]
   }
 
   /** The very last step of a deploy that evaluated every gate and left the route in its final state. */
   const finish = async (result: DeployResult): Promise<DeployResult> => {
-    const monitoring = await startMonitoring()
+    const monitoring = await startPostRoute()
     for (const line of describeGates(monitoring)) log(`  ${line}`)
     // Compare-and-delete under the ingest lock: only the deploy that owns the marker removes it.
     await sh('Remove the deploy marker', removeOwnFileScript(deployId, MARKER_FILE), [REMOVED_SENTINEL])

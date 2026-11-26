@@ -57,8 +57,8 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
 
    - **429** is the byte limiter working: a sender spent its 1 GiB allowance and is refilling at 32 KiB/s. It shows in `requests` (`429=<n>`) and in `refusedSpans`, and it does **not** fail the verdict, so it does not file `traces-unhealthy` or block `ingest open`.
    - **503** fails `collector-refused` for 30 minutes after the count last rose. It means an exporter queue is full and the collector is shedding data: read `collector-queues`, then `traces logs collector`. The 503 count covers the three authenticated receivers together; it cannot say which group.
-   - **401** includes the public monitor's deliberate unauthenticated `POST` to `/workstation/v1/traces` every 15 minutes (about 96 a day) and deploy-gate probes, so a steady 401 count alone does not show a sender with a bad token.
-   - `refusedSpans` counts spans answered 429 or 503, so it can be above zero on a healthy stack.
+   - **401** includes the public monitor's deliberate unauthenticated `POST` to `/workstation/v1/traces` every 15 minutes (about 96 a day) and deploy-gate probes, so the 401 count cannot diagnose a sender. To diagnose a revoked sender token, check the sender's `undelivered` or `dropped` log lines and its latest trace in Langfuse.
+   - `refusedSpans` counts spans answered 429 or 503, so it can be above zero on a healthy stack, and it stays at zero for a sender refused with 401.
 
 2. Read the public health path, which needs no SSH:
 
@@ -330,7 +330,9 @@ If the host did not confirm the write, the token may or may not be in the file a
 
 ### Rotate
 
-A group that already has a token accepts both until the old one is revoked. Run `add`, switch the sender, then revoke each fingerprint the command printed.
+A group that already has a token accepts both until the old one is revoked. Run `add`, switch the sender, then revoke the old token.
+
+Before you revoke, inventory the repositories configured to use the sender group, and confirm or rotate each secret individually. A secret's `updated_at` is only a clue to which repositories hold a token. `add` prints every older fingerprint in the group, not only the one it replaces, so treat that list as candidates. Verify that each sender has switched and is delivering (no `undelivered` or `dropped` lines in its log) before you revoke. A token revoked while a repository still holds it strands that sender, and nothing on the stack alerts; see the 401 note under [Checking health](#checking-health).
 
 ### List
 
@@ -605,7 +607,7 @@ Settings the stack already sets: Langfuse's LLM connections may reach `embedder`
 
    **The header is required.** OpenCode Go answers HTTP 400 `MissingSessionID` ("Request is missing x-opencode-session and cannot be routed efficiently") to a request without `x-opencode-session`, on both `/v1/chat/completions` and `/v1/messages`. With the header the response is 200 and billed to Go (`billing_source: go`). The one fixed value groups every Topics call into a single Go session, which is acceptable. How the proxy forwards the header is in [`apps/cliproxy/AGENTS.md`](../../apps/cliproxy/AGENTS.md#opencode-go-upstream), and what to do when the proxy stops forwarding it is in [Session header dropped](cliproxy-opencode-go.md#session-header-dropped).
 
-   **Never use the anthropic adapter or the default models for Topics.** With default models on, the openai adapter's save test asks for a default OpenAI model the proxy does not serve, and the save fails with "gpt-4.1 missing". The anthropic adapter saves only because its test runs on a default Claude model, which the proxy serves through Claude OAuth; selecting those defaults would send trace content to Anthropic.
+   **List Go ids as custom models and turn default models off.** Without a custom model, the save test uses an unsupported OpenAI default and fails with "gpt-4.1 missing" (the test calls the first custom model, else the adapter's first default: `web/src/features/llm-api-key/server/llmConnectionService.ts:400-402` at Langfuse v4.86.0). Do not use the anthropic adapter: its defaults can send trace content to Anthropic.
 
 6. **Add the embedder connection through the API, not the UI.** The UI form refuses to save a connection whose chat test fails, and the embedder serves embeddings only (v4.86.0: `web/src/features/public-api/components/CreateLLMApiKeyForm.tsx:845-870` aborts on a failed test; `web/src/features/llm-api-key/server/llmConnectionService.ts:383-447` makes a text-generation call). The public API route `PUT /api/public/llm-connections` writes the connection without that test (`web/src/pages/api/public/llm-connections/index.ts:44-80`). It still checks the base URL against `LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS`, so `embedder` is accepted and any other private host is not (`llmConnectionService.ts:673-687` calls `validateBaseUrlForWrite` when the connection is new or its base URL changed; `packages/shared/src/server/llm/baseUrlValidation.ts:41-61`).
 
@@ -680,7 +682,7 @@ The checked items were run on the real host on 2026-11-26. The unchecked ones ha
 | A call to the proxy is refused the same way | the URL names a host other than `cliproxy.fro.bot` | use `https://cliproxy.fro.bot/v1` |
 | The embedding test fails with "Unprocessable Entity" (422), or "returned N dimensions instead of 384" | the dimensions setting is the default 1024, or above 384. The first-run Setup wizard has no dimensions field and stores 1024 | close the wizard; open the **⋮ menu at the top right of the Topics page → Settings**, put 384 in the number box next to the embedding slot, and save (step 7) |
 | A call through the `cliproxy` connection fails with HTTP 400 `MissingSessionID` | the connection has no `x-opencode-session` header | add it under Extra Headers with value `langfuse-topics` (step 5). If the proxy monitor also reports `session-header-dropped`, see [Session header dropped](cliproxy-opencode-go.md#session-header-dropped) |
-| Saving the `cliproxy` connection fails with "gpt-4.1 missing" | default models are on, so the save test asks for an OpenAI model the proxy does not serve | turn default models off and list only Go model ids as custom models (step 5); do not switch to the anthropic adapter |
+| Saving the `cliproxy` connection fails with "gpt-4.1 missing" | no custom model is listed, so the save test uses the adapter's first default model, an OpenAI model the proxy does not serve | list only Go model ids as custom models and turn default models off (step 5); do not switch to the anthropic adapter |
 | `EmbedderDown`, or `embedder-ready` failed | the model was not read (no route to `huggingface.co`) or the volume is not owned by 65534 | `traces logs embedder`; deploy again |
 | Summaries stop, the worker logs 401 or 404 from the proxy | the key was revoked, or the model id is not served | `bunx @marcusrbrown/infra cliproxy models opencode-go`; replace the key or the id in the connection |
 

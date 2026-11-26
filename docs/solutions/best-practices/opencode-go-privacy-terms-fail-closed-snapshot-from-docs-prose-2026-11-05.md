@@ -1,7 +1,7 @@
 ---
 title: "OpenCode Go privacy terms: a fail-closed snapshot built from two sources, a review PR and fixture-pinned tests"
 date: 2026-11-05
-last_updated: 2026-11-25
+last_updated: 2026-11-26
 module: packages/shared/opencode-go
 problem_type: architecture_pattern
 component: tooling
@@ -102,6 +102,12 @@ A reviewed mapping such as `DeepSeek` to several Privacy rows is resolved only w
 
 Mechanics: [`.github/workflows/opencode-go-privacy.yaml`](../../../.github/workflows/opencode-go-privacy.yaml) and [Snapshot refresh PR review](../../runbooks/cliproxy-opencode-go.md#snapshot-refresh-pr-review).
 
+### An open restricting PR is an exposure window
+
+A restricting PR does not change the served model list until merge and deploy approval. Notify on restrictions while the PR is open; if no model remains eligible, use the [emergency disable](../../runbooks/cliproxy-opencode-go.md#emergency-disable-without-a-deploy). On 2026-11-25 #2085 restricted two models and sat unnoticed for about 16 hours before it merged; the notice came with #2099.
+
+When the notice links the PR, look it up by same-repository head. `gh pr list --head <branch>` matches the branch name across forks, so filter on `isCrossRepository` as the stale-PR lookup does (`.github/workflows/opencode-go-privacy.yaml:208`).
+
 ### Test against pinned fixtures, never against the file the refresh rewrites
 
 - Per-model terms are asserted against pinned fixtures: `__fixtures__/go.mdx`, `__fixtures__/live-models.json` and the snapshot they build, `__fixtures__/go.expected.json`. A privacy refresh rewrites the committed snapshot, so nothing about an individual model may be asserted against that file. The per-model pin that contained Gemini 4 Argon (#1976) became a fixture test.
@@ -147,3 +153,4 @@ Mechanics: [`.github/workflows/opencode-go-privacy.yaml`](../../../.github/workf
 - `docs/solutions/best-practices/cliproxy-management-api-field-apply-2026-06-20.md` — guards on the whole-section write that applies the eligible list.
 - `docs/solutions/best-practices/upstream-data-file-download-not-checkout-bun-test-discovery-2026-11-04.md` — the same download-one-file-not-checkout approach.
 - `apps/cliproxy/AGENTS.md` — "OPENCODE GO UPSTREAM".
+- #2085 — the refresh PR that restricted two models and sat unnoticed. #2099 — the restriction notice.

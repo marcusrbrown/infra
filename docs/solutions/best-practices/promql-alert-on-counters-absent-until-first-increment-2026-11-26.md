@@ -59,7 +59,7 @@ For a gauge, use the plain comparison.
 
 ## Prevention
 
-CI skips both promtool cases. The bun test skips when Docker or the pinned Prometheus image is not local, and no workflow loads the image. Run the cases locally before changing a query: `docker run --rm --network none -v "$PWD/apps/traces/config/prometheus:/w:ro" -w /w --entrypoint promtool <the prom/prometheus image pinned in apps/traces/docker-compose.yaml> test rules loss-rules.test.yml`.
+CI pulls the pinned Prometheus image before the tests, and a missing image fails there. Locally the promtool cases skip when Docker or the image is not present, so pull it or run them directly before changing a query: `docker run --rm --network none -v "$PWD/apps/traces/config/prometheus:/w:ro" -w /w --entrypoint promtool <the prom/prometheus image pinned in apps/traces/docker-compose.yaml> test rules loss-rules.test.yml`.
 
 ## Related
 

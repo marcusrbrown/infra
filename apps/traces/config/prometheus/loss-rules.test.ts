@@ -109,8 +109,9 @@ describe('the loss rules mirror', () => {
 
 // ─── promtool, in the pinned image ────────────────────────────────────────────
 
-// The image under test is whatever docker-compose.yaml pins, so a Renovate bump changes what this runs. It is skipped
-// when docker is not running or the image is not already local: it never pulls, and the container has no network.
+// The image under test is whatever docker-compose.yaml pins, so a Renovate bump changes what this runs. Locally it is
+// skipped when docker is not running or the image is not already local: it never pulls, and the container has no
+// network. CI pulls the image first (the Test job in .github/workflows/ci.yaml), and there a missing image fails.
 function readComposePrometheusImage(): string {
   const compose = readFileSync(`${here}../../docker-compose.yaml`, 'utf8')
   const image = /^ {4}image: (prom\/prometheus:\S+@sha256:[0-9a-f]{64})$/m.exec(compose)?.[1]
@@ -153,6 +154,16 @@ function promtool(...args: string[]): {exitCode: number; output: string} {
 }
 
 describe('promtool in the pinned Prometheus image (needs docker and the image locally)', () => {
+  it.if(process.env.CI === 'true')(
+    'has docker and the pinned image in CI, so the cases below cannot skip there',
+    () => {
+      expect({dockerAvailable, imageAvailable, prometheusImage}).toMatchObject({
+        dockerAvailable: true,
+        imageAvailable: true,
+      })
+    },
+  )
+
   integrationTest('accepts the mirror rules file', () => {
     const checked = promtool('check', 'rules', '/w/loss-rules.yml')
     expect({exitCode: checked.exitCode, output: checked.output}).toMatchObject({exitCode: 0})

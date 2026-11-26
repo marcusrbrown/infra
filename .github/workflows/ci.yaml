@@ -88,6 +88,17 @@ jobs:
       - name: Download upstream gateway compose
         run: bun run fetch:upstream-compose
 
+      # The promtool rule tests in apps/traces/config/prometheus run only when the pinned image is local; in CI a
+      # missing image fails them. The pin is read from the compose file, so it is never copied here.
+      - name: Pull the pinned Prometheus image
+        run: |
+          image="$(sed -nE 's/^ {4}image: (prom\/prometheus:[^ ]+@sha256:[0-9a-f]{64})$/\1/p' apps/traces/docker-compose.yaml)"
+          if [ -z "$image" ]; then
+            echo '::error::apps/traces/docker-compose.yaml pins no prom/prometheus image by tag and digest'
+            exit 1
+          fi
+          docker pull --quiet "$image"
+
       - name: Run tests
         run: bun test --recursive
 

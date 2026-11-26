@@ -413,8 +413,8 @@ services:
       start_period: 300s
     logging: *logging
 
-  # Reads every dependency and runs a canary through the collector's private receiver; Caddy proxies only
-  # /healthz to it. A small Bun script from a pinned image, with its source mounted read-only: no build step,
+  # Reads every dependency and exports the results as metrics; the deploy also runs its one-off canary through the
+  # collector's private receiver here. Caddy proxies only /healthz to it. A small Bun script from a pinned image, with its source mounted read-only: no build step,
   # no dependencies, no Docker socket, no published port, no root. It starts without waiting for the stack, so a
   # stack that is down is reported instead of leaving the reporter unstarted.
   health-reporter:

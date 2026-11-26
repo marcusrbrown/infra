@@ -593,18 +593,31 @@ Settings the stack already sets: Langfuse's LLM connections may reach `embedder`
    The proxy also serves Claude and GPT models, which are **not** zero retention. A Go model is listed only when the reviewed privacy snapshot clears it ([OpenCode Go through the proxy](cliproxy-opencode-go.md)); check that snapshot (`zeroRetention: true`, `trainsOnData: false`) for the one you pick. Use the id exactly as the command prints it.
 
 4. **Open the Langfuse tunnel** (`bunx @marcusrbrown/infra traces open`) and sign in at `http://localhost:3000`. Keep it open for the next three steps.
-5. **Add the proxy connection in the UI.** In the project's settings, LLM connections, add one with provider name `cliproxy`, adapter _OpenAI_, base URL `https://cliproxy.fro.bot/v1`, the Topics proxy key, and the Go model id from step 3 as a custom model (turn the default models off). One connection serves both the summary and the naming slots; add the second Go model id to it if you want a different naming model. The form tests it with one chat call and saves only if that passes.
+5. **Add the proxy connection in the UI.** In Langfuse, Settings → LLM Connections, add one connection with:
+
+   - adapter **openai** and name `cliproxy`
+   - base URL `https://cliproxy.fro.bot/v1`
+   - the Topics proxy key
+   - **default models off**, and custom models taken only from the `bunx @marcusrbrown/infra cliproxy models opencode-go` list in step 3 (for example `opencode-go/qwen3.8-flash` and `opencode-go/qwen3.8-max`)
+   - under **Extra Headers**, key `x-opencode-session` and value `langfuse-topics`
+
+   One connection serves both the summary and the naming slots; add a second Go model id to it if you want a different naming model. The form tests it with one chat call and saves only if that passes.
+
+   **The header is required.** OpenCode Go answers HTTP 400 `MissingSessionID` ("Request is missing x-opencode-session and cannot be routed efficiently") to a request without `x-opencode-session`, on both `/v1/chat/completions` and `/v1/messages`. With the header the response is 200 and billed to Go (`billing_source: go`). The one fixed value groups every Topics call into a single Go session, which is acceptable. How the proxy forwards the header is in [`apps/cliproxy/AGENTS.md`](../../apps/cliproxy/AGENTS.md#opencode-go-upstream), and what to do when the proxy stops forwarding it is in [Session header dropped](cliproxy-opencode-go.md#session-header-dropped).
+
+   **Never use the anthropic adapter or the default models for Topics.** With default models on, the openai adapter's save test asks for a default OpenAI model the proxy does not serve, and the save fails with "gpt-4.1 missing". The anthropic adapter saves only because its test runs on a default Claude model, which the proxy serves through Claude OAuth; selecting those defaults would send trace content to Anthropic.
+
 6. **Add the embedder connection through the API, not the UI.** The UI form refuses to save a connection whose chat test fails, and the embedder serves embeddings only (v4.86.0: `web/src/features/public-api/components/CreateLLMApiKeyForm.tsx:845-870` aborts on a failed test; `web/src/features/llm-api-key/server/llmConnectionService.ts:383-447` makes a text-generation call). The public API route `PUT /api/public/llm-connections` writes the connection without that test (`web/src/pages/api/public/llm-connections/index.ts:44-80`). It still checks the base URL against `LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS`, so `embedder` is accepted and any other private host is not (`llmConnectionService.ts:673-687` calls `validateBaseUrlForWrite` when the connection is new or its base URL changed; `packages/shared/src/server/llm/baseUrlValidation.ts:41-61`).
 
    1. **Make a short-lived key in the UI.** Project settings, API keys, create. Pick the role **Full access** (the `ADMIN` role; the picker defaults to Member, and Member cannot write connections), set the shortest expiry the picker offers, and copy both halves once.
 
       The collector's Application-role key cannot do this: Application holds no `llmApiKeys` action, and the route requires `llmApiKeys:create` (`packages/shared/src/features/rbac/systemRoleAccessRights.ts:162-175` lists Application's actions; `packages/shared/src/features/rbac/projectAccessRights.ts:197,226` gives `llmApiKeys:create` to ADMIN, and the MEMBER list at `:271` has only `llmApiKeys:read`). Do not widen the collector's key, and do not use the bootstrap key.
 
-   2. **Put the two halves in your shell, read from a prompt** (nothing goes into history or the process list):
+   2. **Put the two halves in your shell, read from a prompt** (nothing goes into history or the process list; this form works in bash and zsh):
 
       ```bash
-      read -rs -p 'public key: ' LF_PK; echo
-      read -rs -p 'secret key: ' LF_SK; echo
+      printf 'public key: '; read -rs LF_PK; echo
+      printf 'secret key: '; read -rs LF_SK; echo
       ```
 
    3. **Create the connection** through the open tunnel. The credentials reach curl through a config on a file descriptor, not the command line:
@@ -622,7 +635,7 @@ Settings the stack already sets: Langfuse's LLM connections may reach `embedder`
    4. **Check it and clear the shell.** `curl -q --noproxy '*' -sS -K <(printf 'user = "%s:%s"\n' "$LF_PK" "$LF_SK") http://localhost:3000/api/public/llm-connections` lists the connections (`GET`, same role); then `unset LF_PK LF_SK`.
    5. **Delete the key in the UI** (API keys, delete) as soon as the check passes, or as soon as you stop after an error, even though it expires on its own. An Admin key can read and write everything in the project.
 
-7. **Select the models in the Topics settings.** On the Topics page, open the model settings and fill the three slots: facet summaries (connection `cliproxy`, the Go model), embeddings (connection `embedder`, `BAAI/bge-small-en-v1.5`) and topic clustering, which names topics (connection `cliproxy`, a Go model). Set **embedding dimensions to 384** before you save: the setting defaults to 1024 (`packages/shared/src/server/topics/model-config.ts:431`), Topics accepts 64 to 2048, and the embedder answers 422 to anything above its model's 384 (Topics retries without a size only on a 400, `packages/shared/src/server/topics/embeddings.ts:20-43`, so the 422 fails the test). Saving runs a real call for each changed slot (`model-config.ts:679-773`, the embedding branch at `:720-735`): the summary and naming slots return structured output, and the embedding slot embeds two texts in one request and requires both vectors to be exactly 384 long. A failed test names the slot and the reason. The embedding model and dimensions lock once embedded summaries exist, so choose them once.
+7. **Select the models in the Topics settings, before you create a map.** On the Topics page, open the **⋮ menu at the top right → Settings**, and fill the three slots: facet summaries (connection `cliproxy`, a Go model), embeddings (connection `embedder`, `BAAI/bge-small-en-v1.5`) with **384** in the number box next to it, and topic clustering, which names topics (connection `cliproxy`, a Go model that keeps its reasoning short, such as `opencode-go/qwen3.8-max` or `opencode-go/qwen3.8-flash`; add it to the connection's custom models first). Each slot's save test is a structured-output call capped at 512 output tokens, and a reasoning model such as `opencode-go/glm-5.3-flash` can spend all of them before it writes the JSON, which fails the clustering test with "No output generated." The dialog also has a trace readiness field, in seconds; use 600. Save, then create the map. Do not use the first-run **Setup** wizard for this: it has no embedding-dimensions field and stores the default of 1024 (`packages/shared/src/server/topics/model-config.ts:431`), so its embedding test fails with "Unprocessable Entity". Topics accepts 64 to 2048, and the embedder answers 422 to anything above its model's 384 (Topics retries without a size only on a 400, `packages/shared/src/server/topics/embeddings.ts:20-43`, so the 422 fails the test). Saving runs a real call for each changed slot (`model-config.ts:679-773`, the embedding branch at `:720-735`): the summary and naming slots return structured output, and the embedding slot embeds two texts in one request and requires both vectors to be exactly 384 long. A failed test names the slot and the reason. The embedding model and dimensions lock once embedded summaries exist, so choose them once.
 8. **Build the first map small.** Create a live map, filter it by **trace name** (one workflow, not everything), sample **10 to 20 percent** of traces, and use the **Intent** and **Issues** facets. Check the cost estimate it shows, then start it. Watch `traces logs langfuse-worker` for the first summaries.
 
 ### What it costs
@@ -648,11 +661,11 @@ Removing the embedder itself is a code change, not a step here: the compose serv
 
 ### Verified on the host
 
-Not yet done. Nothing below has been run against the real host; the first deploy that carries the embedder is where it is proven. After that deploy, run and record each:
+The checked items were run on the real host on 2026-11-26. The unchecked ones have not been; the first deploy that carries the embedder is where they are proven. After that deploy, run and record each:
 
 - [ ] `traces status` shows `embedder` running and `embedder-health` passing, and the deploy's `embedder-ready` gate passed (the first start read the model from `huggingface.co`).
-- [ ] The embedder connection was created through the API (step 6): HTTP 201, then HTTP 200 on a repeat, and the key deleted afterwards.
-- [ ] The Topics settings saved with all three slots, and the embedding test passed at 384 dimensions (two texts, two vectors of 384).
+- [x] The `cliproxy` connection (step 5, with the `x-opencode-session` header) and the embedder connection (step 6, through the API; the key deleted afterwards) exist. Checked 2026-11-26.
+- [x] The Topics settings saved with all three slots (step 7), and the embedding test passed at 384 dimensions (two texts, two vectors of 384). Checked 2026-11-26.
 - [ ] One small map on a filtered set (one trace name, 10 to 20 percent sampling, Intent and Issues) completed: summaries appeared, topics were named, and the cost estimate was about what the run cost.
 - [ ] `traces logs embedder` and `traces logs langfuse-worker` show no refused host and no 4xx from the proxy or the embedder.
 - [ ] On the next deploy, retention read back the TTL on `topic_facet_summaries` (and on the assignment tables once they exist) from the real table definitions.
@@ -665,7 +678,9 @@ Not yet done. Nothing below has been run against the real host; the first deploy
 | The API answers 403 "insufficient permissions" or 401 | the key has the wrong role, is expired, or the tunnel is not open | make a new key with the **Full access** role, step 6.1; `traces open` |
 | The API answers 400 naming "Invalid base URL" (host not allowed, blocked IP) | the stack's allow-list was changed, or the URL names another host | the base URL must be exactly `http://embedder:8080/v1`; check `LANGFUSE_LLM_CONNECTION_ALLOWED_HOSTS` in the compose file |
 | A call to the proxy is refused the same way | the URL names a host other than `cliproxy.fro.bot` | use `https://cliproxy.fro.bot/v1` |
-| The embedding slot's test fails with 422, or "returned N dimensions instead of 384" | the dimensions setting is still the default 1024, or above 384 | set 384 in the Topics settings |
+| The embedding test fails with "Unprocessable Entity" (422), or "returned N dimensions instead of 384" | the dimensions setting is the default 1024, or above 384. The first-run Setup wizard has no dimensions field and stores 1024 | close the wizard; open the **⋮ menu at the top right of the Topics page → Settings**, put 384 in the number box next to the embedding slot, and save (step 7) |
+| A call through the `cliproxy` connection fails with HTTP 400 `MissingSessionID` | the connection has no `x-opencode-session` header | add it under Extra Headers with value `langfuse-topics` (step 5). If the proxy monitor also reports `session-header-dropped`, see [Session header dropped](cliproxy-opencode-go.md#session-header-dropped) |
+| Saving the `cliproxy` connection fails with "gpt-4.1 missing" | default models are on, so the save test asks for an OpenAI model the proxy does not serve | turn default models off and list only Go model ids as custom models (step 5); do not switch to the anthropic adapter |
 | `EmbedderDown`, or `embedder-ready` failed | the model was not read (no route to `huggingface.co`) or the volume is not owned by 65534 | `traces logs embedder`; deploy again |
 | Summaries stop, the worker logs 401 or 404 from the proxy | the key was revoked, or the model id is not served | `bunx @marcusrbrown/infra cliproxy models opencode-go`; replace the key or the id in the connection |
 

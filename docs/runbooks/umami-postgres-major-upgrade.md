@@ -1033,7 +1033,7 @@ PG18 dumps cannot load into PG15, so rolling back discards PG18 writes since Cad
 
 ```bash
 ( set -Eeuo pipefail
-  read -r -p 'Type ROLL BACK UMAMI TO PG15 AND DISCARD PG18 WRITES to continue: ' ok
+  printf 'Type ROLL BACK UMAMI TO PG15 AND DISCARD PG18 WRITES to continue: '; read -r ok
   [ "$ok" = 'ROLL BACK UMAMI TO PG15 AND DISCARD PG18 WRITES' ]
   retention_disable_assert
   "${SSH[@]}" "$DC exec -T db pg_dump -Fc --create -U umami -d umami" | age -r "$AGE_RECIPIENT" > "$RUN_DIR/pg18-forensic.dump.age"
@@ -1090,7 +1090,7 @@ If the pin PR already merged, revert it as one change (image, key, mount destina
   echo 'anchor_unreferenced=PASS'
   refs="$("${SSH[@]}" "grep -cF 'umami-db-data:' /opt/umami/docker-compose.yaml || true")"
   [ "$refs" = 0 ] || { echo 'compose_references_anchor=FAIL' >&2; exit 1; }
-  read -r -p 'Type REMOVE UMAMI PG15 VOLUME to destroy the rollback anchor: ' ok
+  printf 'Type REMOVE UMAMI PG15 VOLUME to destroy the rollback anchor: '; read -r ok
   [ "$ok" = 'REMOVE UMAMI PG15 VOLUME' ]
   "${SSH[@]}" 'docker volume rm umami_umami-db-data'
   "${SSH[@]}" 'docker volume ls --format "{{.Name}}"' | grep -E '^umami_'

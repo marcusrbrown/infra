@@ -211,7 +211,7 @@ Do this last. It ends your session, and logout is global for push: it deactivate
 
    ```bash
    (
-     read -rs -p "Paste the __Host-session value, then press Enter: " c; echo
+     printf 'Paste the __Host-session value, then press Enter: '; read -rs c; echo
      base=https://dashboard.fro.bot/operator
      ck() { printf 'header = "Cookie: __Host-session=%s"\n' "$c"; }
      code() { curl -sS -o /dev/null -w '%{http_code}' -K - "$@"; }

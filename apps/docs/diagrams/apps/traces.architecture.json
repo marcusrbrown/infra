@@ -33,6 +33,30 @@
       "size": [170, 60]
     },
     {
+      "id": "agents",
+      "type": "external",
+      "label": "Agent consumers",
+      "sublabel": "CI and workstations, one token each",
+      "pos": [40, 280],
+      "size": [170, 60]
+    },
+    {
+      "id": "gate",
+      "type": "security",
+      "label": "Reader gate",
+      "sublabel": "token check, limits, allowlists",
+      "pos": [290, 280],
+      "size": [170, 60]
+    },
+    {
+      "id": "mcp",
+      "type": "backend",
+      "label": "Grafana MCP",
+      "sublabel": "read tools only, internal only",
+      "pos": [540, 280],
+      "size": [170, 60]
+    },
+    {
       "id": "collector",
       "type": "security",
       "label": "Collector",
@@ -143,6 +167,8 @@
       "label": "One droplet, all data on an encrypted volume",
       "wraps": [
         "caddy",
+        "gate",
+        "mcp",
         "collector",
         "reporter",
         "web",
@@ -179,7 +205,19 @@
     {"id": "scrape-reporter", "from": "prometheus", "to": "reporter", "label": "scrape", "variant": "dashed"},
     {"id": "promql", "from": "grafana", "to": "prometheus", "label": "PromQL"},
     {"id": "alert", "from": "grafana", "to": "discord", "label": "alert webhook", "variant": "security"},
-    {"id": "embed", "from": "worker", "to": "embedder", "label": "Topics embeddings", "variant": "dashed"}
+    {
+      "id": "embed",
+      "from": "worker",
+      "to": "embedder",
+      "label": "Topics embeddings",
+      "variant": "dashed",
+      "labelDx": -70
+    },
+    {"id": "agent-read", "from": "agents", "to": "caddy", "label": "reader token", "variant": "security"},
+    {"id": "agent-route", "from": "caddy", "to": "gate", "label": "two agent routes"},
+    {"id": "gate-web", "from": "gate", "to": "web", "label": "allowlisted reads, Viewer key", "variant": "security"},
+    {"id": "gate-mcp", "from": "gate", "to": "mcp", "label": "MCP calls"},
+    {"id": "mcp-grafana", "from": "mcp", "to": "grafana", "label": "Viewer token", "variant": "security"}
   ],
   "cards": [
     {
@@ -197,9 +235,19 @@
       "items": [
         "Langfuse holds whole traces, content included",
         "Tempo holds a keep-list of attributes plus span names and error text",
-        "Only Caddy is published; Langfuse and Grafana are reached over SSH",
+        "Only Caddy is published; the Langfuse and Grafana interfaces are reached over SSH",
         "Topics, when in use, sends capped transcripts to a zero-retention model through the operator's proxy; the embedder stays on the host",
         "Grafana alert rules post fixed text and numbers to a Discord webhook, never trace content"
+      ]
+    },
+    {
+      "dot": "orange",
+      "title": "Agent read path",
+      "items": [
+        "Two read routes go to the reader gate, which checks a per-consumer token and adds the Viewer credentials itself",
+        "Consumers never hold a Langfuse or Grafana credential, and every write is refused",
+        "Reads stay up while ingest is held or off; revoking every reader token is the kill switch",
+        "Langfuse reads return full trace content; Grafana queries reach Tempo and Prometheus only"
       ]
     },
     {

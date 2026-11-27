@@ -7,18 +7,22 @@
 #   - Prometheus and Grafana-managed alert rules added: failures reach a Discord webhook as fixed text and numbers
 #   - a Topics embedder (Text Embeddings Inference, CPU) on the backend network only: Langfuse Topics needs an embedding
 #     connection and the proxy has none. It is optional: no trace passes through it and nothing waits for it
+#   - agent read access: a reader gate (token check, per-consumer limits, path and header allowlists, Viewer credentials
+#     added at the gate) and a Grafana MCP server behind it. Caddy proxies two routes to the gate; neither service publishes
+#     a port, nothing depends on either, and a failure of either never touches ingest
 #   - two networks (see below), healthchecks, a log size limit and `restart: unless-stopped` everywhere
 #   - telemetry and outbound update checks are off wherever a setting exists
 #   - secrets are interpolated from the host `.env` or read from files, never written here
 #
 # Networks:
-#   edge     Caddy, the collector, Langfuse web, Tempo, Prometheus, the health reporter. The internet-facing,
-#            custom-built collector can reach nothing else (Prometheus answers read-only queries and has no
-#            management endpoint on).
+#   edge     Caddy, the collector, Langfuse web, Tempo, Prometheus, the health reporter, the reader gate. The
+#            internet-facing, custom-built collector can reach nothing else (Prometheus answers read-only queries and
+#            has no management endpoint on; the gate answers 401 without a reader token, and its health port carries no secrets).
 #   backend  Grafana, ClickHouse, PostgreSQL, Redis, MinIO, Langfuse web and worker, the Topics embedder, Tempo,
 #            Prometheus, the health reporter. The reporter bridges both: it reads the collector and Tempo on edge, and
 #            ClickHouse, MinIO, the Langfuse worker and Grafana on backend. Prometheus bridges both: it scrapes
-#            the collector, Tempo and the reporter on edge, and Grafana queries it on backend.
+#            the collector, Tempo and the reporter on edge, and Grafana queries it on backend. The reader gate bridges
+#            both: Caddy and Langfuse web on edge, the Grafana MCP server on backend (which is backend only, like Grafana).
 #
 # No ClickHouse memory limit, on purpose: capping it near 7 GB lost spans after the sender got 200.
 #
@@ -150,6 +154,9 @@ services:
       NEXT_PUBLIC_SIGN_UP_DISABLED: 'true'
       # Media uploads are not used; this is upstream's browser-facing default.
       LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      # The MCP endpoint refuses any Host header outside this list (and its own base URL's host). The reader gate sends this
+      # exact host and port; no wildcard, and no other client reaches the route.
+      LANGFUSE_MCP_ALLOWED_HOSTS: langfuse-web:3000
       LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
       # Bootstrap values. Deploy sets them for the first start and removes them afterwards.
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
@@ -454,6 +461,85 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    logging: *logging
+
+  # Agent read access, part one. The gate authenticates reader tokens, limits each consumer, forwards only allowlisted
+  # paths and headers, and adds the Viewer credentials it reads from files. Caddy proxies /agent/langfuse/* and
+  # /agent/grafana/* to it on 8090, outside the ingest-state files, so reads stay up while ingest is held or off. Port
+  # 8091 serves /healthz (upstream reachability, no secrets) to the network and to the health reporter. The same Bun
+  # image as the reporter, source mounted read-only, no build step and no dependencies. It runs as its own user
+  # (`READER_GATE_USER_ID` in src/host.ts; deploy owns the two mounted directories `root:10003`), apart from Tempo's, so it
+  # cannot read what the reporter reads. It mounts `readers/` and never `tokens/`; the collector mounts the reverse. Like
+  # the monitoring services, no trace passes through it, nothing depends on it, and deploy starts it after the route is set.
+  reader-gate:
+    image: oven/bun:1.4.5-alpine@sha256:da816670775f4c2b4e990b6b1847cf5540dcdc721a42033dd331ce7a88ba6a3b
+    restart: unless-stopped
+    user: '10003:10003'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    command: [bun, run, --no-install, /app/main.ts]
+    environment:
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'
+      READER_TOKEN_FILE: /run/readers/token
+      LANGFUSE_BASIC_FILE: /run/secrets/reader-gate/langfuse-basic
+      LANGFUSE_UPSTREAM: http://langfuse-web:3000
+      GRAFANA_MCP_UPSTREAM: http://grafana-mcp:8000
+    tmpfs:
+      - /tmp
+    volumes:
+      - ./reader-gate:/app:ro
+      # The reader token file, as a directory so an atomic replace is seen. Read about once a second.
+      - ./readers:/run/readers:ro
+      # The Langfuse Viewer key pair as one `<public>:<secret>` line. Placeholder until the operator installs a key.
+      - ./secrets/reader-gate:/run/secrets/reader-gate:ro
+    networks: [edge, backend]
+    # No depends_on: a down upstream is an answer (502), not a reason to stay down.
+    healthcheck:
+      # Any response proves the listeners are up. An unreachable upstream shows in the body, not in the container state.
+      test: [CMD, bun, -e, "await fetch('http://127.0.0.1:8091/healthz', {signal: AbortSignal.timeout(3000)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *logging
+
+  # Agent read access, part two: a Grafana MCP server that queries Tempo and Prometheus through Grafana with a Viewer
+  # service-account token it reads from a file (re-read on every request). Backend network only; the gate is the one way
+  # in. Read tools only: write tools are off, only four tool categories are on, the per-request Grafana address and
+  # credential overrides stay off, and usage reporting is off (it would otherwise reach the vendor). The Host header the
+  # gate sends carries the port and the match is exact, so `--allowed-hosts` names it with the port. The image's own
+  # entrypoint sets `--transport sse --address 0.0.0.0:8000`; the flags below come later and win. The image is Debian
+  # slim with no curl or wget, so it has no healthcheck: the gate's /healthz reports whether it answers. Its user is
+  # `mcp-grafana`, uid 1000 and primary group 999; naming 1000:1000 makes the group match the secret directory's
+  # (`GRAFANA_MCP_USER_ID` in src/host.ts, pinned by a test).
+  grafana-mcp:
+    image: grafana/mcp-grafana:2.4.0@sha256:63d4501d3166c2b9242d8a2b5b7df8892c59c6c477be3a2a61bcf8a252671f31
+    restart: unless-stopped
+    user: '1000:1000'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    command:
+      - -t
+      - streamable-http
+      - --address
+      - ':8000'
+      - --allowed-hosts
+      - grafana-mcp:8000
+      - --enabled-tools
+      - tempo,prometheus,datasource,search
+      - --disable-write
+      - --usage-stats=disabled
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE: /run/secrets/grafana-mcp/token
+    tmpfs:
+      - /tmp
+    volumes:
+      # The service-account token as one file. Placeholder until the operator runs `traces reader backend grafana`.
+      - ./secrets/grafana-mcp:/run/secrets/grafana-mcp:ro
+    networks: [backend]
     logging: *logging
 
 networks:

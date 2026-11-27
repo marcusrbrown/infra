@@ -131,6 +131,28 @@ export const PROMETHEUS_USER_ID = 65_534
  */
 export const EMBEDDER_USER_ID = 65_534
 
+/**
+ * The uid and gid the reader gate runs as. Deploy owns `readers/token` and `secrets/reader-gate/*` by `root:<this>`, and
+ * the gate's own user is the only one besides root that can read them. Distinct from Tempo's id, so the gate cannot read
+ * what the health reporter reads. `docker-compose.test.ts` pins the gate's `user` to it.
+ */
+export const READER_GATE_USER_ID = 10_003
+
+/**
+ * The uid the Grafana MCP server runs as: `mcp-grafana`, the user its image declares (`useradd -r -u 1000`, whose primary
+ * group is 999). The compose file gives it `user: "1000:1000"` so that its group matches the group of the secret
+ * directory, as for Grafana above. Deploy owns `secrets/grafana-mcp/*` by `root:<this>`. `docker-compose.test.ts` pins
+ * the service's `user` to it.
+ */
+export const GRAFANA_MCP_USER_ID = 1000
+
+/**
+ * The reader gate's deadline to the first response header from an upstream, in milliseconds. The gate answers 504 after it.
+ * Caddy's response-header timeout on the agent routes and its server write timeout must both stay above it, or Caddy
+ * would cut off the gate's own answer; `config/Caddyfile.test.ts` pins that rule against this value.
+ */
+export const READER_GATE_DEADLINE_MS = 60_000
+
 // ─── Deploy state and locks ───────────────────────────────────────────────────
 //
 // These paths are a contract between the deploy, the sender-token commands and the ingest command. The CLI
@@ -174,3 +196,32 @@ export const TRACES_LOCK_BUSY_SENTINEL = 'LOCK_BUSY'
  * knows. A real token is any non-blank line whose first field does not start with this prefix.
  */
 export const TRACES_VOID_TOKEN_PREFIX = 'trc_void_'
+
+// ─── Reader files ─────────────────────────────────────────────────────────────
+//
+// The reader tokens live apart from the sender tokens: the collector mounts `tokens/` and never `readers/`, and the gate
+// mounts `readers/` and never `tokens/`. A reader line is `<token> <fp12> <consumer> <iso-date>`; a void line is the
+// sender void line. The gate denies every request when the file is missing, empty or malformed.
+
+/** Directory of the reader token file, mounted into the gate read-only. Owned `root:READER_GATE_USER_ID`, mode 0750. */
+export const TRACES_READER_DIR = `${TRACES_APP_DIR}/readers`
+
+/** The reader token file. Owned `root:READER_GATE_USER_ID`, mode 0640. The CLI replaces it by write-then-rename. */
+export const TRACES_READER_TOKEN_FILE = `${TRACES_READER_DIR}/token`
+
+/** `flock` lock file. Every script that reads then replaces the reader token file runs inside `flock -w 30` on it. */
+export const TRACES_READER_LOCK = `${TRACES_READER_DIR}/.lock`
+
+/** The Langfuse Viewer key pair as `<public>:<secret>`, read by the gate. Owned `root:READER_GATE_USER_ID`, mode 0440. */
+export const TRACES_READER_LANGFUSE_FILE = `${TRACES_APP_DIR}/secrets/reader-gate/langfuse-basic`
+
+/** The Grafana Viewer service-account token, read by the Grafana MCP server. Owned `root:GRAFANA_MCP_USER_ID`, mode 0440. */
+export const TRACES_GRAFANA_MCP_TOKEN_FILE = `${TRACES_APP_DIR}/secrets/grafana-mcp/token`
+
+/** Siblings of a credential file: the candidate being checked, and the one it replaced. */
+export const READER_STAGED_SUFFIX = '.staged'
+export const READER_PREVIOUS_SUFFIX = '.previous'
+
+/** What a credential file holds until the operator installs a real one. Never a working credential. */
+export const READER_LANGFUSE_PLACEHOLDER = 'pk-lf-unset:sk-lf-unset'
+export const READER_GRAFANA_PLACEHOLDER = 'glsa_unset'

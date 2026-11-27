@@ -983,8 +983,8 @@ describe('traces reader backend status', () => {
     const outcome = await status(world)
     expect(outcome.exit).toBeNull()
     expect(outcome.stdout.split('\n')).toEqual([
-      'langfuse: placeholder (no credential installed: the route answers 502)',
-      'grafana: placeholder (no credential installed: the route answers 502)',
+      'langfuse: placeholder (no credential installed: reads through this route fail)',
+      'grafana: placeholder (no credential installed: reads through this route fail)',
     ])
   })
 

@@ -7,7 +7,7 @@ This page describes what happens to data that agent runs send to the self-hosted
 
 **Ingest is open.** The public ingest route accepts traces only from senders that hold a token for their sender group. Tokens are issued one group at a time, and a group with no token accepts nothing. This page was published before any token was issued, and it will be updated if anything below changes.
 
-This is a single-operator deployment. The person who runs the stack and the person who reads the traces are the same party. There are no end users, no analytics and no advertising. The only third party that can receive trace content is the model provider behind the operator's proxy, and only while Langfuse Topics is in use (see [Topics](#topics-summaries-of-traces)).
+This is a single-operator deployment. The person who runs the stack and the person who reads the traces are the same party. There are no end users, no analytics and no advertising. Two kinds of third party can receive trace content: the model provider behind the operator's proxy while Langfuse Topics is in use (see [Topics](#topics-summaries-of-traces)), and the model providers of the operator's own agents that read traces (see [Who can read it](#who-can-read-it)).
 
 ## Who sends traces
 
@@ -32,7 +32,23 @@ The data volume is encrypted at rest by the hosting provider. The provider holds
 
 ## Who can read it
 
-Only the operator, and only over SSH to the host. Langfuse and Grafana are not published: they listen on the host's loopback address and are reached through an SSH tunnel. The only public endpoint is the ingest path, which accepts traces and reads nothing back, and a health path that answers one word. No third-party service receives trace data, except through Topics (below), which does nothing until the operator configures it. The alert notifications described under "Calls the software makes on its own" go to Discord and hold no trace data.
+The operator, and a short list of the operator's own agents.
+
+**The operator** reads over SSH to the host. The Langfuse and Grafana web interfaces are not published: they listen on the host's loopback address and are reached through an SSH tunnel.
+
+**Named agents** read through two public read routes on the same hostname, one for Langfuse and one for Grafana. Each agent holds its own reader token, issued by the operator and revocable on its own. Without a valid token both routes refuse every request. The agents are:
+
+- a learning agent in the operator's Systematic repository;
+- an audit run of Fro Bot, the operator's own agent;
+- agent sessions on the operator's workstation.
+
+The routes are read-only. They allow only the read paths of each store, and the stores' own credentials stay on the host. An agent reads full trace content from Langfuse, and structure and metrics from Tempo and Prometheus.
+
+A reading agent sends what it reads to the model it runs on, as part of its own work. For the operator's agents that is a model reached through the operator's CLIProxyAPI proxy, or the model provider an agent session on the workstation is configured to use. That provider's terms apply to what it receives. Trace content includes other people's text when an agent read a public issue, pull request or comment, so that text can reach those providers too.
+
+What an agent concludes from traces goes into issues and pull requests in the operator's repositories, which can be public. The agents treat recorded text as data, not instructions.
+
+The other public endpoints are the ingest path, which accepts traces and reads nothing back, and a health path that answers one word. Apart from these agents and Topics (below), no third-party service receives trace data. The alert notifications described under "Calls the software makes on its own" go to Discord and hold no trace data.
 
 ## How long it is kept
 

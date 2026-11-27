@@ -120,6 +120,11 @@
     "scope": ["**/*.md", "**/*.html"]
   },
   {
+    "host": "opencode.ai",
+    "reason": "OpenCode documentation and config schema host, named in the trace collection operator guide's consumer contract as the source of the MCP server configuration keys",
+    "scope": ["**/*.md", "**/*.html"]
+  },
+  {
     "host": "umami.is",
     "reason": "Umami project site named in the Umami guide",
     "scope": ["**/*.md", "**/*.html"]

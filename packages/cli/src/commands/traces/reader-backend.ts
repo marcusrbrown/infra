@@ -781,7 +781,7 @@ export async function tracesReaderBackendGrafanaAction(
 // ─── backend status ───────────────────────────────────────────────────────────
 
 const STATE_TEXT: Record<string, string> = {
-  placeholder: 'placeholder (no credential installed: the route answers 502)',
+  placeholder: 'placeholder (no credential installed: reads through this route fail)',
   installed: 'installed',
   'pending-old-revocation': 'installed; the old credential is not yet confirmed revoked',
   missing: 'missing (run a deploy)',

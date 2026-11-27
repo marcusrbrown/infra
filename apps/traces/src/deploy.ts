@@ -863,7 +863,11 @@ export function parseHostState(stdout: string): HostState {
 
 export const DIRS_SENTINEL = 'TRACES_DIRS_READY'
 
-/** Directories and their owners. Created or corrected; nothing inside a token directory is touched. */
+/**
+ * Directories and their owners. Created or corrected; nothing inside a token directory is touched. The reader token and
+ * credential directories are not here: they are made by `readerDirsScript` as part of `reader-ready`, so that one that
+ * cannot be made never holds ingest.
+ */
 export function prepareDirsScript(id: string): string {
   const dir = (relative: string): string => remotePath(relative)
   const plain = [
@@ -889,9 +893,33 @@ install -d -o root -g root -m 0755 ${plain.join(' ')}
 install -d -o root -g ${COLLECTOR_GID} -m ${SECRET_DIR_MODE} ${collector.join(' ')}
 install -d -o root -g ${GRAFANA_UID} -m ${SECRET_DIR_MODE} ${dir('secrets/grafana')}
 install -d -o root -g ${REPORTER_UID} -m ${SECRET_DIR_MODE} ${dir('secrets/reporter')}
-install -d -o root -g ${READER_GATE_GID} -m ${SECRET_DIR_MODE} ${[READER_DIR, 'secrets/reader-gate'].map(dir).join(' ')}
-install -d -o root -g ${GRAFANA_MCP_GID} -m ${SECRET_DIR_MODE} ${dir('secrets/grafana-mcp')}
 echo ${DIRS_SENTINEL}`,
+  )
+}
+
+export const READER_DIRS_SENTINEL = 'TRACES_READER_DIRS_READY'
+
+/**
+ * The directories the reader token file and the two backend credential files live in, made to the group that reads
+ * each. Run as the first step of the operator gate `reader-ready`, ahead of the placeholder writes, and not with the
+ * ingest-critical directories: a path that cannot be made (a regular file where a directory should be) exits this
+ * script non-zero and fails `reader-ready` alone, where it would otherwise hold ingest. `secrets` exists by then
+ * (`prepareDirsScript`). Nothing inside a directory is touched. `appDir` exists so a test can run the real script against a
+ * scratch directory.
+ */
+export function readerDirsScript(id: string, appDir: string = TRACES_APP_DIR): string {
+  const dir = (relative: string): string => {
+    const path = `${appDir}/${relative}`
+    if (!SAFE_PATH.test(path) || path.includes('..')) throw new Error(`Unsafe remote path: ${relative}`)
+    return path
+  }
+  return guardedStep(
+    'reader-dirs',
+    id,
+    `install -d -o root -g ${READER_GATE_GID} -m ${SECRET_DIR_MODE} ${[READER_DIR, 'secrets/reader-gate'].map(dir).join(' ')}
+install -d -o root -g ${GRAFANA_MCP_GID} -m ${SECRET_DIR_MODE} ${dir('secrets/grafana-mcp')}
+echo ${READER_DIRS_SENTINEL}`,
+    {marker: `${appDir}/${MARKER_FILE}`, lock: `${appDir}/${STEP_LOCK_FILE}`},
   )
 }
 
@@ -2868,9 +2896,11 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       'reader-ready',
       'The reader gate and the Grafana MCP server',
       async () => {
-        // The reader token file and the two backend credential files: created only when absent, with a void line or a
-        // placeholder, and never compared or written again. Here and not before the route is decided: a file that
-        // cannot be prepared fails `reader-ready` and must not hold healthy ingest.
+        // The directories first, then the reader token file and the two backend credential files: each created only
+        // when absent, with a void line or a placeholder, and never compared or written again. Here and not before the
+        // route is decided: a directory or file that cannot be prepared fails `reader-ready` and must not hold healthy
+        // ingest.
+        await sh('Prepare the reader directories', readerDirsScript(deployId), [READER_DIRS_SENTINEL])
         for (const kind of READER_FILE_KINDS) {
           const {sentinel} = await sh(
             `Reader file ${kind}`,

@@ -1,5 +1,6 @@
 import {createHash} from 'node:crypto'
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -24,7 +25,6 @@ import {
   DEFAULT_READER_SECRET_NAME,
   defaultWorkstationFile,
   READER_CONSUMER_EXISTS_SENTINEL,
-  READER_GENERATION_CHANGED_SENTINEL,
   READER_LOCK_BUSY_SENTINEL,
   READER_REMOTE,
   READER_ROUTES,
@@ -1078,7 +1078,7 @@ describe('constants match the app', async () => {
 describe('host scripts, run under a real sh', () => {
   const run1 = (world: World, command: string, stdin?: string) => execOnHost(world.dir, command, stdin)
   const stray = (world: World): string[] =>
-    readdirSync(join(world.dir, 'readers')).filter(name => !['token', '.lock', '.generation'].includes(name))
+    readdirSync(join(world.dir, 'readers')).filter(name => !['token', '.lock'].includes(name))
   const removeInput = (name: string, selector = '-', vline = voidLine(200, CREATED)): string =>
     `${name} ${selector}\n${vline}`
 
@@ -1145,8 +1145,8 @@ describe('host scripts, run under a real sh', () => {
 
   describe('append', () => {
     const newLine = `${NEXT_TOKEN} ${NEXT_FINGERPRINT} systematic ${CREATED}\n`
-    // The host takes the line, the mode and the generation the caller read, one per line.
-    const appendIn = (line = newLine, mode = 'fresh', generation = '0'): string => `${line}${mode}\n${generation}\n`
+    // The host takes the line and the mode, one per line.
+    const appendIn = (line = newLine, mode = 'fresh'): string => `${line}${mode}\n`
 
     it('adds one line, keeps the existing bytes, replaces the file by rename and keeps its mode', () => {
       const world = createWorld({file: readerLine(OLD_A, 'a-one') + voidLine(2)})
@@ -1246,35 +1246,6 @@ describe('host scripts, run under a real sh', () => {
       const result = run1(world, READER_REMOTE.append, appendIn())
       expect(result.exitCode).not.toBe(0)
       expect(stray(world)).toEqual([])
-    })
-
-    it('refuses, and touches nothing, when the generation the caller read is not the one on the host', () => {
-      const world = createWorld({file: voidLine(2)})
-      const before = world.file()
-      writeFileSync(join(world.dir, 'readers', '.generation'), '3\n')
-      for (const generation of ['0', '2', '4']) {
-        const result = run1(world, READER_REMOTE.append, appendIn(newLine, 'fresh', generation))
-        expect(result.exitCode).not.toBe(0)
-        expect(result.stdout.split('\n')).toContain(READER_GENERATION_CHANGED_SENTINEL)
-        expect(result.stdout).not.toContain(readerSentinel('append'))
-        expect(world.file()).toBe(before)
-      }
-      expect(run1(world, READER_REMOTE.append, appendIn(newLine, 'fresh', '3')).exitCode).toBe(0)
-    })
-
-    it('reads a missing or empty generation file as 0, and refuses a generation that is not a number', () => {
-      const world = createWorld({file: voidLine(2)})
-      expect(run1(world, READER_REMOTE.append, appendIn(newLine, 'fresh', '0')).exitCode).toBe(0)
-      writeFileSync(join(world.dir, 'readers', '.generation'), '')
-      const other = createWorld({file: voidLine(2)})
-      writeFileSync(join(other.dir, 'readers', '.generation'), '')
-      expect(run1(other, READER_REMOTE.append, appendIn(newLine, 'fresh', '0')).exitCode).toBe(0)
-      for (const bad of ['', 'x', '-1', '1 2']) {
-        const fresh = createWorld({file: voidLine(2)})
-        const result = run1(fresh, READER_REMOTE.append, appendIn(newLine, 'fresh', bad))
-        expect(result.exitCode).not.toBe(0)
-        expect(fresh.file()).toBe(voidLine(2))
-      }
     })
   })
 
@@ -1496,42 +1467,64 @@ describe('revoke --all against a concurrent add', () => {
     expect(outcome.stdout).not.toContain('No reader token remains')
   })
 
-  it('bumps the generation under the lock on every deny, and only then', () => {
+  it('the deny script prints the fingerprint of every reader line it replaces, read under the lock, and no other', () => {
+    const world = createWorld({file: `${twoConsumers()}garbage\n${voidLine(3)}`})
+    const result = execOnHost(world.dir, READER_REMOTE.deny, voidLine(201, CREATED))
+    expect(result.exitCode).toBe(0)
+    const printed = result.stdout.split('\n').filter(line => line.startsWith('TRACES_READER_DENY_FP='))
+    expect(printed).toEqual([`TRACES_READER_DENY_FP=${sha12(OLD_A)}`, `TRACES_READER_DENY_FP=${sha12(OLD_B)}`])
+    // Printed before the rewrite is confirmed, never a token.
+    expect(result.stdout).not.toContain(OLD_A)
+    expect(result.stdout.trimEnd().endsWith(readerSentinel('deny'))).toBe(true)
+  })
+
+  it('the deny script prints no fingerprint for a file with no reader line, or no file lines to replace', () => {
+    const world = createWorld({file: voidLine(2)})
+    expect(execOnHost(world.dir, READER_REMOTE.deny, voidLine(201, CREATED)).stdout).not.toContain('DENY_FP')
+  })
+
+  it('proves refusal for exactly the tokens the host replaced, and no others', async () => {
     const world = createWorld({file: twoConsumers()})
-    const generation = (): string => readFileSync(join(world.dir, 'readers', '.generation'), 'utf8')
-    expect(existsSync(join(world.dir, 'readers', '.generation'))).toBe(false)
-    execOnHost(world.dir, READER_REMOTE.deny, voidLine(201, CREATED))
-    expect(generation()).toBe('1\n')
-    execOnHost(world.dir, READER_REMOTE.deny, voidLine(202, CREATED))
-    expect(generation()).toBe('2\n')
-    execOnHost(world.dir, READER_REMOTE.deny, 'not a void line')
-    expect(generation()).toBe('2\n')
-    expect(execOnHost(world.dir, READER_REMOTE.list, undefined).stdout).toContain('TRACES_READER_GENERATION=2')
+    const outcome = await revoke(world, undefined, undefined, {all: true}, makeDeps(world))
+    expect(outcome.exit).toBeNull()
+    const proven = new Set(
+      world.fetchCalls.map(call => call.headers.authorization?.replace(/^Bearer /, '')).filter(Boolean),
+    )
+    expect(proven).toEqual(new Set([OLD_A, OLD_B]))
   })
 
-  it('the read scripts report the generation, 0 when there is none', () => {
-    const world = createWorld()
-    for (const command of [READER_REMOTE.list, READER_REMOTE.lines]) {
-      expect(execOnHost(world.dir, command, undefined).stdout).toContain('TRACES_READER_GENERATION=0')
-    }
-  })
-
-  it('an add whose token file was denied since it read it writes nothing, delivers nothing and says to run it again', async () => {
-    const world = createWorld()
+  it('does not prove a token the host did not replace: one removed after this command read the file is left out', async () => {
+    const world = createWorld({file: twoConsumers()})
     const deps = makeDeps(world)
     deps.spawn = (argv, options) => {
-      // A `revoke --all` lands between this add's read and its append.
-      if (argv.at(-1) === READER_REMOTE.append) execOnHost(world.dir, READER_REMOTE.deny, voidLine(203, CREATED))
+      // Another command removes one consumer between this one's read and its deny.
+      if (argv.at(-1) === READER_REMOTE.deny) writeFileSync(world.path, readerLine(OLD_A, 'systematic') + voidLine(2))
       return world.spawn(argv, options)
     }
-    const outcome = await add(world, 'systematic', ghOptions(), deps)
+    const outcome = await revoke(world, undefined, undefined, {all: true}, deps)
+    expect(outcome.exit).toBeNull()
+    const proven = new Set(
+      world.fetchCalls.map(call => call.headers.authorization?.replace(/^Bearer /, '')).filter(Boolean),
+    )
+    expect(proven).toEqual(new Set([OLD_A]))
+  })
+
+  it('a token another command added after this one read the file is denied, not proven, and the run says to run it again', async () => {
+    const world = createWorld({file: twoConsumers()})
+    const deps = makeDeps(world)
+    deps.spawn = (argv, options) => {
+      // Another command appends a line between this one's read and its deny.
+      if (argv.at(-1) === READER_REMOTE.deny) appendFileSync(world.path, readerLine(OLD_C, 'workstation'))
+      return world.spawn(argv, options)
+    }
+    const outcome = await revoke(world, undefined, undefined, {all: true}, deps)
     expect(outcome.exit).toBe(1)
-    expect(outcome.stderr).toContain('revoke --all')
-    expect(outcome.stderr).toContain('Nothing was written')
-    expect(outcome.stderr).toContain('run add again')
-    expect(world.file()).not.toContain(NEXT_TOKEN)
-    expect(world.ghCalls()).toHaveLength(0)
-    expect(world.calls.filter(call => call.command === READER_REMOTE.remove)).toHaveLength(0)
+    expect(outcome.stderr).toContain('a token was added during revoke; run revoke --all again')
+    expect(outcome.stderr).toContain(sha12(OLD_C))
+    expect(outcome.stdout).not.toContain('No reader token remains')
+    // The file is deny-all whatever the proof could say.
+    expect(world.file().split('\n').filter(Boolean)).toHaveLength(1)
+    expect(world.accepts(OLD_C)).toBe(false)
   })
 
   it('an add that reads after the deny is unaffected', async () => {

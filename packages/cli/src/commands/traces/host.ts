@@ -50,9 +50,6 @@ export const TRACES_READER_LOCK = `${TRACES_READER_DIR}/.lock`
 export const TRACES_READER_LANGFUSE_FILE = `${TRACES_APP_DIR}/secrets/reader-gate/langfuse-basic`
 export const TRACES_GRAFANA_MCP_TOKEN_FILE = `${TRACES_APP_DIR}/secrets/grafana-mcp/token`
 
-/** Held by one `traces reader backend` run; pinned to `TRACES_READER_BACKEND_LOCK`. */
-export const TRACES_READER_BACKEND_LOCK = `${TRACES_APP_DIR}/secrets/.reader-backend.lock`
-
 /** What a credential file holds until a real one is installed; pinned to the constants of the same name in apps/traces. */
 export const READER_LANGFUSE_PLACEHOLDER = 'pk-lf-unset:sk-lf-unset'
 export const READER_GRAFANA_PLACEHOLDER = 'glsa_unset'

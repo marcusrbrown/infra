@@ -18,6 +18,10 @@ export const keyOption = z
   .optional()
   .describe('Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.')
 
+/** The rule for every `traces reader` command. Nothing on the host enforces it: there is no lock. */
+export const ONE_READER_COMMAND_AT_A_TIME =
+  'Run one `traces reader` command at a time; concurrent runs against the same host are not supported.'
+
 export type Targets = {ok: true; host: string; origin: string} | {ok: false; error: string}
 
 export function resolveTargets(key: string | undefined, needOrigin: boolean): Targets {

@@ -23,6 +23,7 @@ import {
   isSuccess,
   keyOption,
   lockFlock,
+  ONE_READER_COMMAND_AT_A_TIME,
   prove,
   READ_VOID_LINE,
   REPO_SHAPE,
@@ -97,15 +98,12 @@ export const READER_LOCK_BUSY_SENTINEL = 'TRACES_READER_LOCK_BUSY'
 /** What `append` prints, and exits non-zero, when a fresh add finds a line for the consumer already in the file. */
 export const READER_CONSUMER_EXISTS_SENTINEL = 'TRACES_READER_CONSUMER_EXISTS'
 
-/** What `append` prints, and exits non-zero, when `revoke --all` ran since the caller read the token file. */
-export const READER_GENERATION_CHANGED_SENTINEL = 'TRACES_READER_GENERATION_CHANGED'
-
 const ENTRY_PREFIX = 'TRACES_READER '
 const REMOVED_PREFIX = 'TRACES_READER_REMOVED='
 const REAL_PREFIX = 'TRACES_READER_REAL='
 const BAD_PREFIX = 'TRACES_READER_BAD='
 const PROBE_PREFIX = 'TRACES_READER_PROBE_STATUS='
-const GENERATION_PREFIX = 'TRACES_READER_GENERATION='
+const DENY_FP_PREFIX = 'TRACES_READER_DENY_FP='
 const DENY_LINES_PREFIX = 'TRACES_READER_DENY_LINES='
 const DENY_VOID_PREFIX = 'TRACES_READER_DENY_VOID='
 
@@ -188,12 +186,6 @@ const CLASSIFY = [
 const EACH_LINE =
   'while IFS= read -r line || [ -n "$line" ]; do classify "$line"; if [ "$kind" = blank ]; then continue; fi'
 
-/** `g` is the number in the generation file beside the token file, 0 when there is none, or it is empty or garbled. */
-const READ_GENERATION = [
-  `if [ -f "$d/.generation" ]; then read -r g < "$d/.generation" || g=0; else g=0; fi`,
-  `case "$g" in ''|*[!0-9]*) g=0 ;; esac`,
-]
-
 /** The consumer name on the first stdin line, in the shape the gate accepts, before anything is touched. */
 const READ_CONSUMER = [
   'read -r name sel',
@@ -219,9 +211,7 @@ function readScript(op: 'list' | 'lines'): string {
     'nonblank=0',
     "seen=' '",
     `if [ -f "$f" ]; then ${each}; if [ "$nonblank" -eq 0 ]; then bad=$((bad+1)); fi; fi`,
-    ...READ_GENERATION,
     `echo ${BAD_PREFIX}$bad`,
-    `echo ${GENERATION_PREFIX}$g`,
     `echo ${readerSentinel(op)}`,
   )
 }
@@ -234,19 +224,16 @@ export const READER_REMOTE = {
   /**
    * Append the line on stdin line 1 to the token file by writing a new file and renaming it over the old one. The line
    * must classify as a reader line (four fields, the fingerprint of its token), or nothing is touched. Stdin line 2 is
-   * `replace` when the new line goes beside the consumer's old one; anything else, or no line, is a fresh add. Line 3 is
-   * the generation the caller read with `list` or `lines`: a `revoke --all` since then has bumped the generation file
-   * under this lock, and the append prints `TRACES_READER_GENERATION_CHANGED` and exits 1 without writing, so a token
-   * issued against a roster that was since wiped is never written. A fresh add also rechecks under the lock that the
-   * file holds no reader line for the consumer, and when it does prints `TRACES_READER_CONSUMER_EXISTS` and exits 1
-   * without writing: the check the caller made before the lock can be stale.
+   * `replace` when the new line goes beside the consumer's old one; anything else, or no line, is a fresh add. A fresh
+   * add also rechecks under the lock that the file holds no reader line for the consumer, and when it does prints
+   * `TRACES_READER_CONSUMER_EXISTS` and exits 1 without writing: the check the caller made before the lock can be
+   * stale. Run one reader command at a time: nothing here guards against a `revoke --all` between the caller's read
+   * and this write.
    */
   append: script(
     'set -e',
     'IFS= read -r line',
     'IFS= read -r mode || mode=',
-    'IFS= read -r gen || gen=',
-    `case "$gen" in ''|*[!0-9]*) exit 1 ;; esac`,
     CLASSIFY,
     'classify "$line"',
     '[ "$kind" = real ]',
@@ -254,8 +241,6 @@ export const READER_REMOTE = {
     'who="$f3"',
     ...LOCK,
     ...LOCATE,
-    ...READ_GENERATION,
-    `if [ "$g" != "$gen" ]; then echo ${READER_GENERATION_CHANGED_SENTINEL}; exit 1; fi`,
     `if [ "$mode" != replace ] && [ -f "$f" ]; then ${EACH_LINE}; if [ "$kind" = real ] && [ "$f3" = "$who" ]; then echo ${READER_CONSUMER_EXISTS_SENTINEL}; exit 1; fi; done < "$f"; fi`,
     ...TEMP_FILE,
     COPY_ATTRIBUTES,
@@ -291,10 +276,10 @@ export const READER_REMOTE = {
     `echo ${readerSentinel('remove')}`,
   ),
   /**
-   * Replace the file with the void line on stdin and nothing else (deny-all), by the same write-and-rename, and bump the
-   * generation file beside it first, under the same lock, so an `append` that read the old roster is refused. Then read
-   * the file back, still under the lock, and print how many lines it holds and how many are void lines: the caller
-   * requires one and one.
+   * Replace the file with the void line on stdin and nothing else (deny-all), by the same write-and-rename. Under the
+   * same lock, first print the fingerprint of every reader line it is about to replace (`TRACES_READER_DENY_FP=`), so
+   * the caller can prove refusal for exactly those tokens. Then read the file back, still under the lock, and print how
+   * many lines it holds and how many are void lines: the caller requires one and one.
    */
   deny: script(
     'set -e',
@@ -304,9 +289,7 @@ export const READER_REMOTE = {
     ...LOCATE,
     ...TEMP_FILE,
     COPY_ATTRIBUTES,
-    ...READ_GENERATION,
-    'gf="$d/.generation"',
-    String.raw`printf "%s\n" "$((g+1))" > "$gf"`,
+    `if [ -f "$f" ]; then while IFS= read -r line || [ -n "$line" ]; do classify "$line"; if [ "$kind" = real ]; then echo ${DENY_FP_PREFIX}$f2; fi; done < "$f"; fi`,
     String.raw`printf "%s\n" "$vl" > "$t"`,
     'mv -f "$t" "$f"',
     'n=0',
@@ -373,7 +356,7 @@ interface ReaderEntry {
   token?: string
 }
 
-type ReadResult = {ok: true; entries: ReaderEntry[]; bad: number; generation: string} | {ok: false; error: string}
+type ReadResult = {ok: true; entries: ReaderEntry[]; bad: number} | {ok: false; error: string}
 
 const ENTRY_LINE = /^TRACES_READER ([\da-f]{12}) ([a-z][\da-z-]{0,30}) (\S+)(?: (trc_[\w-]+))?$/
 
@@ -399,14 +382,7 @@ async function readEntries(host: string, op: 'list' | 'lines', deps: ReaderDeps)
     return {ok: false, error: `exit ${result.exitCode}: ${result.stderr || 'no confirmation from the host'}`}
   }
   const bad = countOf(result.stdout, BAD_PREFIX)
-  const generation = new RegExp(String.raw`^${GENERATION_PREFIX}(\d+)$`, 'm').exec(result.stdout)?.[1]
-  if (generation === undefined) return {ok: false, error: 'the host did not report the token file generation'}
-  return {
-    ok: true,
-    entries: parseEntries(result.stdout, op === 'lines'),
-    bad: Number.isNaN(bad) ? 0 : bad,
-    generation,
-  }
+  return {ok: true, entries: parseEntries(result.stdout, op === 'lines'), bad: Number.isNaN(bad) ? 0 : bad}
 }
 
 const isLockBusy = (result: RemoteResult): boolean =>
@@ -414,9 +390,6 @@ const isLockBusy = (result: RemoteResult): boolean =>
 
 const isConsumerExists = (result: RemoteResult): boolean =>
   result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === READER_CONSUMER_EXISTS_SENTINEL)
-
-const isGenerationChanged = (result: RemoteResult): boolean =>
-  result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === READER_GENERATION_CHANGED_SENTINEL)
 
 const alreadyHasTokenMessage = (consumer: string, fingerprints: readonly string[]): string =>
   `${consumer} already has a reader token${fingerprints.length > 0 ? ` (${fingerprints.join(', ')})` : ''}. Pass --replace to install a new one beside it and remove the old one after delivery, or revoke it first with: infra traces reader revoke ${consumer}`
@@ -813,17 +786,10 @@ async function addFlow(
 
   const written = await runRemote(host, READER_REMOTE.append, {
     ...remoteOptions(deps),
-    stdin: `${token} ${fingerprint} ${consumer} ${createdAt}\n${replace ? 'replace' : 'fresh'}\n${existing.generation}\n`,
+    stdin: `${token} ${fingerprint} ${consumer} ${createdAt}\n${replace ? 'replace' : 'fresh'}\n`,
   })
   if (isLockBusy(written)) {
     out.error(LOCK_BUSY_MESSAGE)
-    return false
-  }
-  if (isGenerationChanged(written)) {
-    // `revoke --all` ran since the read above. The host refused under the lock and wrote nothing.
-    out.error(
-      'The reader token file was denied (`infra traces reader revoke --all`) after this command read it. Nothing was written and nothing was delivered. To continue, run add again.',
-    )
     return false
   }
   if (isConsumerExists(written)) {
@@ -1038,6 +1004,7 @@ export interface RevokeOptions {
 }
 
 const FINGERPRINT_SHAPE = /^[\da-f]{12}$/
+const DENY_FP_LINE = new RegExp(String.raw`^${DENY_FP_PREFIX}([\da-f]{12})$`, 'gm')
 
 async function revokeOne(
   consumer: string | undefined,
@@ -1161,10 +1128,22 @@ async function revokeAll(options: RevokeOptions, out: Out, secrets: string[], de
     return false
   }
 
+  // The lines the host replaced, by fingerprint, read under the lock. Refusal is proven for exactly those tokens whose
+  // value this command holds (it read them before the lock). A fingerprint it holds no value for was added after that
+  // read: the file is deny-all, but the refusal of that token cannot be proven from here.
+  const replaced = new Set([...denied.stdout.matchAll(DENY_FP_LINE)].map(match => match[1]))
+  const held = new Set(current.entries.filter(entry => entry.token !== undefined).map(entry => entry.fingerprint))
+  const unknown = [...replaced].filter(fingerprint => fingerprint !== undefined && !held.has(fingerprint)).sort()
+  if (unknown.length > 0) {
+    out.error(
+      `The host replaced ${unknown.length === 1 ? 'a line' : `${unknown.length} lines`} this command had not read (fingerprint ${unknown.join(', ')}): a token was added during revoke; run revoke --all again. The file is deny-all, but refusal of that token was not proven.`,
+    )
+  }
+
   const route = await chooseRoute(host, origin, deps)
-  let ok = true
+  let ok = unknown.length === 0
   for (const entry of current.entries) {
-    if (entry.token === undefined) continue
+    if (entry.token === undefined || !replaced.has(entry.fingerprint)) continue
     if (await proveRefused(`${entry.consumer}: ${entry.fingerprint}`, [entry.token], route, out, deps)) {
       out.log(`${entry.consumer}: removed ${entry.fingerprint}; both routes answer 401 for it.`)
     } else {
@@ -1209,7 +1188,7 @@ export function registerTracesReader(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'traces reader add <consumer>',
-      `Issue a reader token for a consumer (lower-case name). Writes it to the host, proves both agent routes accept it, then delivers it once: to a GitHub Actions secret (${DEFAULT_READER_SECRET_NAME} by default) with --repo, otherwise to a 0600 file on this machine.`,
+      `Issue a reader token for a consumer (lower-case name). Writes it to the host, proves both agent routes accept it, then delivers it once: to a GitHub Actions secret (${DEFAULT_READER_SECRET_NAME} by default) with --repo, otherwise to a 0600 file on this machine. ${ONE_READER_COMMAND_AT_A_TIME}`,
     )
     .option('--repo [repo]', z.array(z.string()).describe('OWNER/REPO to set the Actions secret on (repeatable).'))
     .option('--secret-name [name]', z.string().describe(`Secret name. Default ${DEFAULT_READER_SECRET_NAME}.`))
@@ -1223,7 +1202,10 @@ export function registerTracesReader(cli: ReturnType<typeof goke>): void {
     .action((consumer, options, ctx) => tracesReaderAddAction(consumer, options, ctx))
 
   cli
-    .command('traces reader list', 'List reader tokens per consumer: fingerprint and date. Never token text.')
+    .command(
+      'traces reader list',
+      `List reader tokens per consumer: fingerprint and date. Never token text. ${ONE_READER_COMMAND_AT_A_TIME}`,
+    )
     .option(
       '--json',
       z
@@ -1238,7 +1220,7 @@ export function registerTracesReader(cli: ReturnType<typeof goke>): void {
   cli
     .command(
       'traces reader revoke [consumer] [fingerprint]',
-      'Remove every reader token of a consumer, or one by fingerprint, and prove both routes now answer 401. With --all (no consumer, no fingerprint): make the file deny-all, the reader kill switch.',
+      `Remove every reader token of a consumer, or one by fingerprint, and prove both routes now answer 401. With --all (no consumer, no fingerprint): make the file deny-all, the reader kill switch. ${ONE_READER_COMMAND_AT_A_TIME}`,
     )
     .option('--all', 'Make the reader token file deny-all and prove every old token is refused.')
     .option('--key [key]', keyOption)

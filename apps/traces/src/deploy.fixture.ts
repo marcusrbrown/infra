@@ -391,6 +391,9 @@ export class FakeHost {
         }
         return ok('TRACES_TOKEN_PRESENT\n')
       }
+      case step === 'reader-dirs': {
+        return ok('TRACES_READER_DIRS_READY\n')
+      }
       case step.startsWith('reader-file:'): {
         const kind = step.slice('reader-file:'.length)
         // What the script's own chown and chmod on the existing file (`$f`) would set, and what it writes into a new one.

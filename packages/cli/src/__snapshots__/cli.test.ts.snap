@@ -228,7 +228,7 @@ Commands:
     --all                                        Make every group token file deny-all. Proves over ssh only, never through the public hostname.
     --key [key]                                  Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
-  traces reader add <consumer>                   Issue a reader token for a consumer (lower-case name). Writes it to the host, proves both agent routes accept it, then delivers it once: to a GitHub Actions secret (TRACES_READER_TOKEN by default) with --repo, otherwise to a 0600 file on this machine.
+  traces reader add <consumer>                   Issue a reader token for a consumer (lower-case name). Writes it to the host, proves both agent routes accept it, then delivers it once: to a GitHub Actions secret (TRACES_READER_TOKEN by default) with --repo, otherwise to a 0600 file on this machine. Run one \`traces reader\` command at a time; concurrent runs against the same host are not supported.
     --repo [repo]                                OWNER/REPO to set the Actions secret on (repeatable).
     --secret-name [name]                         Secret name. Default TRACES_READER_TOKEN.
     --file [path]                                Workstation token file. Default ~/.config/infra/traces-reader-<consumer>.token.
@@ -236,22 +236,22 @@ Commands:
     --replace                                    Replace the consumer's existing token: install the new one, deliver it, then remove the old.
     --key [key]                                  Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
-  traces reader list                             List reader tokens per consumer: fingerprint and date. Never token text.
+  traces reader list                             List reader tokens per consumer: fingerprint and date. Never token text. Run one \`traces reader\` command at a time; concurrent runs against the same host are not supported.
     --json                                       Output one JSON object: consumers (consumer, fingerprint, date), duplicates (consumers with more than one token) and malformed (a count). Exit codes are the same.
     --key [key]                                  Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
-  traces reader revoke [consumer] [fingerprint]  Remove every reader token of a consumer, or one by fingerprint, and prove both routes now answer 401. With --all (no consumer, no fingerprint): make the file deny-all, the reader kill switch.
+  traces reader revoke [consumer] [fingerprint]  Remove every reader token of a consumer, or one by fingerprint, and prove both routes now answer 401. With --all (no consumer, no fingerprint): make the file deny-all, the reader kill switch. Run one \`traces reader\` command at a time; concurrent runs against the same host are not supported.
     --all                                        Make the reader token file deny-all and prove every old token is refused.
     --key [key]                                  Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
-  traces reader backend langfuse                 Install or rotate the Langfuse Viewer key the reader gate reads with. Prompts for the pair without echo (or reads one <public>:<secret> line from stdin when there is no terminal), proves it on the host (reads; REST and MCP writes refused by role), then switches it in and keeps the old pair until --confirm-old-revoked.
+  traces reader backend langfuse                 Install or rotate the Langfuse Viewer key the reader gate reads with. Prompts for the pair without echo (or reads one <public>:<secret> line from stdin when there is no terminal), proves it on the host (reads; REST and MCP writes refused by role), then switches it in and keeps the old pair until --confirm-old-revoked. Run one \`traces reader\` command at a time; concurrent runs against the same host are not supported.
     --confirm-old-revoked                        Prove Langfuse refuses the previous pair (delete it in the UI first), then delete it from the host.
     --key [key]                                  Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
-  traces reader backend grafana                  Create or rotate the Grafana service-account token (agent-reader, Viewer) on the host. The key never leaves the host: only ids are printed. Proves a Grafana MCP read through the gate, then deletes every other token.
+  traces reader backend grafana                  Create or rotate the Grafana service-account token (agent-reader, Viewer) on the host. The key never leaves the host: only ids are printed. Proves a Grafana MCP read through the gate, then deletes every other token. Run one \`traces reader\` command at a time; concurrent runs against the same host are not supported.
     --key [key]                                  Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 
-  traces reader backend status                   Report each reader backend credential as placeholder, installed or pending old-key revocation. Never prints a value.
+  traces reader backend status                   Report each reader backend credential as placeholder, installed or pending old-key revocation. Never prints a value. Run one \`traces reader\` command at a time; concurrent runs against the same host are not supported.
     --json                                       Output one JSON object, {langfuse, grafana}: each is placeholder, installed, pending-old-revocation or missing.
     --key [key]                                  Environment variable name holding the SSH host. Falls back to TRACES_HOST, then traces.fro.bot.
 

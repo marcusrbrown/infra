@@ -79,9 +79,11 @@ import {
   pruneScript,
   pullScript,
   queueVolumeScript,
+  READER_DIRS_SENTINEL,
   READER_FILE_KINDS,
   READER_FILES,
   READER_SERVICES,
+  readerDirsScript,
   readerFileScript,
   readIngestStateScript,
   readInputs,
@@ -574,6 +576,7 @@ describe('remote scripts', () => {
     ingestState: readIngestStateScript(),
     removeMarker: removeOwnFileScript(ID_A, '.deploy-in-progress'),
     prepareDirs: prepareDirsScript(ID_A),
+    readerDirs: readerDirsScript(ID_A),
     tokenDirs: tokenDirsScript(),
     comparePlain: compareFileScript('config/otelcol.yaml', 'plain', {owner: 'root:root', mode: '0644'}),
     compareEnv: compareFileScript('.env', 'env', {owner: 'root:root', mode: '0600'}),
@@ -2545,15 +2548,27 @@ describe('the reader files', () => {
     expect(GRAFANA_MCP_USER_ID).toBe(1000)
   })
 
-  it('makes the directories to the group that reads them, 0750', () => {
-    const script = prepareDirsScript(ID_A)
+  it('makes the directories to the group that reads them, 0750, in the reader step and not in the ingest-critical one', () => {
+    const script = readerDirsScript(ID_A)
     expect(script).toContain(
       `install -d -o root -g ${GATE_ID} -m 0750 ${TRACES_APP_DIR}/readers ${TRACES_APP_DIR}/secrets/reader-gate`,
     )
     expect(script).toContain(
       `install -d -o root -g ${GRAFANA_MCP_USER_ID} -m 0750 ${TRACES_APP_DIR}/secrets/grafana-mcp`,
     )
-    expect(script.split('\n').find(line => line.startsWith('install -d -o root -g root -m 0755'))).toContain(
+    expect(script).toContain(READER_DIRS_SENTINEL)
+    // The ingest-critical directory step names none of them: a path there that cannot be made would hold ingest.
+    const dirs = prepareDirsScript(ID_A)
+    for (const reader of ['readers', 'secrets/reader-gate', 'secrets/grafana-mcp']) {
+      expect({reader, inPrepareDirs: dirs.includes(`${TRACES_APP_DIR}/${reader}`)}).toEqual({
+        reader,
+        inPrepareDirs: false,
+      })
+    }
+    expect(dirs).not.toContain(`-g ${GATE_ID} `)
+    expect(dirs).not.toContain(`-g ${GRAFANA_MCP_USER_ID} `)
+    // The gate's own source directory stays where it was: it is not a token or credential directory.
+    expect(dirs.split('\n').find(line => line.startsWith('install -d -o root -g root -m 0755'))).toContain(
       `${TRACES_APP_DIR}/reader-gate`,
     )
   })
@@ -2754,6 +2769,74 @@ describe('the reader file script', () => {
   })
 })
 
+describe('the reader directories script', () => {
+  const runDirs = (root: string, shim: string, id = ID_A) =>
+    Bun.spawnSync(['bash', '-o', 'pipefail', '-c', readerDirsScript(id, root)], {
+      env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+    })
+  // `install -d -o root -g <gid>` needs root: the shim makes the directory the way `install -d` does, which refuses a
+  // path that exists and is not a directory, and ignores the owner.
+  const shimInstall = (shim: string): void => {
+    writeFileSync(
+      join(shim, 'install'),
+      '#!/bin/sh\nwhile [ "$1" = -d ] || [ "$1" = -o ] || [ "$1" = -g ] || [ "$1" = -m ]; do case "$1" in -d) shift ;; *) shift 2 ;; esac; done\nfor d in "$@"; do if [ -e "$d" ] && [ ! -d "$d" ]; then echo "install: cannot create directory $d: File exists" >&2; exit 1; fi; mkdir -p "$d"; done\n',
+    )
+    chmodSync(join(shim, 'install'), 0o755)
+  }
+
+  it('creates the three directories when the host owns them, and only then says so', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      shimInstall(shim)
+      mkdirSync(join(root, 'secrets'))
+      writeFileSync(join(root, '.deploy-in-progress'), `${ID_A} 2023-11-14T22:13:20.000Z\n`)
+      const result = runDirs(root, shim)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.toString()).toContain(READER_DIRS_SENTINEL)
+      for (const directory of ['readers', 'secrets/reader-gate', 'secrets/grafana-mcp']) {
+        expect(statSync(join(root, directory)).isDirectory()).toBe(true)
+      }
+    } finally {
+      cleanup()
+    }
+  })
+
+  it.each(['readers', 'secrets/reader-gate', 'secrets/grafana-mcp'])(
+    'a regular file where %s should be fails it, with no sentinel',
+    directory => {
+      const {root, shim, cleanup} = scratchHost()
+      try {
+        shimInstall(shim)
+        mkdirSync(join(root, 'secrets'))
+        writeFileSync(join(root, '.deploy-in-progress'), `${ID_A} 2023-11-14T22:13:20.000Z\n`)
+        writeFileSync(join(root, directory), 'not a directory')
+        const result = runDirs(root, shim)
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stdout.toString()).not.toContain(READER_DIRS_SENTINEL)
+        expect(readFileSync(join(root, directory), 'utf8')).toBe('not a directory')
+      } finally {
+        cleanup()
+      }
+    },
+  )
+
+  it('refuses to run for a deploy that does not own the host, changing nothing', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      shimInstall(shim)
+      mkdirSync(join(root, 'secrets'))
+      writeFileSync(join(root, '.deploy-in-progress'), `${ID_B} 2023-11-14T22:13:20.000Z\n`)
+      const result = runDirs(root, shim)
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout.toString()).toContain(DEPLOY_OVERTAKEN_SENTINEL)
+      expect(readdirSync(join(root, 'secrets'))).toEqual([])
+      expect(() => statSync(join(root, 'readers'))).toThrow()
+    } finally {
+      cleanup()
+    }
+  })
+})
+
 describe('the reader gate source upload', () => {
   it('uploads the `.ts` files that are neither tests nor test support, and nothing else', () => {
     for (const name of ['main.ts', 'server.ts', 'check.ts']) expect(isReaderGateSource(name)).toBe(true)
@@ -2933,6 +3016,40 @@ describe('the reader services start after the route is decided', () => {
     expect(error).toBeInstanceOf(OperatorSurfaceError)
     expect(host.setStates()).toEqual(['open', 'held', 'open'])
     expect(host.served).toBe('open')
+  })
+
+  it('prepares the reader directories after the route is decided and before any reader file is written', async () => {
+    const host = new FakeHost()
+    await run(host)
+    expect(host.count('reader-dirs')).toBe(1)
+    expect(host.indexOf('reader-dirs')).toBeGreaterThan(host.indexOf('raw:set-state:open'))
+    expect(host.indexOf('reader-dirs')).toBeGreaterThan(host.indexOf('prepare-dirs'))
+    for (const kind of READER_FILE_KINDS) {
+      expect(host.indexOf('reader-dirs')).toBeLessThan(host.indexOf(`reader-file:${kind}`))
+    }
+  })
+
+  // A regular file where a reader directory should be makes `install -d` exit non-zero: that fails reader-ready only.
+  it('a reader directory that cannot be prepared fails reader-ready only, and an open route stays open', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.override = failAt('reader-dirs')
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(failedOperatorGates((error as OperatorSurfaceError).result.gates).map(gate => gate.id)).toEqual([
+      'reader-ready',
+    ])
+    expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+    expect((error as OperatorSurfaceError).ingest).toBe('open')
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.marker).toBeUndefined()
+    // Nothing of the reader group ran after it, and the rest of the post-route group did.
+    for (const kind of READER_FILE_KINDS) expect(ranSince(host, mark, `reader-file:${kind}`)).toBe(0)
+    expect(ranSince(host, mark, 'pull-reader')).toBe(0)
+    expect(ranSince(host, mark, 'up-reader')).toBe(0)
+    expect(ranSince(host, mark, 'up-grafana')).toBe(1)
+    expect(ranSince(host, mark, 'up-embedder')).toBe(1)
   })
 
   it.each(READER_FILE_KINDS)(
@@ -5463,6 +5580,7 @@ describe('overlapping deploys: the newest one owns the host', () => {
       'prometheus-volume',
       'create-embedder',
       'embedder-volume',
+      'reader-dirs',
       'reader-file:token',
       'reader-file:langfuse',
       'reader-file:grafana',
@@ -5493,6 +5611,7 @@ const ENV_FILE = {path: '.env', owner: 'root:root', mode: '0600', kind: 'env'} a
 /** Every script builder that changes the host, by export name, with the scripts each can emit. */
 const MUTATING_SCRIPTS: Record<string, string[]> = {
   prepareDirsScript: [prepareDirsScript(ID_A)],
+  readerDirsScript: [readerDirsScript(ID_A)],
   tokenFileScript: SENDER_GROUPS.map(group => tokenFileScript(group, ID_A)),
   writeFileScript: [writeFileScript(ID_A, PLAIN_FILE), writeFileScript(ID_A, ENV_FILE, 'held')],
   removeOwnFileScript: ['.pending-restarts', 'secrets/bootstrap-pending'].map(path => removeOwnFileScript(ID_A, path)),

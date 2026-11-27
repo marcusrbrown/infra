@@ -5,9 +5,10 @@
 //   3. credential  the Langfuse Viewer pair, from the host file. Missing or a placeholder: 502.
 //   4. limits      per-consumer budget and concurrency, global concurrency: 429 with Retry-After.
 //   5. forward     allowlisted request headers, the host credential, redirects never followed, 60 s to headers: 504.
-//   6. answer      allowlisted response headers. An upstream 3xx or Set-Cookie is a 502, and so is a Langfuse 401 or 403
-//                  (the host-held credential was refused: `credential-refused`). The slot is held until the
-//                  body ends, errors or is cancelled, or the response deadline passes.
+//   6. answer      allowlisted response headers. An upstream 3xx or Set-Cookie is a 502, and so is a Langfuse 401 (the
+//                  host-held credential was refused: `credential-refused`). A Langfuse 403 is not: it is the Viewer
+//                  role refusing the operation, and it passes through. The slot is held until the body ends,
+//                  errors or is cancelled, or the response deadline passes.
 //
 // There is no registry of running requests: a revoked token fails on its next request, and a request already running
 // ends within the deadlines. Every collaborator is injected, so the handler runs in tests with no port, clock or
@@ -190,9 +191,11 @@ async function handle(req: Request, deps: ServerDeps, ctx: Context): Promise<Res
   }
 
   const upstream = outcome.response
-  // Langfuse refusing the host-held Viewer pair is the gate's own fault, not the reader's: a 401 or 403 passed through
-  // would read as "your token is bad". Its body is dropped, the refusal is logged. Grafana's refusals are JSON-RPC errors.
-  if (match.upstream === 'langfuse' && (upstream.status === 401 || upstream.status === 403)) {
+  // Langfuse refusing the host-held Viewer pair is the gate's own fault, not the reader's: a 401 passed through would
+  // read as "your token is bad". Its body is dropped, the refusal is logged. Only a 401 is that. A 403 is a role denial,
+  // for example the Viewer calling an MCP write tool: it is the answer to the reader's request, not a fault of the key,
+  // and it is not retryable, so it passes through unchanged. Grafana's refusals are JSON-RPC errors.
+  if (match.upstream === 'langfuse' && upstream.status === 401) {
     upstream.body?.cancel().catch(() => {})
     lease.release()
     ctx.upstreamStatus = upstream.status

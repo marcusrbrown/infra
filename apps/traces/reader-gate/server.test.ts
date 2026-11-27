@@ -670,15 +670,16 @@ describe('redirects and cookies', () => {
 })
 
 // A reader whose own token is good must never be told its token is bad because the host-held credential is. The
-// Langfuse upstream answers 401 or 403 to a refused Viewer pair; the gate turns that into its own 502.
+// Langfuse upstream answers 401 to a refused Viewer pair; the gate turns that into its own 502. A 403 is not that: it is
+// the Viewer role refusing an operation (a write tool over MCP, for one), and it reaches the reader as it is.
 describe('a Langfuse credential the upstream refuses', () => {
   const CANARY = 'upstream-body-canary-do-not-forward'
 
-  test.each([401, 403])('an upstream %i gives 502 credential-refused, and the body is discarded', async status => {
+  test('an upstream 401 gives 502 credential-refused, and the body is discarded', async () => {
     const stream = controllableStream()
     stream.push(CANARY)
     const h = await build({
-      upstream: () => new Response(stream.stream, {status, headers: {'content-type': 'application/json'}}),
+      upstream: () => new Response(stream.stream, {status: 401, headers: {'content-type': 'application/json'}}),
     })
     const res = await h.handler(request('/agent/langfuse/api/public/traces'))
     expect(res.status).toBe(502)
@@ -702,10 +703,10 @@ describe('a Langfuse credential the upstream refuses', () => {
   })
 
   test('it is logged with its reason and the upstream status, and never the body', async () => {
-    const h = await build({upstream: () => new Response(CANARY, {status: 403})})
+    const h = await build({upstream: () => new Response(CANARY, {status: 401})})
     await (await h.handler(request('/agent/langfuse/api/public/traces'))).text()
     expect(h.events).toHaveLength(1)
-    expect(h.events[0]).toMatchObject({status: 502, reason: 'credential-refused', upstreamStatus: 403})
+    expect(h.events[0]).toMatchObject({status: 502, reason: 'credential-refused', upstreamStatus: 401})
     expect(JSON.stringify(h.events)).not.toContain(CANARY)
   })
 
@@ -720,6 +721,32 @@ describe('a Langfuse credential the upstream refuses', () => {
       expect(res.status).toBe(502)
       expect(await res.json()).toEqual({error: 'bad gateway', reason: 'credential-refused'})
     }
+  })
+
+  // The Viewer role refusing an operation is the reader's answer, not a fault of the host-held key. Reporting it as
+  // `credential-refused` would send an operator to rotate a key that is fine, and tell the reader to retry.
+  test('an upstream 403 passes through unchanged: status, JSON body and content type, with no 502', async () => {
+    const body = '{"message":"Forbidden: the Viewer role cannot call this tool"}'
+    const h = await build({
+      upstream: () => new Response(body, {status: 403, headers: {'content-type': 'application/json'}}),
+    })
+    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    expect(res.status).toBe(403)
+    expect(res.headers.get('content-type')).toBe('application/json')
+    expect(await res.text()).toBe(body)
+    expect(h.limits.stats().active).toBe(0)
+  })
+
+  test('a Viewer calling a write tool over MCP gets the 403 of the upstream, and it is not logged as a refused credential', async () => {
+    const body = '{"error":{"code":-32603,"message":"forbidden"}}'
+    const h = await build({upstream: () => new Response(body, {status: 403})})
+    const res = await h.handler(request('/agent/langfuse/api/public/mcp', {method: 'POST', body: '{}'}))
+    expect(res.status).toBe(403)
+    expect(await res.text()).toBe(body)
+    expect(h.events).toHaveLength(1)
+    expect(h.events[0]).toMatchObject({status: 403})
+    expect(h.events[0]).not.toHaveProperty('reason')
+    expect(h.events[0]).not.toHaveProperty('upstreamStatus')
   })
 
   test.each([400, 404, 409, 422, 429, 500])('an upstream %i passes through unchanged', async status => {

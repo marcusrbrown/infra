@@ -16,11 +16,10 @@ import {
 import {
   GRAFANA_ACCOUNT_NAME,
   GRAFANA_REMOTE_DEADLINE_MS,
-  LOCK_BUSY_SENTINEL,
-  LOCK_STALE_SECONDS,
   parseCheck,
   PREVIOUS_PENDING_SENTINEL,
   READER_BACKEND_REMOTE,
+  SWITCH_INCOMPLETE_SENTINEL,
   tracesReaderBackendGrafanaAction,
   tracesReaderBackendLangfuseAction,
   tracesReaderBackendStatusAction,
@@ -159,11 +158,6 @@ interface World {
 
 let worldCounter = 0
 let keyCounter = 0
-
-const RUN_ID_LINE = /^[\da-f]{32}\n/
-
-/** The run id the CLI puts first on the stdin of a script that changes a credential file. */
-const withoutRunId = (stdin: string): string => stdin.replace(RUN_ID_LINE, '')
 
 function createWorld(): World {
   worldCounter += 1
@@ -306,7 +300,7 @@ function createWorld(): World {
   }
 
   const createToken = (raw: string): Reply => {
-    const [id = '', name = ''] = withoutRunId(raw).split('\n')
+    const [id = '', name = ''] = raw.split('\n')
     requests.push(`POST /api/serviceaccounts/${id}/tokens (${name})`)
     if (failures.has('create-token')) return {stdout: 'TRACES_GRAFANA_HTTP=500\nTRACES_GRAFANA_CREATE_TOKEN_DONE\n'}
     const accountId = Number(id)
@@ -676,7 +670,7 @@ describe('traces reader backend langfuse', () => {
     await installLangfuse(world)
     const carrying = world.calls.filter(call => (call.stdin ?? '').includes(PAIR))
     expect(carrying.map(call => call.command)).toEqual([READER_BACKEND_REMOTE.stageLangfuse])
-    expect(withoutRunId(carrying[0]?.stdin ?? '')).toBe(`${PAIR}\n`)
+    expect(carrying[0]?.stdin).toBe(`${PAIR}\n`)
   })
 })
 
@@ -736,7 +730,7 @@ describe('every backend remote call has a deadline', () => {
       if (!(error instanceof MockProcessExit)) throw error
     }
     expect(captured.exit?.code).toBe(1)
-    expect(captured.stderr.join('\n')).toContain('Could not take the rotation lock')
+    expect(captured.stderr.join('\n')).toContain('Step sign-in failed')
     expect(world.read(world.grafanaFile)).toBe(READER_GRAFANA_PLACEHOLDER)
   })
 })
@@ -862,103 +856,12 @@ describe('traces reader backend langfuse: the pair on stdin', () => {
   })
 })
 
-// ─── The rotation lock ────────────────────────────────────────────────────────
+// ─── What guards a run from its own interruption ─────────────────────────────
 //
-// One `backend` run holds the lock from its first change to its last. The steps are separate ssh calls, so the lock
-// is a file naming the run (`<run id> <epoch>`) that each changing script checks under `flock`, with a stale limit.
+// There is no lock: one `traces reader` command at a time is a rule, not a mechanism. What stays is a hash check of
+// the staged Langfuse file before the switch, and a hash check of the live Grafana file before cleanup.
 
-describe('the backend rotation lock', () => {
-  const lockFile = (world: World): string => join(world.dir, 'secrets/.reader-backend.lock')
-  const OTHER_RUN = 'ab'.repeat(16)
-  const now = (): number => Math.floor(Date.now() / 1000)
-  const hold = (world: World, epoch = now()): void => writeFileSync(lockFile(world), `${OTHER_RUN} ${epoch}\n`)
-  const changing = [
-    READER_BACKEND_REMOTE.stageLangfuse,
-    READER_BACKEND_REMOTE.switchLangfuse,
-    READER_BACKEND_REMOTE.switchGrafana,
-    READER_BACKEND_REMOTE.createGrafanaToken,
-    READER_BACKEND_REMOTE.dropPrevious('langfuse'),
-    READER_BACKEND_REMOTE.dropPrevious('grafana'),
-  ]
-  const changed = (world: World): string[] =>
-    world.calls.map(call => call.command).filter(command => changing.includes(command))
-
-  it('a run that finds another run holding it fails fast, says so, and changes nothing', async () => {
-    for (const start of [
-      (world: World) => installLangfuse(world),
-      (world: World) => installLangfuse(world, [], {confirmOldRevoked: true}),
-      (world: World) => installGrafana(world),
-    ]) {
-      const world = createWorld()
-      world.pairs.set(PAIR, 'viewer')
-      setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
-      hold(world)
-      const outcome = await start(world)
-      expect(outcome.exit).toBe(1)
-      expect(outcome.stderr).toContain('Another reader backend command is running')
-      expect(changed(world)).toEqual([])
-      expect(world.requests).toEqual([])
-      expect(world.checks).toEqual([])
-      expect(world.read(`${world.langfuseFile}.previous`)).toBe(OLD_PAIR)
-      expect(readFileSync(lockFile(world), 'utf8')).toContain(OTHER_RUN)
-    }
-  })
-
-  it('takes over a lock that is older than the stale limit', async () => {
-    const world = createWorld()
-    world.pairs.set(PAIR, 'viewer')
-    hold(world, now() - 24 * 3600)
-    const outcome = await installLangfuse(world)
-    expect(outcome.exit).toBeNull()
-    expect(world.read(world.langfuseFile)).toBe(PAIR)
-  })
-
-  it('releases the lock when the run succeeds and when it fails', async () => {
-    const ok = createWorld()
-    ok.pairs.set(PAIR, 'viewer')
-    await installLangfuse(ok)
-    expect(readFileSync(lockFile(ok), 'utf8')).toBe('')
-
-    const refused = createWorld()
-    await installLangfuse(refused)
-    expect(readFileSync(lockFile(refused), 'utf8')).toBe('')
-
-    const grafana = createWorld()
-    grafana.failures.add('sign-in')
-    await installGrafana(grafana)
-    expect(readFileSync(lockFile(grafana), 'utf8')).toBe('')
-  })
-
-  it('two runs at once: one proceeds, the other is refused and stages nothing', async () => {
-    const world = createWorld()
-    world.pairs.set(PAIR, 'viewer')
-    world.pairs.set(OLD_PAIR, 'viewer')
-
-    const [first, second] = await Promise.all([
-      installLangfuse(world, [PK, SK]),
-      installLangfuse(world, [OLD_PK, OLD_SK]),
-    ])
-
-    expect([first.exit, second.exit].sort()).toEqual([1, null].sort())
-    const refused = first.exit === 1 ? first : second
-    expect(refused.stderr).toContain('Another reader backend command is running')
-    expect(world.calls.filter(call => call.command === READER_BACKEND_REMOTE.stageLangfuse)).toHaveLength(1)
-    expect(world.read(world.langfuseFile)).toBe(first.exit === null ? PAIR : OLD_PAIR)
-    expect(readFileSync(lockFile(world), 'utf8')).toBe('')
-  })
-
-  it('a step run under a lock the run no longer holds changes nothing', async () => {
-    const world = createWorld()
-    world.pairs.set(PAIR, 'viewer')
-    // Another run takes the lock over between this run's check and its switch.
-    world.afterCheck = () => hold(world)
-    const outcome = await installLangfuse(world)
-    expect(outcome.exit).toBe(1)
-    expect(outcome.stderr).toContain('lock')
-    expect(world.read(world.langfuseFile)).toBe(READER_LANGFUSE_PLACEHOLDER)
-    expect(readFileSync(lockFile(world), 'utf8')).toContain(OTHER_RUN)
-  })
-
+describe('the hash checks that remain', () => {
   it('refuses to switch a staged pair that is not the one it checked, and leaves the live pair alone', async () => {
     const world = createWorld()
     setFile(world.langfuseFile, OLD_PAIR)
@@ -983,18 +886,6 @@ describe('the backend rotation lock', () => {
     const sw = world.calls.find(call => call.command === READER_BACKEND_REMOTE.switchLangfuse)
     expect(sw?.stdin).toContain(createHash('sha256').update(PAIR).digest('hex'))
     expect(sw?.stdin).not.toContain(PAIR)
-  })
-
-  it('puts the same run id first on the stdin of every changing step of one run', async () => {
-    const world = createWorld()
-    world.pairs.set(PAIR, 'viewer')
-    await installLangfuse(world)
-    const ids = world.calls
-      .filter(call => changing.includes(call.command) || call.command === READER_BACKEND_REMOTE.acquireLock)
-      .map(call => (call.stdin ?? '').split('\n')[0])
-    expect(ids.length).toBeGreaterThanOrEqual(3)
-    expect(new Set(ids).size).toBe(1)
-    expect(ids[0]).toMatch(/^[\da-f]{32}$/)
   })
 
   describe('backend grafana', () => {
@@ -1559,13 +1450,6 @@ describe('host scripts, run under a real sh', () => {
     writeFileSync(join(world.dir, 'secrets', 'grafana', 'admin-password'), ADMIN_PASSWORD)
   }
 
-  // The scripts that change a file run only under a lock that names the run on their stdin.
-  const RUN = 'cd'.repeat(16)
-  const lockPath = (world: World): string => join(world.dir, 'secrets', '.reader-backend.lock')
-  const holdFor = (world: World, run = RUN): void =>
-    writeFileSync(lockPath(world), `${run} ${Math.floor(Date.now() / 1000)}\n`)
-  const asRun = (stdin: string, run = RUN): string => `${run}\n${stdin}`
-
   describe('grafanaApi', () => {
     it('signs in through a curl config on stdin: the password is in no argv and not in the output', () => {
       const world = createWorld()
@@ -1661,10 +1545,9 @@ describe('host scripts, run under a real sh', () => {
     it('writes the key straight into token.staged (0440) and prints the id and nothing of the key', () => {
       const world = createWorld()
       withPassword(world)
-      holdFor(world)
       const shim = curl(world, `{"id":9,"name":"agent-reader-20261120120000","key":"${key}"}`, 200)
 
-      const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, asRun(input), shim)
+      const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, input, shim)
 
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain('TRACES_GRAFANA_HTTP=200')
@@ -1688,9 +1571,8 @@ describe('host scripts, run under a real sh', () => {
     it('reports a token that came back without a key by id only, and stages nothing', () => {
       const world = createWorld()
       withPassword(world)
-      holdFor(world)
       const shim = curl(world, '{"id":9,"name":"x"}', 200)
-      const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, asRun(input), shim)
+      const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, input, shim)
       expect(result.stdout).toContain('TRACES_GRAFANA_TOKEN_ID=9')
       expect(result.stdout).not.toContain('TRACES_GRAFANA_STAGED')
       expect(world.read(`${world.grafanaFile}.staged`)).toBeUndefined()
@@ -1700,33 +1582,19 @@ describe('host scripts, run under a real sh', () => {
     it('stages nothing for an error answer, even one that carries a key-shaped field', () => {
       const world = createWorld()
       withPassword(world)
-      holdFor(world)
       const shim = curl(world, `{"message":"no","key":"${key}"}`, 403)
-      const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, asRun(input), shim)
+      const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, input, shim)
       expect(result.stdout).toContain('TRACES_GRAFANA_HTTP=403')
       expect(result.stdout).not.toContain('TRACES_GRAFANA_STAGED')
-      expect(world.read(`${world.grafanaFile}.staged`)).toBeUndefined()
-    })
-
-    it('makes no request and stages nothing under a lock that names another run', () => {
-      const world = createWorld()
-      withPassword(world)
-      holdFor(world, 'ee'.repeat(16))
-      const shim = curl(world, `{"id":9,"key":"${key}"}`, 200)
-      const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, asRun(input), shim)
-      expect(result.exitCode).not.toBe(0)
-      expect(result.stdout).toContain('TRACES_READER_BACKEND_LOCK_LOST')
-      expect(shim.called()).toBe(false)
       expect(world.read(`${world.grafanaFile}.staged`)).toBeUndefined()
     })
 
     it('refuses an account id or token name that is not plain, and makes no request', () => {
       const world = createWorld()
       withPassword(world)
-      holdFor(world)
       for (const bad of ['x\nname\n', '1 2\nname\n', '1\nbad name\n', '1\nn;id\n', '\n\n', '1\n"q"\n']) {
         const shim = curl(world, '{}', 200)
-        const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, asRun(bad), shim)
+        const result = withCurl(world, READER_BACKEND_REMOTE.createGrafanaToken, bad, shim)
         expect(result.exitCode).not.toBe(0)
         expect(shim.called()).toBe(false)
       }
@@ -1777,10 +1645,12 @@ describe('host scripts, run under a real sh', () => {
   describe('stageLangfuse', () => {
     it('writes the pair exactly, 0440, as token.staged, and nothing else is left in the directory', () => {
       const world = createWorld()
-      holdFor(world)
-      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, asRun(`${PAIR}\n`))
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, `${PAIR}\n`)
       expect(result.exitCode).toBe(0)
-      expect(result.stdout.trim()).toBe('TRACES_READER_BACKEND_STAGED')
+      expect(result.stdout.trim().split('\n')).toEqual([
+        'TRACES_READER_BACKEND_SETTLED=none',
+        'TRACES_READER_BACKEND_STAGED',
+      ])
       expect(world.read(`${world.langfuseFile}.staged`)).toBe(PAIR)
       expect(statSync(`${world.langfuseFile}.staged`).mode & 0o777).toBe(0o440)
       expect(stray(world)).toEqual([])
@@ -1798,8 +1668,7 @@ describe('host scripts, run under a real sh', () => {
       ['pk-lf-$(id):sk-lf-bbbbbbbb'],
     ])('refuses %j and writes nothing', pair => {
       const world = createWorld()
-      holdFor(world)
-      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, asRun(`${pair}\n`))
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, `${pair}\n`)
       expect(result.exitCode).not.toBe(0)
       expect(world.read(`${world.langfuseFile}.staged`)).toBeUndefined()
       expect(stray(world)).toEqual([])
@@ -1808,8 +1677,7 @@ describe('host scripts, run under a real sh', () => {
     it('stops, with its own sentinel, while a previous pair waits to be confirmed revoked', () => {
       const world = createWorld()
       setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
-      holdFor(world)
-      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, asRun(`${PAIR}\n`))
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, `${PAIR}\n`)
       expect(result.exitCode).not.toBe(0)
       expect(result.stdout).toContain(PREVIOUS_PENDING_SENTINEL)
       expect(world.read(`${world.langfuseFile}.staged`)).toBeUndefined()
@@ -1819,16 +1687,15 @@ describe('host scripts, run under a real sh', () => {
   describe('switchLangfuse', () => {
     it('keeps the live pair as .previous, unless it is the placeholder', () => {
       const world = createWorld()
-      holdFor(world)
       const shaOf = (pair: string): string => createHash('sha256').update(pair).digest('hex')
       setFile(`${world.langfuseFile}.staged`, PAIR)
-      const fresh = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, asRun(`${shaOf(PAIR)}\n`))
+      const fresh = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(PAIR)}\n`)
       expect(fresh.stdout).toContain('TRACES_READER_BACKEND_PREVIOUS=none')
       expect(world.read(world.langfuseFile)).toBe(PAIR)
       expect(world.read(`${world.langfuseFile}.previous`)).toBeUndefined()
 
       setFile(`${world.langfuseFile}.staged`, OLD_PAIR)
-      const rotated = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, asRun(`${shaOf(OLD_PAIR)}\n`))
+      const rotated = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(OLD_PAIR)}\n`)
       expect(rotated.stdout).toContain('TRACES_READER_BACKEND_PREVIOUS=kept')
       expect(world.read(world.langfuseFile)).toBe(OLD_PAIR)
       expect(world.read(`${world.langfuseFile}.previous`)).toBe(PAIR)
@@ -1839,9 +1706,8 @@ describe('host scripts, run under a real sh', () => {
       setFile(world.langfuseFile, PAIR)
       setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
       setFile(`${world.langfuseFile}.staged`, 'pk-lf-55555555-eeee:sk-lf-66666666-ffff')
-      holdFor(world)
       const sha = createHash('sha256').update('pk-lf-55555555-eeee:sk-lf-66666666-ffff').digest('hex')
-      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, asRun(`${sha}\n`))
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${sha}\n`)
       expect(result.exitCode).not.toBe(0)
       expect(result.stdout).toContain(PREVIOUS_PENDING_SENTINEL)
       expect(world.read(world.langfuseFile)).toBe(PAIR)
@@ -1851,43 +1717,291 @@ describe('host scripts, run under a real sh', () => {
 
     it('fails without a staged pair', () => {
       const world = createWorld()
-      holdFor(world)
-      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, asRun(`${'0'.repeat(64)}\n`))
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${'0'.repeat(64)}\n`)
       expect(result.exitCode).not.toBe(0)
       expect(world.read(world.langfuseFile)).toBe(READER_LANGFUSE_PLACEHOLDER)
     })
 
     it('refuses a staged file whose hash is not the one given, and changes nothing', () => {
       const world = createWorld()
-      holdFor(world)
       setFile(`${world.langfuseFile}.staged`, PAIR)
-      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, asRun(`${'0'.repeat(64)}\n`))
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${'0'.repeat(64)}\n`)
       expect(result.exitCode).not.toBe(0)
       expect(result.stdout).toContain('TRACES_READER_BACKEND_STAGED_CHANGED')
       expect(world.read(world.langfuseFile)).toBe(READER_LANGFUSE_PLACEHOLDER)
       expect(world.read(`${world.langfuseFile}.staged`)).toBe(PAIR)
     })
+  })
 
-    it('changes nothing under a lock that names another run, or no lock', () => {
-      for (const prepare of [(world: World) => holdFor(world, 'ee'.repeat(16)), () => undefined]) {
+  // A switch is three steps (link live to `.previous.tmp`, rename staged to live, rename tmp to `.previous`), and a
+  // process can stop between any two. A shim `mv` stands in for the stop: it exits 137 instead of renaming when the
+  // destination ends with `STOP_BEFORE_MV`, so the real script runs under a real `sh` and dies where a kill would.
+  describe('an interrupted Langfuse switch', () => {
+    let stopDir = ''
+    beforeAll(() => {
+      stopDir = join(sandbox, 'stop-shim')
+      mkdirSync(stopDir)
+      writeFileSync(
+        join(stopDir, 'mv'),
+        [
+          '#!/bin/sh',
+          'for last; do :; done',
+          'if [ -n "$STOP_BEFORE_MV" ]; then case "$last" in *"$STOP_BEFORE_MV") exit 137 ;; esac; fi',
+          'exec "$REAL_MV" "$@"',
+          '',
+        ].join('\n'),
+      )
+      chmodSync(join(stopDir, 'mv'), 0o755)
+    })
+
+    const NEW_PAIR = 'pk-lf-55555555-eeee:sk-lf-66666666-ffff'
+    const shaOf = (pair: string): string => createHash('sha256').update(pair).digest('hex')
+    const withStop = (world: World, command: string, stdin: string, stopBefore: string) =>
+      execOnHost(
+        world.dir,
+        command,
+        stdin,
+        {STOP_BEFORE_MV: stopBefore, REAL_MV: Bun.which('mv') ?? '/bin/mv'},
+        `${stopDir}:${shimDir}`,
+      )
+    const names = (world: World): string[] => readdirSync(join(world.langfuseFile, '..')).sort()
+    const statusOf = (world: World): string[] =>
+      execOnHost(world.dir, READER_BACKEND_REMOTE.status, undefined)
+        .stdout.split('\n')
+        .filter(line => line.startsWith('TRACES_READER_CREDENTIAL langfuse'))
+
+    /** Live holds OLD_PAIR and the staged file holds NEW_PAIR, as after a stage and a passed check. */
+    const readyToSwitch = (): World => {
+      const world = createWorld()
+      setFile(world.langfuseFile, OLD_PAIR)
+      setFile(`${world.langfuseFile}.staged`, NEW_PAIR)
+      return world
+    }
+
+    it('a switch that completes leaves live, `.previous` and nothing else: the tmp name is gone', () => {
+      const world = readyToSwitch()
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('TRACES_READER_BACKEND_PREVIOUS=kept')
+      expect(world.read(world.langfuseFile)).toBe(NEW_PAIR)
+      expect(world.read(`${world.langfuseFile}.previous`)).toBe(OLD_PAIR)
+      expect(names(world)).toEqual(['langfuse-basic', 'langfuse-basic.previous'])
+      expect(statSync(`${world.langfuseFile}.previous`).mode & 0o777).toBe(0o440)
+    })
+
+    it('a stop after the link and before the commit leaves the old state: live is untouched and staged is kept', () => {
+      const world = readyToSwitch()
+      const stopped = withStop(world, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`, '/langfuse-basic')
+      expect(stopped.exitCode).toBe(137)
+      expect(stopped.stdout).not.toContain('TRACES_READER_BACKEND_SWITCHED')
+      expect(world.read(world.langfuseFile)).toBe(OLD_PAIR)
+      expect(world.read(`${world.langfuseFile}.staged`)).toBe(NEW_PAIR)
+      expect(world.read(`${world.langfuseFile}.previous`)).toBeUndefined()
+      // The old pair is still on disk twice, once live and once under the tmp name.
+      expect(world.read(`${world.langfuseFile}.previous.tmp`)).toBe(OLD_PAIR)
+    })
+
+    it('after that stop, status does not call the tmp copy a pending revocation', () => {
+      const world = readyToSwitch()
+      withStop(world, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`, '/langfuse-basic')
+      expect(statusOf(world)).toEqual([
+        'TRACES_READER_CREDENTIAL langfuse installed',
+        'TRACES_READER_CREDENTIAL langfuse staged-file-left-over',
+        'TRACES_READER_CREDENTIAL langfuse interrupted-switch-left-over',
+      ])
+    })
+
+    it('after that stop, a rerun of the switch removes the copy, reports it did not complete, keeps staged, and never says revoke', () => {
+      const world = readyToSwitch()
+      withStop(world, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`, '/langfuse-basic')
+
+      const rerun = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`)
+
+      expect(rerun.exitCode).toBe(1)
+      expect(rerun.stdout).toContain(SWITCH_INCOMPLETE_SENTINEL)
+      expect(rerun.stdout).not.toContain(PREVIOUS_PENDING_SENTINEL)
+      expect(world.read(world.langfuseFile)).toBe(OLD_PAIR)
+      expect(world.read(`${world.langfuseFile}.staged`)).toBe(NEW_PAIR)
+      expect(names(world)).toEqual(['langfuse-basic', 'langfuse-basic.staged'])
+      // Run again: nothing is left to settle, so it completes.
+      const done = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`)
+      expect(done.exitCode).toBe(0)
+      expect(world.read(world.langfuseFile)).toBe(NEW_PAIR)
+      expect(world.read(`${world.langfuseFile}.previous`)).toBe(OLD_PAIR)
+    })
+
+    it('after that stop, a new stage is not blocked by the copy', () => {
+      const world = readyToSwitch()
+      withStop(world, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`, '/langfuse-basic')
+      const staged = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, `${PAIR}\n`)
+      expect(staged.exitCode).toBe(0)
+      expect(staged.stdout).toContain('TRACES_READER_BACKEND_SETTLED=cleaned')
+      expect(staged.stdout).not.toContain(PREVIOUS_PENDING_SENTINEL)
+      expect(world.read(`${world.langfuseFile}.staged`)).toBe(PAIR)
+      expect(world.read(world.langfuseFile)).toBe(OLD_PAIR)
+      expect(names(world)).toEqual(['langfuse-basic', 'langfuse-basic.staged'])
+    })
+
+    it('a stop after the commit and before the last rename leaves the old pair under the tmp name, and status calls it pending', () => {
+      const world = readyToSwitch()
+      const stopped = withStop(world, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`, '.previous')
+      expect(stopped.exitCode).toBe(137)
+      expect(world.read(world.langfuseFile)).toBe(NEW_PAIR)
+      expect(world.read(`${world.langfuseFile}.previous`)).toBeUndefined()
+      expect(world.read(`${world.langfuseFile}.previous.tmp`)).toBe(OLD_PAIR)
+      expect(statusOf(world)).toEqual(['TRACES_READER_CREDENTIAL langfuse pending-old-revocation'])
+    })
+
+    it('after that stop, the settle step names the old pair `.previous` again, and a stage is stopped by it as usual', () => {
+      const world = readyToSwitch()
+      withStop(world, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`, '.previous')
+
+      const settled = execOnHost(world.dir, READER_BACKEND_REMOTE.settleLangfuse, undefined)
+
+      expect(settled.exitCode).toBe(0)
+      expect(settled.stdout).toContain('TRACES_READER_BACKEND_SETTLED=recovered')
+      expect(world.read(`${world.langfuseFile}.previous`)).toBe(OLD_PAIR)
+      expect(names(world)).toEqual(['langfuse-basic', 'langfuse-basic.previous'])
+      expect(statusOf(world)).toEqual(['TRACES_READER_CREDENTIAL langfuse pending-old-revocation'])
+      const blocked = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, `${PAIR}\n`)
+      expect(blocked.exitCode).toBe(1)
+      expect(blocked.stdout).toContain(PREVIOUS_PENDING_SENTINEL)
+    })
+
+    it('a `.previous` that is a copy of the live pair is not pending: status, stage and switch all say so', () => {
+      const world = createWorld()
+      setFile(world.langfuseFile, OLD_PAIR)
+      setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
+      expect(statusOf(world)).toEqual([
+        'TRACES_READER_CREDENTIAL langfuse installed',
+        'TRACES_READER_CREDENTIAL langfuse interrupted-switch-left-over',
+      ])
+      // A different previous pair is pending, whatever the live one is.
+      setFile(`${world.langfuseFile}.previous`, PAIR)
+      expect(statusOf(world)).toEqual(['TRACES_READER_CREDENTIAL langfuse pending-old-revocation'])
+
+      setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
+      setFile(`${world.langfuseFile}.staged`, NEW_PAIR)
+      const switched = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`)
+      expect(switched.exitCode).toBe(1)
+      expect(switched.stdout).toContain(SWITCH_INCOMPLETE_SENTINEL)
+      expect(world.read(`${world.langfuseFile}.previous`)).toBeUndefined()
+      expect(world.read(`${world.langfuseFile}.staged`)).toBe(NEW_PAIR)
+      expect(world.read(world.langfuseFile)).toBe(OLD_PAIR)
+
+      setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
+      const staged = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, `${PAIR}\n`)
+      expect(staged.exitCode).toBe(0)
+      expect(staged.stdout).toContain('TRACES_READER_BACKEND_SETTLED=cleaned')
+      expect(world.read(`${world.langfuseFile}.previous`)).toBeUndefined()
+    })
+
+    it('switching the pair that is already live keeps no previous', () => {
+      const world = createWorld()
+      setFile(world.langfuseFile, NEW_PAIR)
+      setFile(`${world.langfuseFile}.staged`, NEW_PAIR)
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain('TRACES_READER_BACKEND_PREVIOUS=none')
+      expect(names(world)).toEqual(['langfuse-basic'])
+    })
+
+    it('status without a live file or on a placeholder never calls a previous file pending', () => {
+      const world = createWorld()
+      setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
+      expect(statusOf(world)).toEqual(['TRACES_READER_CREDENTIAL langfuse placeholder'])
+    })
+
+    // The same, through the command: what the operator is told.
+    describe('through the command', () => {
+      it('an install over a copy of the live pair goes through, says the copy was removed, and does not ask for a revocation', async () => {
         const world = createWorld()
-        prepare(world)
-        setFile(`${world.langfuseFile}.staged`, PAIR)
-        const sha = createHash('sha256').update(PAIR).digest('hex')
-        const result = execOnHost(world.dir, READER_BACKEND_REMOTE.switchLangfuse, asRun(`${sha}\n`))
-        expect(result.exitCode).not.toBe(0)
-        expect(result.stdout).toContain('TRACES_READER_BACKEND_LOCK_LOST')
-        expect(world.read(world.langfuseFile)).toBe(READER_LANGFUSE_PLACEHOLDER)
-      }
+        setFile(world.langfuseFile, OLD_PAIR)
+        setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
+        world.pairs.set(PAIR, 'viewer')
+        world.pairs.set(OLD_PAIR, 'viewer')
+
+        const outcome = await installLangfuse(world)
+
+        expect(outcome.exit).toBeNull()
+        expect(outcome.stdout).toContain('copy of the live pair')
+        expect(outcome.stderr).not.toContain('still waiting to be confirmed revoked')
+        expect(world.read(world.langfuseFile)).toBe(PAIR)
+        // The old live pair is now genuinely pending, and only now is the operator told to revoke it.
+        expect(world.read(`${world.langfuseFile}.previous`)).toBe(OLD_PAIR)
+        expect(outcome.stdout).toContain('--confirm-old-revoked')
+      })
+
+      it('a switch that finds a copy of the live pair reports it did not complete, keeps the staged pair, and does not advise revoking', async () => {
+        const world = createWorld()
+        setFile(world.langfuseFile, OLD_PAIR)
+        world.pairs.set(PAIR, 'viewer')
+        world.pairs.set(OLD_PAIR, 'viewer')
+        // Between the check and the switch an earlier, interrupted switch's copy appears.
+        world.afterCheck = () => setFile(`${world.langfuseFile}.previous`, OLD_PAIR)
+
+        const outcome = await installLangfuse(world)
+
+        expect(outcome.exit).toBe(1)
+        expect(outcome.stderr).toContain('switch did not complete; staged pair kept')
+        expect(outcome.stderr).not.toMatch(/revok/i)
+        expect(world.read(world.langfuseFile)).toBe(OLD_PAIR)
+        expect(world.read(`${world.langfuseFile}.staged`)).toBe(PAIR)
+        expect(world.read(`${world.langfuseFile}.previous`)).toBeUndefined()
+      })
+
+      it('--confirm-old-revoked settles first: a copy of the live pair is not proven refused or deleted as an old key', async () => {
+        const world = createWorld()
+        setFile(world.langfuseFile, PAIR)
+        setFile(`${world.langfuseFile}.previous`, PAIR)
+        world.pairs.set(PAIR, 'viewer')
+
+        const outcome = await installLangfuse(world, [], {confirmOldRevoked: true})
+
+        expect(outcome.exit).toBe(1)
+        expect(outcome.stderr).toContain('no previous Langfuse pair')
+        expect(outcome.stdout).toContain('copy of the live pair')
+        expect(world.checks).toEqual([
+          {kind: 'langfuse-refused', credentialFile: '/run/secrets/reader-gate/langfuse-basic.previous'},
+        ])
+        expect(world.read(world.langfuseFile)).toBe(PAIR)
+        expect(world.read(`${world.langfuseFile}.previous`)).toBeUndefined()
+      })
+
+      it('--confirm-old-revoked after a stop past the commit recovers the old pair, proves it refused, and deletes it', async () => {
+        const world = readyToSwitch()
+        withStop(world, READER_BACKEND_REMOTE.switchLangfuse, `${shaOf(NEW_PAIR)}\n`, '.previous')
+        // OLD_PAIR is not in `pairs`: Langfuse refuses it.
+
+        const outcome = await installLangfuse(world, [], {confirmOldRevoked: true})
+
+        expect(outcome.exit).toBeNull()
+        expect(outcome.stdout).toContain('recovered')
+        expect(world.read(world.langfuseFile)).toBe(NEW_PAIR)
+        expect(names(world)).toEqual(['langfuse-basic'])
+      })
+
+      it('status names a copy of the live pair as installed, with a note, and as JSON as installed', async () => {
+        const world = createWorld()
+        setFile(world.langfuseFile, PAIR)
+        setFile(`${world.langfuseFile}.previous`, PAIR)
+        const text = await run(world, ctx => tracesReaderBackendStatusAction({}, ctx, makeDeps(world)), {secrets: []})
+        expect(text.stdout).toContain('langfuse: installed')
+        expect(text.stdout).not.toContain('not yet confirmed revoked')
+        expect(text.stdout).toContain('nothing to revoke')
+        const json = await run(world, ctx => tracesReaderBackendStatusAction({json: true}, ctx, makeDeps(world)), {
+          secrets: [],
+        })
+        expect(JSON.parse(json.stdout)).toEqual({langfuse: 'installed', grafana: 'placeholder'})
+      })
     })
   })
 
   describe('undoGrafanaSwitch', () => {
     it('fails and changes nothing when there is neither a staged nor a previous file', () => {
       const world = createWorld()
-      holdFor(world)
       const before = world.read(world.grafanaFile)
-      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.undoGrafanaSwitch, asRun(''))
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.undoGrafanaSwitch, '')
       expect(result.exitCode).not.toBe(0)
       expect(result.stdout).not.toContain('TRACES_READER_BACKEND_RESTORED')
       expect(world.read(world.grafanaFile)).toBe(before)
@@ -1895,63 +2009,11 @@ describe('host scripts, run under a real sh', () => {
 
     it('puts the previous file back as the live one when the staged file is gone', () => {
       const world = createWorld()
-      holdFor(world)
       setFile(`${world.grafanaFile}.previous`, 'glsa_previouspreviousprev')
-      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.undoGrafanaSwitch, asRun(''))
+      const result = execOnHost(world.dir, READER_BACKEND_REMOTE.undoGrafanaSwitch, '')
       expect(result.stdout).toContain('TRACES_READER_BACKEND_UNDO=restored')
       expect(world.read(world.grafanaFile)).toBe('glsa_previouspreviousprev')
       expect(world.read(`${world.grafanaFile}.previous`)).toBeUndefined()
-    })
-  })
-
-  describe('acquireLock and releaseLock', () => {
-    const other = 'ee'.repeat(16)
-
-    it('takes a free lock, names the run in it, and lets the same run take it again', () => {
-      const world = createWorld()
-      const first = execOnHost(world.dir, READER_BACKEND_REMOTE.acquireLock, asRun(''))
-      expect(first.stdout).toContain('TRACES_READER_BACKEND_LOCKED')
-      expect(world.read(lockPath(world))).toMatch(new RegExp(String.raw`^${RUN} \d+\n$`))
-      expect(execOnHost(world.dir, READER_BACKEND_REMOTE.acquireLock, asRun('')).stdout).toContain(
-        'TRACES_READER_BACKEND_LOCKED',
-      )
-    })
-
-    it('refuses a lock another run holds, and takes over one past the stale limit', () => {
-      const world = createWorld()
-      holdFor(world, other)
-      const busy = execOnHost(world.dir, READER_BACKEND_REMOTE.acquireLock, asRun(''))
-      expect(busy.exitCode).toBe(1)
-      expect(busy.stdout).toContain(LOCK_BUSY_SENTINEL)
-      expect(world.read(lockPath(world))).toContain(other)
-
-      writeFileSync(lockPath(world), `${other} ${Math.floor(Date.now() / 1000) - LOCK_STALE_SECONDS - 1}\n`)
-      expect(execOnHost(world.dir, READER_BACKEND_REMOTE.acquireLock, asRun('')).stdout).toContain(
-        'TRACES_READER_BACKEND_LOCKED',
-      )
-      expect(world.read(lockPath(world))).toContain(RUN)
-    })
-
-    it('treats a lock with a garbled timestamp as stale, and a run id that is not 32 hex characters as an error', () => {
-      const world = createWorld()
-      writeFileSync(lockPath(world), `${other} not-a-number\n`)
-      expect(execOnHost(world.dir, READER_BACKEND_REMOTE.acquireLock, asRun('')).exitCode).toBe(0)
-      for (const bad of ['', 'XYZ', 'ab'.repeat(15), 'ab'.repeat(17), `${'ab'.repeat(15)}a;`]) {
-        const result = execOnHost(world.dir, READER_BACKEND_REMOTE.acquireLock, `${bad}\n`)
-        expect(result.exitCode).not.toBe(0)
-      }
-    })
-
-    it('releases only its own lock', () => {
-      const world = createWorld()
-      holdFor(world, other)
-      expect(execOnHost(world.dir, READER_BACKEND_REMOTE.releaseLock, asRun('')).stdout).toContain(
-        'TRACES_READER_BACKEND_RELEASED',
-      )
-      expect(world.read(lockPath(world))).toContain(other)
-      holdFor(world)
-      execOnHost(world.dir, READER_BACKEND_REMOTE.releaseLock, asRun(''))
-      expect(world.read(lockPath(world))).toBe('')
     })
   })
 
@@ -1961,26 +2023,24 @@ describe('host scripts, run under a real sh', () => {
 
     it('says same for the key it was given the hash of, and changed for any other file content', () => {
       const world = createWorld()
-      holdFor(world)
       setFile(world.grafanaFile, key)
-      const same = execOnHost(world.dir, READER_BACKEND_REMOTE.verifyGrafanaLive, asRun(`${sha}\n`))
+      const same = execOnHost(world.dir, READER_BACKEND_REMOTE.verifyGrafanaLive, `${sha}\n`)
       expect(same.stdout).toContain('TRACES_GRAFANA_LIVE=same')
       expect(same.stdout + same.stderr).not.toContain(key)
       setFile(world.grafanaFile, 'glsa_other')
-      expect(execOnHost(world.dir, READER_BACKEND_REMOTE.verifyGrafanaLive, asRun(`${sha}\n`)).stdout).toContain(
+      expect(execOnHost(world.dir, READER_BACKEND_REMOTE.verifyGrafanaLive, `${sha}\n`).stdout).toContain(
         'TRACES_GRAFANA_LIVE=changed',
       )
     })
 
     it('says changed for a missing file, and refuses a value that is not a SHA-256', () => {
       const world = createWorld()
-      holdFor(world)
       rmSync(world.grafanaFile)
-      expect(execOnHost(world.dir, READER_BACKEND_REMOTE.verifyGrafanaLive, asRun(`${sha}\n`)).stdout).toContain(
+      expect(execOnHost(world.dir, READER_BACKEND_REMOTE.verifyGrafanaLive, `${sha}\n`).stdout).toContain(
         'TRACES_GRAFANA_LIVE=changed',
       )
       for (const bad of ['', key, 'g'.repeat(64), '0'.repeat(63)]) {
-        expect(execOnHost(world.dir, READER_BACKEND_REMOTE.verifyGrafanaLive, asRun(`${bad}\n`)).exitCode).not.toBe(0)
+        expect(execOnHost(world.dir, READER_BACKEND_REMOTE.verifyGrafanaLive, `${bad}\n`).exitCode).not.toBe(0)
       }
     })
   })
@@ -2002,7 +2062,10 @@ describe('host scripts, run under a real sh', () => {
         expect(command).not.toContain('`')
         expect(command).not.toContain('$@')
         for (const match of command.matchAll(/\brm\b[^;']*/g)) {
-          expect(['rm -f "$t"', 'rm -f "$f.staged"', 'rm -f "$f.previous"']).toContain(match[0].trim())
+          // `$p` is `$f.previous` and `$q` is `$f.previous.tmp`, set by the settle fragment; both are asserted below.
+          expect(['rm -f "$t"', 'rm -f "$f.staged"', 'rm -f "$f.previous"', 'rm -f "$p"', 'rm -f "$q"']).toContain(
+            match[0].trim(),
+          )
         }
       },
     )

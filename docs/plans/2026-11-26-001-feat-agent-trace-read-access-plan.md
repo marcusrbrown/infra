@@ -226,8 +226,8 @@ These are out of scope, carried over from the origin:
   - A CLI remote script reads the host-held Grafana admin password and calls the service-account API on loopback, signing in once per run to stay under Grafana's lockout limit.
   - It finds or creates the Viewer service account by exact name, creates a new token and writes it to a staging file.
   - It checks the staged token against Grafana, switches the file, and checks a Grafana MCP read from inside the gate.
-  - It then deletes every other token on the account and proves each one is refused. That also clears tokens a snapshot restore brought back.
-  - If any step fails after the token was created, the script deletes the new token by id and the live file keeps its old content. A rerun therefore always converges.
+  - **The commit point is that MCP read.** If the read fails, the script restores the previous file and deletes the new token by id, and the previous token keeps serving. Any failure before the read does the same.
+  - Once the read passes, the new token stays live and is never rolled back. The script then deletes every other token on the account and proves each one is refused. That also clears tokens a snapshot restore brought back. A failed cleanup step is retried on the next run, so a rerun always converges.
   - Key material never crosses SSH or reaches the operator's terminal. Only non-secret ids are printed.
 - **The Langfuse Viewer key is the only manual creation step.** The operator creates the key in the UI over the tunnel, choosing the Viewer role explicitly. They paste it at a hidden CLI prompt, and the CLI pipes it over SSH stdin to a staging file. The CLI checks the staged key privately, then switches it into `secrets/reader-gate/langfuse-basic`. The old pair stays as `.previous` until the operator deletes it in the UI and `--confirm-old-revoked` proves Langfuse refuses it. That deletion is the second manual step. The key never travels through argv, the clipboard, a GitHub secret or a deploy input, and the deploy-input conventions test enforces the last of these.
 - **Deploy creates the reader file and the credential files only when they are absent, and never overwrites them,** the same way it treats token files. A new reader file holds a void line, and new credential files hold placeholders. If a credential is still a placeholder, its route answers `502` with a fixed reason. That is expected during setup and is not treated as an outage.
@@ -560,7 +560,7 @@ handle(req):
   - It finds or creates the service account, matching the exact name with the Viewer role.
   - It creates a new token in a staging file and checks it against Grafana. It then switches the live file and checks a Grafana MCP read through the gate's check entrypoint.
   - It lists the account's tokens and deletes every one except the new id. The previous live token's value is still on the host as `.previous`, and the script proves Grafana refuses it. A token whose value the host never held cannot be tested by authentication, so it is deleted and a read-back by id confirms it is gone.
-  - Before the switch, a failure deletes the new token by id and leaves the live file unchanged. After the switch, the new token is never rolled back. A failed cleanup step leaves the new token live, reports the token ids still to delete, and is retried on the next run. A rerun always converges.
+  - The commit point is the MCP read after the switch. Any failure up to and including that read restores the previous file, deletes the new token by id, and leaves the previous token serving. After the read passes, the new token is never rolled back. A failed cleanup step leaves it live, reports the token ids still to delete, and is retried on the next run. A rerun always converges.
   - Key material never reaches stdout. Only non-secret ids are printed.
 - **`backend status`:** reports each credential as placeholder, installed, or pending old-key revocation. It never prints a value.
 
@@ -578,6 +578,7 @@ handle(req):
 - Happy path: `backend grafana` on a fresh host creates the service account and a token, proves a routed read, and prints only ids.
 - Edge case: on a second run, the service account is reused (exact name match). Every other token on it, including one restored from a snapshot, is deleted after the new one is proven.
 - Error path: if Grafana returns an error after the new token was created but before the switch, the new token is deleted by id and the live file is unchanged. The output names the step.
+- Error path: the new token passes the direct Grafana check but fails the MCP read after the switch. The previous file is restored and the new token is deleted. The previous token still serves reads.
 - Error path: if the previous token is deleted and a later deletion or check fails, the new token still serves reads and the live file is not rolled back. The output lists the remaining ids. A rerun deletes them and converges.
 - Edge case: a rerun after an interrupted run converges to one live token, with the file pointing to it.
 - Integration: one admin sign-in per run, the admin password and keys never in argv, and one SSH session.

@@ -23,7 +23,7 @@ The deploy script materializes secrets as files on the droplet (never via argv),
 
 ## DEPLOY FLOW
 
-The deploy runs in two stages: a CI `build-images` job builds and pushes the `gateway` and `workspace` Docker images to GHCR, then the `deploy-gateway` job SSHes to the droplet to pull those images and bring up the stack. The droplet never builds images — it only pulls prebuilt artifacts.
+The deploy workflow runs `build-images` to push the `gateway` and `workspace` images to GHCR, `scan-images` to report findings for those exact digests, and `notify` to announce the approval gate on Discord from `main`. After the `gateway` environment is approved, `deploy-gateway` pulls the images and starts the stack on the droplet. The droplet never builds images — it only pulls prebuilt artifacts.
 
 ### CI: build-images job
 

@@ -325,6 +325,7 @@ describe('traces compose: health reporter', () => {
       'langfuse-worker': [3030],
       grafana: [3000],
       embedder: [8080],
+      'reader-gate': [8091],
       clickhouse: [8123],
       minio: [9000],
     }
@@ -1143,6 +1144,7 @@ const RULE_TITLES = [
   'LangfuseDown',
   'GrafanaDown',
   'EmbedderDown',
+  'ReaderGateDown',
   'VolumeSpaceWarning',
   'VolumeSpaceCritical',
   'RootSpace',
@@ -1290,6 +1292,8 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('TempoAttributeTruncation').labels.severity).toBe('info')
     // Topics is an insight feature: no trace depends on the embedder.
     expect(rule('EmbedderDown').labels.severity).toBe('warning')
+    // The reader gate serves agent reads only: its outage costs reads, never ingest.
+    expect(rule('ReaderGateDown').labels.severity).toBe('warning')
     expect(rule('VolumeSpaceWarning').labels.severity).toBe('warning')
     expect(rule('VolumeSpaceCritical').labels.severity).toBe('critical')
   })
@@ -1377,7 +1381,7 @@ describe('Grafana alerting provisioning', async () => {
       operator: '>',
       value: ((THRESHOLDS.staleAfterIntervals + 1) * THRESHOLDS.intervalMs) / 1000,
     })
-    for (const title of ['TracesTargetDown', 'LangfuseDown', 'GrafanaDown', 'EmbedderDown']) {
+    for (const title of ['TracesTargetDown', 'LangfuseDown', 'GrafanaDown', 'EmbedderDown', 'ReaderGateDown']) {
       expect(rule(title).comparison).toEqual({operator: '<', value: 1})
     }
   })
@@ -1387,6 +1391,8 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('RootSpace').expr).toBe(`${METRIC_NAMES.diskUsedRatio}{mount="root"}`)
     expect(rule('GrafanaDown').expr).toBe(`${METRIC_NAMES.probeUp}{target="grafana"}`)
     expect(rule('EmbedderDown').expr).toBe(`${METRIC_NAMES.probeUp}{target="embedder"}`)
+    expect(rule('ReaderGateDown').expr).toBe(`${METRIC_NAMES.probeUp}{target="reader-gate"}`)
+    expect(rule('ReaderGateDown').group).toBe('stack')
     expect(rule('LangfuseDown').expr).toContain(`${METRIC_NAMES.probeUp}{target=~"langfuse-web|langfuse-worker"}`)
     expect(rule('DataOlderThan31d').expr).toBe(METRIC_NAMES.oldestDataAge)
     expect(rule('ReporterStale').expr).toBe(`time() - ${METRIC_NAMES.lastRun}`)
@@ -1419,6 +1425,7 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('LangfuseDown').for).toBe('5m')
     expect(rule('GrafanaDown').for).toBe('5m')
     expect(rule('EmbedderDown').for).toBe('5m')
+    expect(rule('ReaderGateDown').for).toBe('5m')
   })
 
   // The message is fixed text, the rule's own labels and numbers. No template reads a span, a log line or a body.

@@ -160,6 +160,8 @@ interface Behaviour {
   grafana: number | 'throw'
   prometheus: number | 'throw'
   embedder: number | 'throw'
+  /** The reader gate's `/healthz`: the answer it gives, or how the request fails. */
+  reader: 'ok' | 'langfuse-down' | 'grafana-down' | 'both-down' | 'ok-false-on-200' | 'garbage' | 500 | 'throw'
   canaryPost: number | 'throw'
   /** Places absent from the ClickHouse row, or `all` when the trace never arrives. Only materialised places can be absent. */
   rowMissing: readonly CanaryPlace[] | 'all'
@@ -193,6 +195,7 @@ function defaults(): Behaviour {
     grafana: 200,
     prometheus: 200,
     embedder: 200,
+    reader: 'ok',
     canaryPost: 200,
     rowMissing: [],
     rawMissing: [],
@@ -221,6 +224,30 @@ interface Request {
 function reply(status: number | 'throw', body = ''): Response {
   if (status === 'throw') throw new TypeError('connect ECONNREFUSED internal-detail')
   return new Response(status >= 200 && status < 300 ? body : 'error body', {status})
+}
+
+/** The gate answers 503 with the same JSON body when an upstream is down, so the detail survives a non-2xx answer. */
+function readerReply(mode: Behaviour['reader']): Response {
+  const body = (langfuse: boolean, grafana: boolean): string =>
+    JSON.stringify({ok: langfuse && grafana, langfuse, grafana})
+  switch (mode) {
+    case 'ok':
+      return new Response(body(true, true), {status: 200})
+    case 'langfuse-down':
+      return new Response(body(false, true), {status: 503})
+    case 'grafana-down':
+      return new Response(body(true, false), {status: 503})
+    case 'both-down':
+      return new Response(body(false, false), {status: 503})
+    case 'ok-false-on-200':
+      return new Response(body(false, true), {status: 200})
+    case 'garbage':
+      return new Response('<html>hi</html>', {status: 200})
+    case 500:
+      return new Response('error body', {status: 500})
+    case 'throw':
+      throw new TypeError('connect ECONNREFUSED internal-detail')
+  }
 }
 
 function harness(overrides: Partial<Behaviour> = {}) {
@@ -264,6 +291,7 @@ function harness(overrides: Partial<Behaviour> = {}) {
     if (url === ENDPOINTS.grafanaHealth) return reply(behaviour.grafana, '{"database":"ok"}')
     if (url === ENDPOINTS.prometheusReady) return reply(behaviour.prometheus, 'Prometheus Server is Ready.')
     if (url === ENDPOINTS.embedderHealth) return reply(behaviour.embedder, '')
+    if (url === ENDPOINTS.readerHealth) return readerReply(behaviour.reader)
     if (url === ENDPOINTS.canaryReceiver) {
       state.posted = body
       return reply(behaviour.canaryPost, '{}')
@@ -1940,19 +1968,28 @@ describe('the monitoring checks', () => {
     ['prometheus not ready (503)', {prometheus: 503}, 'prometheus-health'],
     ['embedder unreachable', {embedder: 'throw'}, 'embedder-health'],
     ['embedder still loading its model (503)', {embedder: 503}, 'embedder-health'],
+    ['reader gate unreachable', {reader: 'throw'}, 'reader-health'],
+    ['reader gate: Langfuse unreachable from it (503)', {reader: 'langfuse-down'}, 'reader-health'],
+    ['reader gate: Grafana MCP unreachable from it (503)', {reader: 'grafana-down'}, 'reader-health'],
+    ['reader gate: neither upstream reachable (503)', {reader: 'both-down'}, 'reader-health'],
+    ['reader gate answers 200 with ok false', {reader: 'ok-false-on-200'}, 'reader-health'],
+    ['reader gate answers 500', {reader: 500}, 'reader-health'],
   ]
 
-  it('are Grafana, Prometheus and the Topics embedder, each probed at the endpoint it serves, and are not ingest checks', async () => {
-    expect([...MONITORING_CHECKS]).toEqual(['grafana-health', 'prometheus-health', 'embedder-health'])
+  it('are Grafana, Prometheus, the Topics embedder and the reader gate, each probed at the endpoint it serves, and are not ingest checks', async () => {
+    expect([...MONITORING_CHECKS]).toEqual(['grafana-health', 'prometheus-health', 'embedder-health', 'reader-health'])
     for (const id of MONITORING_CHECKS) expect((REQUIRED_CHECKS as readonly string[]).includes(id)).toBe(false)
     expect(ENDPOINTS.grafanaHealth).toBe('http://grafana:3000/api/health')
     expect(ENDPOINTS.prometheusReady).toBe('http://prometheus:9090/-/ready')
     expect(ENDPOINTS.embedderHealth).toBe('http://embedder:8080/health')
+    expect(ENDPOINTS.readerHealth).toBe('http://reader-gate:8091/healthz')
     const out = await runOnce()
     expect(check(out.detail, 'grafana-health').status).toBe('pass')
     expect(check(out.detail, 'prometheus-health').status).toBe('pass')
     expect(check(out.detail, 'embedder-health').status).toBe('pass')
+    expect(check(out.detail, 'reader-health').status).toBe('pass')
     expect(out.requests.some(entry => entry.url === ENDPOINTS.embedderHealth)).toBe(true)
+    expect(out.requests.some(entry => entry.url === ENDPOINTS.readerHealth)).toBe(true)
     expect(out.requests.some(entry => entry.url === ENDPOINTS.grafanaHealth)).toBe(true)
     expect(out.requests.some(entry => entry.url === ENDPOINTS.prometheusReady)).toBe(true)
   })
@@ -2046,8 +2083,61 @@ describe('the monitoring checks', () => {
   })
 
   it('does not leak a probe error into the detail', async () => {
-    const out = await runOnce({grafana: 'throw', prometheus: 'throw', embedder: 'throw'})
+    const out = await runOnce({grafana: 'throw', prometheus: 'throw', embedder: 'throw', reader: 'throw'})
     expect(out.detail).not.toContain('ECONNREFUSED')
+  })
+
+  // The reader gate serves agents' reads, not ingest: a dead gate says so on /healthz and in Grafana and never reaches
+  // the ingest verdict that the deploy gate and `traces ingest open` read.
+  it('a reader gate that is down fails monitoring and /healthz only, and its gauge reads 0', async () => {
+    const out = await runOnce({reader: 'throw'})
+    const detail = record(JSON.parse(out.detail), 'detail')
+    expect([detail.ok, detail.monitoringOk, detail.healthy]).toEqual([true, false, false])
+    expect(check(out.detail, 'reader-health').detail).toBe('reader gate is unhealthy (unreachable)')
+    expect(check(out.detail, 'reader-health')).toMatchObject({status: 'fail'})
+    expect(out.reporter.health().status).toBe(503)
+    const samples = exposition(out.reporter.metrics())
+    expect(samples[`${METRIC_NAMES.probeUp}{target="reader-gate"}`]).toBe(0)
+    expect(samples[`${METRIC_NAMES.probeUp}{target="grafana"}`]).toBe(1)
+  })
+
+  it('names which upstream the gate cannot reach, from its 503 answer', async () => {
+    const cases: [Partial<Behaviour>, string][] = [
+      [{reader: 'langfuse-down'}, 'reader gate is unhealthy (langfuse down, grafana up)'],
+      [{reader: 'grafana-down'}, 'reader gate is unhealthy (langfuse up, grafana down)'],
+      [{reader: 'both-down'}, 'reader gate is unhealthy (langfuse down, grafana down)'],
+      [{reader: 'ok-false-on-200'}, 'reader gate is unhealthy (langfuse down, grafana up)'],
+      [{reader: 500}, 'reader gate is unhealthy (http-500)'],
+    ]
+    for (const [overrides, detail] of cases) {
+      const out = await runOnce(overrides)
+      expect(check(out.detail, 'reader-health')).toMatchObject({status: 'fail', detail})
+    }
+    expect(check((await runOnce()).detail, 'reader-health').detail).toBe(
+      'reader gate is healthy (langfuse up, grafana up)',
+    )
+  })
+
+  it('reads an answer it cannot parse as unknown, which fails monitoring and not ingest', async () => {
+    const out = await runOnce({reader: 'garbage'})
+    const detail = record(JSON.parse(out.detail), 'detail')
+    expect(check(out.detail, 'reader-health').status).toBe('unknown')
+    expect([detail.ok, detail.monitoringOk]).toEqual([true, false])
+    expect(exposition(out.reporter.metrics())[`${METRIC_NAMES.probeUp}{target="reader-gate"}`]).toBe(0)
+  })
+
+  it('a reader gate that hangs ends within the probe limit and fails monitoring only', async () => {
+    const world = harness()
+    const reporter = createReporter({
+      ...world.deps,
+      limits: {probeTimeoutMs: 20},
+      fetch: (url, init) =>
+        url === ENDPOINTS.readerHealth ? new Promise<Response>(() => {}) : world.deps.fetch(url, init),
+    })
+    await reporter.runOnce()
+    const detail = record(JSON.parse(reporter.detail()), 'detail')
+    expect(check(reporter.detail(), 'reader-health').detail).toBe('reader gate is unhealthy (timeout)')
+    expect([detail.ok, detail.monitoringOk]).toEqual([true, false])
   })
 
   it('a monitoring failure still exports every gauge, and Grafana reads 0 on the probe gauge', async () => {
@@ -2096,6 +2186,7 @@ describe('the metrics listener', () => {
       [`${METRIC_NAMES.probeUp}{target="langfuse-worker"}`]: 1,
       [`${METRIC_NAMES.probeUp}{target="grafana"}`]: 1,
       [`${METRIC_NAMES.probeUp}{target="embedder"}`]: 1,
+      [`${METRIC_NAMES.probeUp}{target="reader-gate"}`]: 1,
       [`${METRIC_NAMES.diskUsedRatio}{mount="volume"}`]: 0.4,
       [`${METRIC_NAMES.diskUsedRatio}{mount="root"}`]: 0.3,
       [`${METRIC_NAMES.oldestDataAge}{store="clickhouse"}`]: 2 * 86_400,
@@ -2105,16 +2196,17 @@ describe('the metrics listener', () => {
     })
   })
 
-  it('reports a probe that fails as 0, whichever of the four it is', async () => {
+  it('reports a probe that fails as 0, whichever of the five it is', async () => {
     const cases: [Partial<Behaviour>, string][] = [
       [{langfuseWeb: 503}, 'langfuse-web'],
       [{langfuseWorker: 'throw'}, 'langfuse-worker'],
       [{grafana: 500}, 'grafana'],
       [{embedder: 503}, 'embedder'],
+      [{reader: 'both-down'}, 'reader-gate'],
     ]
     for (const [overrides, target] of cases) {
       const samples = exposition((await runOnce(overrides)).reporter.metrics())
-      for (const name of ['langfuse-web', 'langfuse-worker', 'grafana', 'embedder']) {
+      for (const name of ['langfuse-web', 'langfuse-worker', 'grafana', 'embedder', 'reader-gate']) {
         expect(samples[`${METRIC_NAMES.probeUp}{target="${name}"}`]).toBe(name === target ? 0 : 1)
       }
     }

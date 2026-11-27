@@ -16,10 +16,10 @@
 //                                 nothing publishes it.
 //
 // Two sets of checks, one answer each. The ingest checks (the collector, Tempo, Langfuse, the disks and the age of the
-// data) decide whether traces are received and stored; the monitoring checks (Grafana, Prometheus and the Topics embedder)
-// decide whether the stack can tell anyone when it is not, and whether its optional insight feature works. `ok` is the
-// ingest verdict, which the deploy gate and `traces ingest open` read, so a dead Grafana, Prometheus or embedder can never
-// hold or refuse healthy ingest. `/healthz` answers for both (`healthy`), so the external monitor still reports them.
+// data) decide whether traces are received and stored; the monitoring checks (Grafana, Prometheus, the Topics embedder
+// and the agent reader gate) decide whether the stack can tell anyone when it is not, and whether its optional features
+// work. `ok` is the ingest verdict, which the deploy gate and `traces ingest open` read, so a dead Grafana, Prometheus,
+// embedder or reader gate can never hold or refuse healthy ingest. `/healthz` answers for both (`healthy`), so the external monitor still reports them.
 //
 // Rules every check follows:
 //   - Fail closed. An unreachable dependency, a non-2xx, an unparsable body or a missing metric is
@@ -127,6 +127,7 @@ export const ENDPOINTS = {
   grafanaHealth: 'http://grafana:3000/api/health',
   prometheusReady: 'http://prometheus:9090/-/ready',
   embedderHealth: 'http://embedder:8080/health',
+  readerHealth: 'http://reader-gate:8091/healthz',
   clickhouse: 'http://clickhouse:8123/',
   objectStore: 'http://minio:9000',
 } as const
@@ -185,10 +186,10 @@ export const REQUIRED_CHECKS = [
 ] as const
 
 /**
- * The checks of the alerting path and of the optional Topics embedder. They fail `/healthz` and nothing else: no
- * ingest decision reads them. A verdict missing one cannot be monitoring-ok.
+ * The checks of the alerting path, of the optional Topics embedder and of the agent read gate. They fail `/healthz` and
+ * nothing else: no ingest decision reads them. A verdict missing one cannot be monitoring-ok.
  */
-export const MONITORING_CHECKS = ['grafana-health', 'prometheus-health', 'embedder-health'] as const
+export const MONITORING_CHECKS = ['grafana-health', 'prometheus-health', 'embedder-health', 'reader-health'] as const
 
 /** The scope of a check. An id nobody has classified is an ingest check, so a new check fails closed. */
 export function checkScope(id: string): CheckScope {
@@ -213,6 +214,7 @@ export const PROBE_TARGETS = {
   'langfuse-worker': 'langfuse-worker',
   grafana: 'grafana-health',
   embedder: 'embedder-health',
+  'reader-gate': 'reader-health',
 } as const
 
 export type ProbeTarget = keyof typeof PROBE_TARGETS
@@ -1251,6 +1253,45 @@ export async function checkEmbedder(deps: ReporterDeps): Promise<CheckResult> {
     : result('embedder-health', 'fail', `embedder is unhealthy (${probe.reason})`)
 }
 
+/**
+ * The reader gate's `/healthz` answers `{ok, langfuse, grafana}`: 200 when both upstreams answer and 503 with the same
+ * body when one does not. Both statuses are read, so the detail names the upstream that is down. Passing needs a 200
+ * and `ok: true`. The gate serves agent reads, never ingest, so this is a monitoring check.
+ */
+export async function checkReaderGate(deps: ReporterDeps): Promise<CheckResult> {
+  const limit = probeLimit(deps)
+  try {
+    return await bounded(async () => {
+      const response = await deps.fetch(ENDPOINTS.readerHealth, {signal: AbortSignal.timeout(limit)})
+      const answer = readReaderHealth(await response.text())
+      if (answer === undefined) {
+        return response.ok
+          ? result('reader-health', 'unknown', 'reader gate health answer unreadable')
+          : result('reader-health', 'fail', `reader gate is unhealthy (http-${response.status})`)
+      }
+      const upstreams = `langfuse ${answer.langfuse ? 'up' : 'down'}, grafana ${answer.grafana ? 'up' : 'down'}`
+      return response.ok && answer.ok
+        ? result('reader-health', 'pass', `reader gate is healthy (${upstreams})`)
+        : result('reader-health', 'fail', `reader gate is unhealthy (${upstreams})`)
+    }, limit)
+  } catch (error) {
+    return result('reader-health', 'fail', `reader gate is unhealthy (${failureReason(error)})`)
+  }
+}
+
+function readReaderHealth(text: string): {ok: boolean; langfuse: boolean; grafana: boolean} | undefined {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+  const {ok, langfuse, grafana} = parsed as Record<string, unknown>
+  if (typeof ok !== 'boolean' || typeof langfuse !== 'boolean' || typeof grafana !== 'boolean') return undefined
+  return {ok, langfuse, grafana}
+}
+
 // ─── ClickHouse (read-only user) ──────────────────────────────────────────────
 
 async function queryClickHouse(
@@ -1602,13 +1643,14 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
       return [ready, ...evaluated.results]
     }),
     guarded(['langfuse-web', 'langfuse-worker'], () => checkLangfuse(deps)),
-    guarded(['grafana-health', 'prometheus-health', 'embedder-health'], async () => {
-      const [grafana, prometheus, embedder] = await Promise.all([
+    guarded(MONITORING_CHECKS, async () => {
+      const [grafana, prometheus, embedder, reader] = await Promise.all([
         checkGrafana(deps),
         checkPrometheus(deps),
         checkEmbedder(deps),
+        checkReaderGate(deps),
       ])
-      return [grafana, prometheus, embedder]
+      return [grafana, prometheus, embedder, reader]
     }),
     guarded(['volume-space', 'root-space'], async () => {
       const [sentinel, volume, root] = await Promise.all([

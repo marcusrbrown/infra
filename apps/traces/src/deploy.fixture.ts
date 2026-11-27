@@ -60,6 +60,7 @@ const READ_ONLY_STEPS: readonly RegExp[] = [
   /^grafana-signin$/,
   /^grafana-alerting$/,
   /^probe-ingest$/,
+  /^probe-agent-routes$/,
   /^retention-read-/,
   /^raw:reporter-detail$/,
 ]
@@ -128,6 +129,10 @@ export interface FakeOptions {
    * What Grafana's provisioning API says about alerting: everything the files define (default), or one thing wrong.
    */
   alerting?: 'no-contact-point' | 'wrong-type' | 'no-group' | 'partial-group' | 'http-401'
+  /**
+   * What the two agent routes answer to a request without a token, instead of 401 on both. `0` is no answer in time.
+   */
+  agentRoutes?: Partial<Record<'langfuse' | 'grafana', number>>
 }
 
 export class FakeHost {
@@ -149,6 +154,10 @@ export class FakeHost {
   tokens = new Map<string, string | undefined>()
   /** Owner and mode of a token file, by group, as `fileAttrs`. Only creating a token file ever sets one. */
   tokenAttrs = new Map<string, string>()
+  /** The reader files (`token`, `langfuse`, `grafana`), by kind. `undefined` is absent. */
+  readerFiles = new Map<string, string | undefined>()
+  /** Owner and mode of a reader file, as `fileAttrs`. Creating one sets it; so does the repair of an existing one. */
+  readerAttrs = new Map<string, string>()
   pendingRestarts: string[] = []
   /** The deploy marker's content, when it exists. */
   marker: string | undefined
@@ -381,6 +390,27 @@ export class FakeHost {
           return ok('TRACES_TOKEN_CREATED\n')
         }
         return ok('TRACES_TOKEN_PRESENT\n')
+      }
+      case step.startsWith('reader-file:'): {
+        const kind = step.slice('reader-file:'.length)
+        // What the script's own chown and chmod on the existing file (`$f`) would set, and what it writes into a new one.
+        const repaired = `${(/\bchown (\S+) "\$f"/.exec(command)?.[1] ?? 'unset:unset').replaceAll('root', '0')} ${Number.parseInt(/\bchmod (\d+) "\$f"/.exec(command)?.[1] ?? '0', 8).toString(8)}`
+        if (this.readerFiles.get(kind) === undefined) {
+          // The token file's script ends its line with `\n`; a credential's writes the bare value.
+          const bare = !command.includes(String.raw`%s\n`)
+          this.readerFiles.set(kind, bare ? stdin.replace(/\n+$/, '') : `${stdin.trimEnd()}\n`)
+          this.readerAttrs.set(kind, attributesOf(command))
+          return ok('TRACES_READER_FILE_CREATED\n')
+        }
+        this.readerAttrs.set(kind, repaired)
+        return ok('TRACES_READER_FILE_PRESENT\n')
+      }
+      case step === 'probe-agent-routes': {
+        const codes = {langfuse: 401, grafana: 401, ...this.options.agentRoutes}
+        const lines = (['langfuse', 'grafana'] as const).map(
+          route => `TRACES_AGENT_CODE ${route} ${String(codes[route]).padStart(3, '0')}`,
+        )
+        return ok(`${lines.join('\n')}\nTRACES_AGENT_ROUTES_PROBED\n`)
       }
       case step === 'token-dirs': {
         const counting = command.includes('awk')
@@ -624,10 +654,12 @@ export class FakeHost {
     ]
     const passes = (check: {status: string}): boolean => check.status === 'pass' || check.status === 'warn'
     const checks = this.checksFor(required).map(check => ({...check, scope: 'ingest'}))
-    const monitoring = this.checksFor(['grafana-health', 'prometheus-health', 'embedder-health']).map(check => ({
-      ...check,
-      scope: 'monitoring',
-    }))
+    const monitoring = this.checksFor(['grafana-health', 'prometheus-health', 'embedder-health', 'reader-health']).map(
+      check => ({
+        ...check,
+        scope: 'monitoring',
+      }),
+    )
     const allPass = checks.every(passes)
     return {
       schemaVersion: 1,
@@ -810,6 +842,8 @@ export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): T
     run: host.run,
     resolve: async () => ['198.51.100.7'],
     readFile: async relative => `# ${relative}\n`,
+    // A gate directory as the deploy meets it: sources, a test and the test support module, which are not uploaded.
+    listFiles: async () => ['main.ts', 'server.ts', 'server.test.ts', 'testing.ts', 'README.md'],
     materializeIdentity: () => {
       identityPaths.push('/scratch/id')
       return {path: '/scratch/id', cleanup: () => cleaned.push('identity')}

@@ -742,7 +742,7 @@ handle(req):
 | A heavy agent query slows ingest | Per-consumer and global concurrency caps plus a deadline. The existing ingest-loss and 503 alerts catch harm. |
 | A Bun 1.4.x streaming bug truncates responses | Both upstreams answer with JSON. Integration tests cover delayed-first-byte and cancel cases, and the Bun patch is pinned. |
 | Grafana lockout from the CLI's admin sign-in | One sign-in per run, never a probe with a wrong password. |
-| The raised Caddy write timeout weakens slow-response protection for ingest | 75 s is still bounded. Ingest bodies stay capped at 4.5 MiB. |
+| The raised Caddy write timeout weakens slow-response protection for ingest | 110 s is still bounded. Ingest bodies stay capped at 4.5 MiB. |
 | Other backend containers can reach `grafana-mcp` without the gate | Accepted. Only trusted stack services share `backend`. |
 | The rollout deploy holds ingest | Accepted in the origin (R13). Senders retry `503`. |
 

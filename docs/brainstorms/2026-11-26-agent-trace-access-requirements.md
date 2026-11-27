@@ -163,7 +163,7 @@ flowchart LR
 - **MCP plus GET-only read API.** The MCP server has no trace or session tools. The read API covers them and is what the Langfuse CLI and its agent skill use.
 - **Read-only in v1.** Langfuse has no role between Viewer and Member, and Member would also let agents write prompts, datasets and eval rules.
 - **Named consumers, not every sending repository.** Three tokens keep adding and revoking manageable. Adding a consumer is one command.
-- **Repository secret for CI tokens, passed only to scheduled and dispatched jobs.** The single operator controls both consumer repositories' workflows. A main-only GitHub Environment per repository was the alternative, and it was not needed.
+- **Repository secret for CI tokens, passed only to scheduled and dispatched jobs.** The single operator controls both consumer repositories' workflows. A main-only GitHub Environment per repository was the alternative. The operator accepted the gap it would close: a `workflow_dispatch` run on an unreviewed branch also receives the secret.
 - **Bounded read load instead of zero impact.** Reads share ClickHouse and Tempo with ingest, so "never slows ingest" cannot be guaranteed. Reader failures are kept out of the ingest path. Load is bounded per token, and the existing ingest alerts catch harm.
 
 ---

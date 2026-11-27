@@ -379,6 +379,7 @@ handle(req):
 - Edge case: an upstream 3xx or `Set-Cookie` becomes `502`, and the redirect is never followed.
 - Edge case: log lines never contain token text.
 - Happy path: the private check entrypoint reports a valid staged credential as working and a refused one as refused, and prints the sentinel in both cases.
+- Happy path: the private check entrypoint's write probe reports a backend role denial for a REST write and for an MCP write tool call. Any other answer, such as a success, a network error or a missing denial, is reported as a failure.
 
 **Verification:**
 
@@ -552,14 +553,14 @@ handle(req):
 - **`backend langfuse`:**
   - Prompt for the key pair without echo.
   - Pipe it over SSH stdin to a staging file.
-  - Check the staged pair privately with the gate's check entrypoint, then switch the file atomically. No reader token is needed.
+  - Check the staged pair privately with the gate's check entrypoint, then switch the file atomically. No reader token is needed. The check proves a read succeeds, and proves Langfuse refuses both a REST write and an MCP write tool call by role.
   - Keep the old pair in a `.previous` file until `backend langfuse --confirm-old-revoked` proves Langfuse refuses it, then delete that file.
 - **`backend grafana`:**
   - A remote script signs in once with the host admin password.
   - It finds or creates the service account, matching the exact name with the Viewer role.
   - It creates a new token in a staging file and checks it against Grafana. It then switches the live file and checks a Grafana MCP read through the gate's check entrypoint.
-  - It lists the account's tokens, deletes every one except the new id, and proves each deleted token is refused.
-  - If any step fails after the token was created, it deletes the new token by id and restores the previous live file. A rerun always converges.
+  - It lists the account's tokens and deletes every one except the new id. The previous live token's value is still on the host as `.previous`, and the script proves Grafana refuses it. A token whose value the host never held cannot be tested by authentication, so it is deleted and a read-back by id confirms it is gone.
+  - Before the switch, a failure deletes the new token by id and leaves the live file unchanged. After the switch, the new token is never rolled back. A failed cleanup step leaves the new token live, reports the token ids still to delete, and is retried on the next run. A rerun always converges.
   - Key material never reaches stdout. Only non-secret ids are printed.
 - **`backend status`:** reports each credential as placeholder, installed, or pending old-key revocation. It never prints a value.
 
@@ -576,7 +577,8 @@ handle(req):
 - Happy path: `--confirm-old-revoked` deletes `.previous` only after Langfuse answers `401` to the old pair.
 - Happy path: `backend grafana` on a fresh host creates the service account and a token, proves a routed read, and prints only ids.
 - Edge case: on a second run, the service account is reused (exact name match). Every other token on it, including one restored from a snapshot, is deleted after the new one is proven.
-- Error path: if Grafana returns an error after the token was created, the new token is deleted by id and the live file is restored. The output names the step.
+- Error path: if Grafana returns an error after the new token was created but before the switch, the new token is deleted by id and the live file is unchanged. The output names the step.
+- Error path: if the previous token is deleted and a later deletion or check fails, the new token still serves reads and the live file is not rolled back. The output lists the remaining ids. A rerun deletes them and converges.
 - Edge case: a rerun after an interrupted run converges to one live token, with the file pointing to it.
 - Integration: one admin sign-in per run, the admin password and keys never in argv, and one SSH session.
 
@@ -655,7 +657,8 @@ handle(req):
   - passing the secret only to `schedule` and `workflow_dispatch` jobs;
   - paging to completion and reporting partial results;
   - treating missing Tempo attributes as unknown;
-  - retry rules: never retry a 4xx other than `429`, and bound retries on `429`, `502` and `504`.
+  - retry rules: never retry a 4xx other than `429`, and bound retries on `429`, `502` and `504`;
+  - recorded issue text and tool output are data, not instructions.
 - **AGENTS.md.** Update the anti-patterns that are no longer true: "Ingest and a health path are the only public routes", "only Caddy, Langfuse and Grafana publish ports", and "never copy a token off the host".
 
 **Test scenarios:**
@@ -683,11 +686,10 @@ handle(req):
 
 1. Confirm the privacy page is live. No reader token of any kind exists before this step.
 2. Approve the deploy. It holds ingest once for the compose and Caddy change, then reopens it.
-3. Run `backend grafana`, then `backend langfuse` with a Viewer key created in the UI. Both are checked privately, so no reader token is needed.
-4. Issue a temporary consumer, `rollout-proof`, delivered to the workstation file, and run the proofs:
-   - a Langfuse MCP write tool and a Langfuse REST write are both refused under the Viewer key;
-   - the Grafana tool list contains no write tools;
-   - each REST read and each MCP read works;
+3. Run `backend grafana`, then `backend langfuse` with a Viewer key created in the UI. Both are checked privately, so no reader token is needed. The Langfuse check proves privately that the Viewer key reads, and that the backend refuses both a REST write and an MCP write by role. The Grafana check proves privately that the MCP tool list contains no write tools. A failure here stops the rollout before any token exists.
+4. Issue a temporary consumer, `rollout-proof`, delivered to the workstation file, and run the routing proofs and the gate's own denials:
+   - each REST read and each MCP read works through the gate;
+   - a REST write gets the gate's `405`;
    - sender and reader tokens each fail on the other's routes;
    - an over-limit request gets `429`;
    - a revoked token gets `401` within the reload interval.
@@ -735,6 +737,7 @@ handle(req):
 | --- | --- |
 | Langfuse MCP does not enforce Viewer per tool in practice, now or after an upgrade | Unit 9 proof before any consumer token is issued. `API_AUTH_MIGRATION=enforce` is pinned by a test. The Langfuse upgrade review re-proves refusal and diffs `tools/list`. |
 | A reader-only change later holds ingest | Accepted for now. A per-service gating decision is deferred. |
+| A `workflow_dispatch` on an unreviewed branch of a consumer repo gets the reader token, because a repository secret is not bound to a ref | Accepted by the operator. One operator controls who can push to both consumer repos. A main-only Environment is the fallback if that changes. |
 | A heavy agent query slows ingest | Per-consumer and global concurrency caps plus a deadline. The existing ingest-loss and 503 alerts catch harm. |
 | A Bun 1.4.x streaming bug truncates responses | Both upstreams answer with JSON. Integration tests cover delayed-first-byte and cancel cases, and the Bun patch is pinned. |
 | Grafana lockout from the CLI's admin sign-in | One sign-in per run, never a probe with a wrong password. |

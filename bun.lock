@@ -96,7 +96,7 @@
     },
     "packages/cli": {
       "name": "@marcusrbrown/infra",
-      "version": "0.30.5",
+      "version": "0.30.6",
       "bin": {
         "infra": "./dist/cli.js",
       },

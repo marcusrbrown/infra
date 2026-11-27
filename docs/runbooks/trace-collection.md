@@ -4,15 +4,22 @@ Day-2 procedures for the trace collection stack at `traces.fro.bot`: health chec
 
 Commands run from a checkout whose `bun install` is current. CLI commands reach the host as `root` over SSH with the host keys pinned in `.github/known_hosts`, using your SSH agent or `TRACES_SSH_KEY`. The host comes from `TRACES_HOST`, and defaults to `traces.fro.bot`.
 
-A few steps use plain `ssh`. Raw `ssh` does not read `TRACES_SSH_KEY` from the environment as the CLI does. Save the private key that `TRACES_SSH_KEY` holds to a local file with mode 0600 (for example `~/.ssh/traces`), then define this helper in the shell, from the repository root:
+A few steps use plain `ssh`. Raw `ssh` does not read `TRACES_SSH_KEY` from the environment as the CLI does. Define this helper in the shell (bash or zsh), from the repository root. Each call writes the key that `TRACES_SSH_KEY` holds in the root `.env` to a fresh mode-0600 temporary file and removes it afterwards:
 
 ```bash
 traces_ssh() {
-  ssh -i ~/.ssh/traces -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=.github/known_hosts root@traces.fro.bot "$@"
+  local key rc
+  key=$(mktemp) || return 1
+  chmod 600 "$key"
+  bun --env-file=.env -e 'process.stdout.write(process.env.TRACES_SSH_KEY + "\n")' > "$key"
+  ssh -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=.github/known_hosts root@traces.fro.bot "$@"
+  rc=$?
+  rm -f "$key"
+  return $rc
 }
 ```
 
-`IdentitiesOnly=yes` offers only the key given with `-i`. `StrictHostKeyChecking=yes` with the pinned file refuses an unknown or changed host key. Later steps call `traces_ssh '<command>'`.
+The trailing newline matters: a key without one is refused. `IdentitiesOnly=yes` offers only the key given with `-i`. `StrictHostKeyChecking=yes` with the pinned file refuses an unknown or changed host key. Later steps call `traces_ssh '<command>'`.
 
 ---
 
@@ -462,12 +469,16 @@ Run these in order the first time. A failure at any step stops the rollout befor
    done
    ```
 
-   Prove the rate limit. This sends 130 reads in a row; at least one answer must be `429`, with a `Retry-After`:
+   Prove the rate limit. The limit is a fixed 60-second window, so a request sent after the burst can land in a fresh window; the loop reads the headers of each answer and stops at the first `429`, which must carry a `Retry-After`. It sends at most 250 reads:
 
    ```bash
-   for i in $(seq 1 130); do reader_curl "$O/agent/langfuse/api/public/health"; done | sort | uniq -c
-   printf 'header = "Authorization: Bearer %s"\n' "$(cat "$F")" | curl -sS -K - -D - -o /dev/null "$O/agent/langfuse/api/public/health" | grep -i '^retry-after'
+   for i in $(seq 1 250); do
+     h=$(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$F")" | curl -sS -K - -D - -o /dev/null "$O/agent/langfuse/api/public/health")
+     if printf '%s' "$h" | grep -q '^HTTP/[0-9.]* 429'; then echo "429 at request $i"; printf '%s' "$h" | grep -i '^retry-after'; break; fi
+   done
    ```
+
+   It prints `429 at request <n>` and a `retry-after: <seconds>` line. No output means no request was refused: the limit does not hold.
 
    Every answer above must match its comment. A failure stops the rollout: go to step 5, then fix the cause.
 

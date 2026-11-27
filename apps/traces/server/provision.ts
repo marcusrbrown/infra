@@ -1252,7 +1252,7 @@ src=$(findmnt -n -o SOURCE --mountpoint ${mnt})
 if [ -z "$src" ]; then echo TRACES_NOT_MOUNTED; exit 1; fi
 dir=${dir}
 file=${file}
-IFS= read -r vl
+IFS= read -r vl || [ -n "$vl" ]
 case "$vl" in ${TRACES_VOID_TOKEN_PREFIX}*) ;; *) echo TRACES_READER_VOID_INVALID; exit 1 ;; esac
 if [ -L "$dir" ]; then echo TRACES_READER_PATH_SYMLINK; exit 1; fi
 mkdir -p "$dir"
@@ -1766,7 +1766,7 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     // Before the Tempo scan, so a failed scan never leaves reader tokens a snapshot brought back. A restored reader
     // file may hold tokens revoked since the snapshot; the file is made deny-all whatever it held, or was missing.
     try {
-      await runStep(exec, 'reader token purge', readerPurgeScript(), [READER_PURGED], voidLine)
+      await runStep(exec, 'reader token purge', readerPurgeScript(), [READER_PURGED], `${voidLine}\n`)
     } catch (error) {
       throw new Error(
         `${causeOf(error)}. Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${newName} is attached and mounted and the reader token file ${TRACES_READER_TOKEN_FILE} was not confirmed void. Write one void line to it by hand (root:${READER_GATE_USER_ID}, mode 0640) and do not run the restore again: it would start another restore from this volume.`,

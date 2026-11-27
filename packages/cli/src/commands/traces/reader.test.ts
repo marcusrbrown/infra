@@ -21,6 +21,7 @@ import {
   CONSUMER_PATTERN,
   DEFAULT_READER_SECRET_NAME,
   defaultWorkstationFile,
+  READER_CONSUMER_EXISTS_SENTINEL,
   READER_LOCK_BUSY_SENTINEL,
   READER_REMOTE,
   READER_ROUTES,
@@ -545,6 +546,34 @@ describe('traces reader add', () => {
     expect(world.ghCalls()).toHaveLength(0)
   })
 
+  // Mutation target: with the recheck gone, two fresh adds for one consumer can both pass the read.
+  it('refuses a fresh add that loses a race: a line for the consumer lands between the read and the append', async () => {
+    const world = createWorld()
+    const deps = makeDeps(world)
+    const racing = readerLine(OLD_A, 'systematic')
+    deps.spawn = (argv, options) => {
+      if (argv.at(-1) === READER_REMOTE.append) writeFileSync(world.path, world.file() + racing)
+      return world.spawn(argv, options)
+    }
+    const outcome = await add(world, 'systematic', ghOptions(), deps)
+    expect(outcome.exit).toBe(1)
+    expect(outcome.stderr).toContain('already has a reader token')
+    expect(outcome.stderr).toContain('--replace')
+    expect(outcome.stderr).not.toContain('did not confirm')
+    expect(world.file()).toContain(racing)
+    expect(world.file()).not.toContain(NEXT_TOKEN)
+    // The new token never reached the file, so nothing was revoked and nothing was delivered.
+    expect(world.calls.filter(call => call.command === READER_REMOTE.remove)).toHaveLength(0)
+    expect(world.ghCalls()).toHaveLength(0)
+  })
+
+  it('--replace tells the host it is a replacement, so the append does not refuse', async () => {
+    const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
+    await add(world, 'systematic', {...ghOptions(), replace: true}, makeDeps(world), [NEXT_TOKEN, OLD_A])
+    const append = world.calls.find(call => call.command === READER_REMOTE.append)
+    expect(append?.stdin?.split('\n')[1]).toBe('replace')
+  })
+
   it('proves over ssh from the host when the public route does not answer as the gate does', async () => {
     for (const publicRoute of ['down', 'broken'] as const) {
       const world = createWorld({publicRoute})
@@ -636,6 +665,39 @@ describe('traces reader add: workstation delivery', () => {
     expect(statSync(path).mode & 0o777).toBe(0o600)
     expect(readdirSync(join(deps.homeDir ?? '', '.config', 'infra'))).toEqual(['traces-reader-workstation.token'])
     expect(world.accepts(OLD_A)).toBe(false)
+  })
+
+  // Mutation target: a fixed `.new` opened `wx` meant one interrupted run blocked every retry.
+  it('--replace is not blocked by a stale staging file from an interrupted run', async () => {
+    const world = createWorld({file: readerLine(OLD_A, 'workstation') + voidLine(2)})
+    const deps = makeDeps(world)
+    const path = defaultWorkstationFile(deps.homeDir ?? '', 'workstation')
+    const dir = join(deps.homeDir ?? '', '.config', 'infra')
+    mkdirSync(dir, {recursive: true})
+    writeFileSync(path, OLD_A, {mode: 0o600})
+    writeFileSync(`${path}.new`, 'stale', {mode: 0o600})
+
+    const outcome = await add(world, 'workstation', {replace: true}, deps, [NEXT_TOKEN, OLD_A])
+
+    expect(outcome.exit).toBeNull()
+    expect(readFileSync(path, 'utf8')).toBe(NEXT_TOKEN)
+    expect(statSync(path).mode & 0o777).toBe(0o600)
+    expect(readdirSync(dir).sort()).toEqual(['traces-reader-workstation.token', 'traces-reader-workstation.token.new'])
+  })
+
+  it('--replace leaves no staging file behind when the final rename fails', async () => {
+    const world = createWorld({file: readerLine(OLD_A, 'workstation') + voidLine(2)})
+    const deps = makeDeps(world)
+    const dir = join(deps.homeDir ?? '', 'out')
+    // A directory at the destination: it exists, so this is a replacement, and a file cannot be renamed over it.
+    const path = join(dir, 'token')
+    mkdirSync(path, {recursive: true})
+
+    const outcome = await add(world, 'workstation', {replace: true, file: path}, deps, [NEXT_TOKEN, OLD_A])
+
+    expect(outcome.exit).toBe(1)
+    expect(outcome.stderr).toContain('could not be written')
+    expect(readdirSync(dir)).toEqual(['token'])
   })
 
   it('refuses a file inside a git checkout', async () => {
@@ -1110,6 +1172,44 @@ describe('host scripts, run under a real sh', () => {
         expect(world.file()).toBe(before)
       }
       expect(stray(world)).toEqual([])
+    })
+
+    it('refuses a fresh add when the file already has a line for the consumer, under the lock, and touches nothing', () => {
+      const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
+      const before = world.file()
+      for (const stdin of [newLine, `${newLine}fresh\n`, `${newLine}anything-else\n`]) {
+        const result = run1(world, READER_REMOTE.append, stdin)
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stdout.split('\n')).toContain(READER_CONSUMER_EXISTS_SENTINEL)
+        expect(result.stdout).not.toContain(readerSentinel('append'))
+        expect(world.file()).toBe(before)
+      }
+      expect(stray(world)).toEqual([])
+    })
+
+    it('refuses a fresh add when the consumer line is the last one and has no trailing newline', () => {
+      const world = createWorld({file: voidLine(2) + readerLine(OLD_A, 'systematic').trimEnd()})
+      const before = world.file()
+      const result = run1(world, READER_REMOTE.append, newLine)
+      expect(result.stdout.split('\n')).toContain(READER_CONSUMER_EXISTS_SENTINEL)
+      expect(world.file()).toBe(before)
+    })
+
+    it('does not refuse a fresh add for a consumer the file only resembles', () => {
+      const world = createWorld({file: readerLine(OLD_A, 'systematic-two') + readerLine(OLD_B, 'other') + voidLine(2)})
+      const existing = world.file()
+      const result = run1(world, READER_REMOTE.append, newLine)
+      expect(result.exitCode).toBe(0)
+      expect(world.file()).toBe(existing + newLine)
+    })
+
+    it('appends beside the consumer’s existing line when the stdin says replace', () => {
+      const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
+      const existing = world.file()
+      const result = run1(world, READER_REMOTE.append, `${newLine}replace\n`)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout).toContain(readerSentinel('append'))
+      expect(world.file()).toBe(existing + newLine)
     })
 
     it('leaves no temporary file behind when it fails', () => {

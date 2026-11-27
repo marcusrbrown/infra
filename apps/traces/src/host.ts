@@ -148,7 +148,7 @@ export const GRAFANA_MCP_USER_ID = 1000
 
 /**
  * The reader gate's deadline to the first response header from an upstream, in milliseconds. The gate answers 504 after it.
- * Caddy's response-header timeout on the agent routes and its server write timeout must both stay above it, or Caddy
+ * Caddy's response-header timeout on the agent routes and its server write timeout must both stay above it (the write timeout also covers `read_body` plus the gate's `RESPONSE_DEADLINE_MS`), or Caddy
  * would cut off the gate's own answer; `config/Caddyfile.test.ts` pins that rule against this value.
  */
 export const READER_GATE_DEADLINE_MS = 60_000

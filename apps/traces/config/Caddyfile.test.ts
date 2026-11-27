@@ -2,6 +2,7 @@ import {readdirSync} from 'node:fs'
 
 import {describe, expect, it} from 'bun:test'
 
+import {RESPONSE_DEADLINE_MS} from '../reader-gate/constants'
 import {READER_GATE_DEADLINE_MS} from '../src/host'
 
 // The three ingest states are produced by Caddy itself: the Caddyfile imports
@@ -356,12 +357,18 @@ describe('traces Caddyfile: agent routes', () => {
   // Caddy's server timeouts apply to every route. The gate gives an upstream up to its deadline to send headers, so
   // Caddy's response-header timeout on these routes and its server write timeout must outlast it, in that order: the gate
   // answers 504 first, and Caddy still has time to write that answer. Only the dial timeout stays short.
+  //
+  // Go's http.Server WriteTimeout is measured from the end of reading the request headers, so the write timeout also has
+  // to cover read_body plus the gate's whole response budget (RESPONSE_DEADLINE_MS, which runs to the end of the body).
   it('keeps Caddy’s response-header and write timeouts above the gate deadline, with a short dial timeout', async () => {
     const deadline = READER_GATE_DEADLINE_MS / 1000
     const blocks = agentBlocks(await render('open'))
     expect(blocks).toHaveLength(AGENT_ROUTES.length)
     const [write] = seconds(main, 'write')
+    const [readBody] = seconds(main, 'read_body')
+    expect(readBody).toBeDefined()
     expect(write).toBeGreaterThan(deadline)
+    expect(write).toBeGreaterThan((readBody ?? Number.POSITIVE_INFINITY) + RESPONSE_DEADLINE_MS / 1000)
     for (const block of blocks) {
       expect(seconds(block.body, 'dial_timeout')).toHaveLength(1)
       expect(seconds(block.body, 'dial_timeout')[0]).toBeLessThanOrEqual(5)

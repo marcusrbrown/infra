@@ -212,7 +212,7 @@ These are out of scope, carried over from the origin:
 
   Other upstream statuses pass through unchanged. The contract tells consumers never to retry a 4xx other than `429`, and to bound their retries on `429`, `502` and `504`.
 
-- **Timeouts.** The Caddy server write timeout and the agent routes' response-header timeout must both stay above the gate deadline. The starting values are a 60 s deadline, a 70 s response-header timeout and a 75 s write timeout, and only the dial timeout stays short. Caddy's server timeouts apply to every route. Ingest bodies are capped at 4.5 MiB, so the looser write timeout costs ingest little. A test pins the rule, not just the numbers.
+- **Timeouts.** The Caddy server write timeout and the agent routes' response-header timeout must both stay above the gate deadline. The starting values are a 60 s deadline, a 70 s response-header timeout and a 110 s write timeout, and only the dial timeout stays short. Caddy's server timeouts apply to every route. Ingest bodies are capped at 4.5 MiB, so the looser write timeout costs ingest little. A test pins the rule, not just the numbers.
 - **The agent routes sit outside the ingest-state imports.** They stay up while ingest is held or off. `Caddyfile.test.ts` gains a separate contract for them. The bans on naming Langfuse or Grafana upstreams still apply to every other route.
 - **Networks.**
   - `reader-gate` joins `edge` (Caddy, langfuse-web) and `backend` (grafana-mcp).

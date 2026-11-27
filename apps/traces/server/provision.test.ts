@@ -2495,6 +2495,8 @@ async function runPurge(
     existing?: string | null
     dirMissing?: boolean
     stdin?: string
+    /** The exact bytes on stdin, with no newline added. Wins over `stdin`. */
+    rawStdin?: string
     mounted?: boolean
     symlinkDir?: boolean
   } = {},
@@ -2523,7 +2525,7 @@ async function runPurge(
 
     const proc = Bun.spawn(['bash', '-o', 'pipefail', '-c', readerPurgeScript({dir, file, mount: root})], {
       env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
-      stdin: new TextEncoder().encode(`${options.stdin ?? PURGE_VOID_LINE}\n`),
+      stdin: new TextEncoder().encode(options.rawStdin ?? `${options.stdin ?? PURGE_VOID_LINE}\n`),
       stdout: 'pipe',
       stderr: 'pipe',
     })
@@ -2587,6 +2589,21 @@ describe('readerPurgeScript, run against real files in a temp directory', () => 
 
   it('refuses a line that is not a void line, before touching the file', async () => {
     const result = await runPurge({existing: READER_REAL_LINE, stdin: READER_REAL_LINE.trim()})
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toBe('TRACES_READER_VOID_INVALID')
+    expect(result.content).toBe(READER_REAL_LINE)
+  })
+
+  // A bare `read` returns nonzero at EOF without a newline, and `set -e` would stop before the rename.
+  it('purges when the void line arrives with no trailing newline', async () => {
+    const result = await runPurge({existing: READER_REAL_LINE, rawStdin: PURGE_VOID_LINE})
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe('TRACES_READER_PURGED')
+    expect(result.content).toBe(`${PURGE_VOID_LINE}\n`)
+  })
+
+  it('still refuses a final line that is not a void line when it has no trailing newline', async () => {
+    const result = await runPurge({existing: READER_REAL_LINE, rawStdin: READER_REAL_LINE.trim()})
     expect(result.exitCode).toBe(1)
     expect(result.stdout).toBe('TRACES_READER_VOID_INVALID')
     expect(result.content).toBe(READER_REAL_LINE)
@@ -2661,9 +2678,23 @@ describe('runRestore: purging reader tokens on the restored volume', () => {
     ])
     expect(world.host.readerState).toBe('deny-all')
     expect(world.host.readerPurgeInputs).toHaveLength(1)
-    expect(world.host.readerPurgeInputs[0]).toMatch(/^trc_void_[\w-]{43} void 2026-11-20T15:30:00\.000Z\n?$/)
+    expect(world.host.readerPurgeInputs[0]).toMatch(/^trc_void_[\w-]{43} void 2026-11-20T15:30:00\.000Z\n$/)
     expect(purgeCommand(world)).toContain(TRACES_READER_TOKEN_FILE)
     expect(logs.join('\n')).toContain(TRACES_READER_TOKEN_FILE)
+  })
+
+  // Mutation target: a record with no newline made the real script exit at `read` before the rename.
+  it('sends bytes the real purge script accepts: the exact stdin of the restore, run in a real shell', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, readerTokens: 'real'})
+    const {deps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, withRandom(deps))
+    const sent = world.host.readerPurgeInputs[0]
+    expect(sent).toBeDefined()
+    const result = await runPurge({existing: READER_REAL_LINE, rawStdin: sent ?? ''})
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe('TRACES_READER_PURGED')
+    expect(result.content).toBe(sent ?? '')
+    expect(result.content).not.toContain(READER_REAL)
   })
 
   // Mutation target: a token in argv shows in the process list.

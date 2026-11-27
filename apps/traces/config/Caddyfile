@@ -25,16 +25,17 @@
 # measured on loopback.
 #
 # The agent routes are the exception: a read can take as long as the gate's deadline (60 s) before the
-# gate answers 504. Their response-header timeout (70 s) and the server write timeout (75 s) stay above
-# it, in that order, or Caddy would cut off the gate's own answer. The write timeout applies to every
-# route; ingest bodies are capped at 4.5 MiB, so the looser value costs ingest little. A test pins the
-# rule against READER_GATE_DEADLINE_MS in src/host.ts.
+# gate answers 504. Their response-header timeout (70 s) stays above it. The server write timeout (110 s)
+# is measured from the end of the request headers, so it must exceed read_body (15 s) plus the gate's
+# whole response budget (90 s), or Caddy would cut off the gate's own answer. It applies to every route;
+# ingest bodies are capped at 4.5 MiB, so the looser value costs ingest little. A test pins the rule
+# against READER_GATE_DEADLINE_MS in src/host.ts and RESPONSE_DEADLINE_MS in reader-gate/constants.ts.
 {
 	servers {
 		timeouts {
 			read_header 5s
 			read_body 15s
-			write 75s
+			write 110s
 			idle 60s
 		}
 	}

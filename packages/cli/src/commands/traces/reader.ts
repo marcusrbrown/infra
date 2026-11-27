@@ -3,6 +3,7 @@ import type {ActionCtx} from '../../lib/action-ctx'
 import type {FetchLike} from './ingest'
 import type {RemoteDeps, RemoteResult, RunRemoteOptions} from './remote'
 
+import {randomBytes} from 'node:crypto'
 import {chmodSync, closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, writeSync} from 'node:fs'
 import {dirname, join, resolve} from 'node:path'
 
@@ -92,6 +93,9 @@ export const readerSentinel = (op: ReaderOp): string => `TRACES_READER_${op.toUp
 /** What a token script prints, and exits non-zero, when the reader lock was not free within 30 seconds. */
 export const READER_LOCK_BUSY_SENTINEL = 'TRACES_READER_LOCK_BUSY'
 
+/** What `append` prints, and exits non-zero, when a fresh add finds a line for the consumer already in the file. */
+export const READER_CONSUMER_EXISTS_SENTINEL = 'TRACES_READER_CONSUMER_EXISTS'
+
 const ENTRY_PREFIX = 'TRACES_READER '
 const REMOVED_PREFIX = 'TRACES_READER_REMOVED='
 const REAL_PREFIX = 'TRACES_READER_REAL='
@@ -170,20 +174,26 @@ export const READER_REMOTE = {
   /** The same with the token text last. Used to prove a removed token is refused, and only then. */
   lines: readScript('lines'),
   /**
-   * Append the line on stdin to the token file by writing a new file and renaming it over the old one. The line
-   * must classify as a reader line (four fields, the fingerprint of its token), or nothing is touched.
+   * Append the line on stdin line 1 to the token file by writing a new file and renaming it over the old one. The line
+   * must classify as a reader line (four fields, the fingerprint of its token), or nothing is touched. Stdin line 2 is
+   * `replace` when the new line goes beside the consumer's old one; anything else, or no line, is a fresh add. A fresh
+   * add rechecks under the lock that the file holds no reader line for the consumer, and when it does prints
+   * `TRACES_READER_CONSUMER_EXISTS` and exits 1 without writing: the check the caller made before the lock can be stale.
    */
   append: script(
     'set -e',
     'IFS= read -r line',
+    'IFS= read -r mode || mode=',
     CLASSIFY,
     'set -f',
     'set -- $line',
     'classify "$@"',
     '[ "$kind" = real ]',
     'nl="$tok $f2 $f3 $f4"',
+    'who="$f3"',
     ...LOCK,
     ...LOCATE,
+    `if [ "$mode" != replace ] && [ -f "$f" ]; then ${EACH_LINE}; if [ "$kind" = real ] && [ "$f3" = "$who" ]; then echo ${READER_CONSUMER_EXISTS_SENTINEL}; exit 1; fi; done < "$f"; fi`,
     ...TEMP_FILE,
     COPY_ATTRIBUTES,
     String.raw`{ if [ -s "$f" ]; then cat "$f"; if [ -n "$(tail -c 1 "$f")" ]; then echo; fi; fi; printf "%s\n" "$nl"; } > "$t"`,
@@ -310,6 +320,12 @@ async function readEntries(host: string, op: 'list' | 'lines', deps: ReaderDeps)
 
 const isLockBusy = (result: RemoteResult): boolean =>
   result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === READER_LOCK_BUSY_SENTINEL)
+
+const isConsumerExists = (result: RemoteResult): boolean =>
+  result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === READER_CONSUMER_EXISTS_SENTINEL)
+
+const alreadyHasTokenMessage = (consumer: string, fingerprints: readonly string[]): string =>
+  `${consumer} already has a reader token${fingerprints.length > 0 ? ` (${fingerprints.join(', ')})` : ''}. Pass --replace to install a new one beside it and remove the old one after delivery, or revoke it first with: infra traces reader revoke ${consumer}`
 
 const LOCK_BUSY_MESSAGE =
   'The reader token lock is busy: another reader command was still running on the host after 30 seconds. Nothing was changed. Run this again in a minute.'
@@ -508,22 +524,27 @@ function planDelivery(consumer: string, options: AddOptions, deps: ReaderDeps): 
   return {ok: true, plan: {kind: 'file', path}}
 }
 
-/** An exclusive 0600 file; with `replace`, a new 0600 file renamed over the old one. */
+/**
+ * An exclusive 0600 file; with `replace`, a new 0600 file renamed over the old one. The staging file has a name of
+ * its own on every run, so one left by an interrupted run never blocks a retry, and it is removed on any failure.
+ */
 function writeWorkstationFile(path: string, token: string, replace: boolean): void {
   mkdirSync(dirname(path), {recursive: true, mode: 0o700})
-  const target = replace && existsSync(path) ? `${path}.new` : path
-  // `wx` fails if the path exists: a file is never overwritten in place, and a symlink is never followed.
+  const staging = replace && existsSync(path)
+  const target = staging ? `${path}.${randomBytes(8).toString('hex')}.tmp` : path
+  // `wx` fails if the path exists: a file is never overwritten in place, and a symlink is never followed. Past this
+  // line `target` is a file this call created, so removing it on failure removes nothing else.
   const fd = openSync(target, 'wx', 0o600)
   try {
-    writeSync(fd, token)
-  } finally {
-    closeSync(fd)
-  }
-  try {
+    try {
+      writeSync(fd, token)
+    } finally {
+      closeSync(fd)
+    }
     chmodSync(target, 0o600)
-    if (target !== path) renameSync(target, path)
+    if (staging) renameSync(target, path)
   } catch (error) {
-    if (target !== path) rmSync(target, {force: true})
+    rmSync(target, {force: true})
     throw error
   }
 }
@@ -678,7 +699,10 @@ async function addFlow(
   const previous = existing.entries.filter(entry => entry.consumer === consumer)
   if (previous.length > 0 && !replace) {
     out.error(
-      `${consumer} already has a reader token (${previous.map(entry => entry.fingerprint).join(', ')}). Pass --replace to install a new one beside it and remove the old one after delivery, or revoke it first with: infra traces reader revoke ${consumer}`,
+      alreadyHasTokenMessage(
+        consumer,
+        previous.map(entry => entry.fingerprint),
+      ),
     )
     return false
   }
@@ -690,10 +714,18 @@ async function addFlow(
 
   const written = await runRemote(host, READER_REMOTE.append, {
     ...remoteOptions(deps),
-    stdin: `${token} ${fingerprint} ${consumer} ${createdAt}\n`,
+    stdin: `${token} ${fingerprint} ${consumer} ${createdAt}\n${replace ? 'replace' : 'fresh'}\n`,
   })
   if (isLockBusy(written)) {
     out.error(LOCK_BUSY_MESSAGE)
+    return false
+  }
+  if (isConsumerExists(written)) {
+    // Another add for this consumer landed after the read above. The host refused under the lock and wrote nothing, so
+    // the new token is in no file and there is nothing to revoke.
+    out.error(
+      `${alreadyHasTokenMessage(consumer, [])} Another command added it after this one checked, so nothing was written.`,
+    )
     return false
   }
   if (!hasSentinel(written, readerSentinel('append'))) {

@@ -14,7 +14,9 @@ import {tmpdir} from 'node:os'
 import {join} from 'node:path'
 import {afterAll, afterEach, beforeAll, beforeEach, describe, expect, it} from 'bun:test'
 
+import {parseTokenFile} from '../../../../../apps/traces/reader-gate/tokens'
 import {createCapturedCtx, MockProcessExit} from '../../lib/mcp-ctx-fixture'
+import {ACCEPTED_FILES, REFUSED_FILES} from './__fixtures__/reader-lines'
 import {controlPaths, installHostShims, recordingSpawn, type SpawnCall} from './__fixtures__/remote-fixture'
 import {TRACES_APP_DIR, TRACES_READER_DIR, TRACES_READER_LOCK, TRACES_READER_TOKEN_FILE} from './host'
 import {
@@ -22,6 +24,7 @@ import {
   DEFAULT_READER_SECRET_NAME,
   defaultWorkstationFile,
   READER_CONSUMER_EXISTS_SENTINEL,
+  READER_GENERATION_CHANGED_SENTINEL,
   READER_LOCK_BUSY_SENTINEL,
   READER_REMOTE,
   READER_ROUTES,
@@ -87,14 +90,25 @@ afterAll(() => {
   rmSync(sandbox, {recursive: true, force: true})
 })
 
+interface HostExtra {
+  env?: Record<string, string>
+  /** A directory searched before the shims: a stand-in for a host tool. */
+  path?: string | undefined
+}
+
 function execOnHost(
   dir: string,
   command: string,
   stdin: string | undefined,
+  extra: HostExtra = {},
 ): {exitCode: number; stdout: string; stderr: string} {
   const result = Bun.spawnSync(['sh', '-c', command.replaceAll(TRACES_APP_DIR, dir)], {
     stdin: new TextEncoder().encode(stdin ?? ''),
-    env: {PATH: `${shimDir}:${process.env.PATH ?? ''}`, HOME: dir},
+    env: {
+      PATH: `${extra.path === undefined ? '' : `${extra.path}:`}${shimDir}:${process.env.PATH ?? ''}`,
+      HOME: dir,
+      ...extra.env,
+    },
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -153,7 +167,10 @@ interface World {
   dropReply: Set<string>
   /** Remote operations that find the lock held and change nothing. */
   busy: Set<string>
-  gh: {exitCode: number; stderr: string}
+  /** What the host's scripts run with besides the shims. */
+  hostExtra: HostExtra
+  /** `failAfter`: the gh calls from this index on (0 is the first) fail. */
+  gh: {exitCode: number; stderr: string; failAfter?: number}
   file: () => string
   path: string
   accepts: (token: string) => boolean
@@ -177,7 +194,9 @@ function createWorld(options: WorldOptions = {}): World {
   const failing = new Set<string>()
   const dropReply = new Set<string>()
   const busy = new Set<string>()
-  const gh = {exitCode: 0, stderr: ''}
+  const hostExtra: HostExtra = {}
+  const gh: World['gh'] = {exitCode: 0, stderr: ''}
+  let ghCount = 0
 
   const file = (): string => readFileSync(path, 'utf8')
   const accepts = (token: string): boolean =>
@@ -199,7 +218,12 @@ function createWorld(options: WorldOptions = {}): World {
   } as const
 
   const route = (call: SpawnCall) => {
-    if (call.argv[0] === 'gh') return gh.exitCode === 0 ? {exitCode: 0} : {exitCode: gh.exitCode, stderr: gh.stderr}
+    if (call.argv[0] === 'gh') {
+      const index = ghCount
+      ghCount += 1
+      const failing = gh.exitCode !== 0 || (gh.failAfter !== undefined && index >= gh.failAfter)
+      return failing ? {exitCode: gh.exitCode || 1, stderr: gh.stderr || 'gh failed'} : {exitCode: 0}
+    }
     if (call.command === READER_REMOTE.probe) {
       const [, which = '', token = ''] = (call.stdin ?? '').split('\n')
       expect(READER_ROUTES as readonly string[]).toContain(which)
@@ -211,7 +235,7 @@ function createWorld(options: WorldOptions = {}): World {
       if (call.command !== command) continue
       if (failing.has(name)) return {exitCode: 1, stderr: `${name} failed on the host`}
       if (busy.has(name)) return {exitCode: 1, stdout: `${READER_LOCK_BUSY_SENTINEL}\n`}
-      const result = execOnHost(dir, command, call.stdin)
+      const result = execOnHost(dir, command, call.stdin, hostExtra)
       if (dropReply.has(name)) return {exitCode: 255, stderr: 'ssh: connection reset by peer'}
       return result
     }
@@ -232,6 +256,7 @@ function createWorld(options: WorldOptions = {}): World {
     failing,
     dropReply,
     busy,
+    hostExtra,
     gh,
     file,
     path,
@@ -1053,7 +1078,7 @@ describe('constants match the app', async () => {
 describe('host scripts, run under a real sh', () => {
   const run1 = (world: World, command: string, stdin?: string) => execOnHost(world.dir, command, stdin)
   const stray = (world: World): string[] =>
-    readdirSync(join(world.dir, 'readers')).filter(name => name !== 'token' && name !== '.lock')
+    readdirSync(join(world.dir, 'readers')).filter(name => !['token', '.lock', '.generation'].includes(name))
   const removeInput = (name: string, selector = '-', vline = voidLine(200, CREATED)): string =>
     `${name} ${selector}\n${vline}`
 
@@ -1120,6 +1145,8 @@ describe('host scripts, run under a real sh', () => {
 
   describe('append', () => {
     const newLine = `${NEXT_TOKEN} ${NEXT_FINGERPRINT} systematic ${CREATED}\n`
+    // The host takes the line, the mode and the generation the caller read, one per line.
+    const appendIn = (line = newLine, mode = 'fresh', generation = '0'): string => `${line}${mode}\n${generation}\n`
 
     it('adds one line, keeps the existing bytes, replaces the file by rename and keeps its mode', () => {
       const world = createWorld({file: readerLine(OLD_A, 'a-one') + voidLine(2)})
@@ -1127,7 +1154,7 @@ describe('host scripts, run under a real sh', () => {
       const before = statSync(world.path)
       const existing = world.file()
 
-      const result = run1(world, READER_REMOTE.append, newLine)
+      const result = run1(world, READER_REMOTE.append, appendIn())
 
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain(readerSentinel('append'))
@@ -1140,14 +1167,14 @@ describe('host scripts, run under a real sh', () => {
 
     it('starts a new line when the file does not end in a newline', () => {
       const world = createWorld({file: readerLine(OLD_A, 'a-one').trimEnd()})
-      run1(world, READER_REMOTE.append, newLine)
+      run1(world, READER_REMOTE.append, appendIn())
       expect(world.file()).toBe(readerLine(OLD_A, 'a-one') + newLine)
     })
 
     it('creates the file when only the directory exists, readable by its group but not by others', () => {
       const world = createWorld()
       rmSync(world.path)
-      const result = run1(world, READER_REMOTE.append, newLine)
+      const result = run1(world, READER_REMOTE.append, appendIn())
       expect(result.exitCode).toBe(0)
       expect(world.file()).toBe(newLine)
       expect(statSync(world.path).mode & 0o777).toBe(0o640)
@@ -1166,7 +1193,7 @@ describe('host scripts, run under a real sh', () => {
         voidLine(3),
       ]
       for (const line of bad) {
-        const result = run1(world, READER_REMOTE.append, line)
+        const result = run1(world, READER_REMOTE.append, appendIn(line))
         expect(result.exitCode).not.toBe(0)
         expect(result.stdout).not.toContain(readerSentinel('append'))
         expect(world.file()).toBe(before)
@@ -1177,7 +1204,7 @@ describe('host scripts, run under a real sh', () => {
     it('refuses a fresh add when the file already has a line for the consumer, under the lock, and touches nothing', () => {
       const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
       const before = world.file()
-      for (const stdin of [newLine, `${newLine}fresh\n`, `${newLine}anything-else\n`]) {
+      for (const stdin of [appendIn(), appendIn(newLine, 'fresh'), appendIn(newLine, 'anything-else')]) {
         const result = run1(world, READER_REMOTE.append, stdin)
         expect(result.exitCode).not.toBe(0)
         expect(result.stdout.split('\n')).toContain(READER_CONSUMER_EXISTS_SENTINEL)
@@ -1190,7 +1217,7 @@ describe('host scripts, run under a real sh', () => {
     it('refuses a fresh add when the consumer line is the last one and has no trailing newline', () => {
       const world = createWorld({file: voidLine(2) + readerLine(OLD_A, 'systematic').trimEnd()})
       const before = world.file()
-      const result = run1(world, READER_REMOTE.append, newLine)
+      const result = run1(world, READER_REMOTE.append, appendIn())
       expect(result.stdout.split('\n')).toContain(READER_CONSUMER_EXISTS_SENTINEL)
       expect(world.file()).toBe(before)
     })
@@ -1198,7 +1225,7 @@ describe('host scripts, run under a real sh', () => {
     it('does not refuse a fresh add for a consumer the file only resembles', () => {
       const world = createWorld({file: readerLine(OLD_A, 'systematic-two') + readerLine(OLD_B, 'other') + voidLine(2)})
       const existing = world.file()
-      const result = run1(world, READER_REMOTE.append, newLine)
+      const result = run1(world, READER_REMOTE.append, appendIn())
       expect(result.exitCode).toBe(0)
       expect(world.file()).toBe(existing + newLine)
     })
@@ -1206,7 +1233,7 @@ describe('host scripts, run under a real sh', () => {
     it('appends beside the consumer’s existing line when the stdin says replace', () => {
       const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
       const existing = world.file()
-      const result = run1(world, READER_REMOTE.append, `${newLine}replace\n`)
+      const result = run1(world, READER_REMOTE.append, appendIn(newLine, 'replace'))
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain(readerSentinel('append'))
       expect(world.file()).toBe(existing + newLine)
@@ -1216,9 +1243,38 @@ describe('host scripts, run under a real sh', () => {
       const world = createWorld()
       rmSync(world.path)
       mkdirSync(world.path)
-      const result = run1(world, READER_REMOTE.append, newLine)
+      const result = run1(world, READER_REMOTE.append, appendIn())
       expect(result.exitCode).not.toBe(0)
       expect(stray(world)).toEqual([])
+    })
+
+    it('refuses, and touches nothing, when the generation the caller read is not the one on the host', () => {
+      const world = createWorld({file: voidLine(2)})
+      const before = world.file()
+      writeFileSync(join(world.dir, 'readers', '.generation'), '3\n')
+      for (const generation of ['0', '2', '4']) {
+        const result = run1(world, READER_REMOTE.append, appendIn(newLine, 'fresh', generation))
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stdout.split('\n')).toContain(READER_GENERATION_CHANGED_SENTINEL)
+        expect(result.stdout).not.toContain(readerSentinel('append'))
+        expect(world.file()).toBe(before)
+      }
+      expect(run1(world, READER_REMOTE.append, appendIn(newLine, 'fresh', '3')).exitCode).toBe(0)
+    })
+
+    it('reads a missing or empty generation file as 0, and refuses a generation that is not a number', () => {
+      const world = createWorld({file: voidLine(2)})
+      expect(run1(world, READER_REMOTE.append, appendIn(newLine, 'fresh', '0')).exitCode).toBe(0)
+      writeFileSync(join(world.dir, 'readers', '.generation'), '')
+      const other = createWorld({file: voidLine(2)})
+      writeFileSync(join(other.dir, 'readers', '.generation'), '')
+      expect(run1(other, READER_REMOTE.append, appendIn(newLine, 'fresh', '0')).exitCode).toBe(0)
+      for (const bad of ['', 'x', '-1', '1 2']) {
+        const fresh = createWorld({file: voidLine(2)})
+        const result = run1(fresh, READER_REMOTE.append, appendIn(newLine, 'fresh', bad))
+        expect(result.exitCode).not.toBe(0)
+        expect(fresh.file()).toBe(voidLine(2))
+      }
     })
   })
 
@@ -1339,11 +1395,328 @@ describe('host scripts, run under a real sh', () => {
     const first = await reader.read()
     expect(new TextDecoder().decode(first.value)).toContain('held')
     const before = world.file()
-    const result = execOnHost(world.dir, command, `${NEXT_TOKEN} ${NEXT_FINGERPRINT} systematic ${CREATED}\n`)
+    const result = execOnHost(world.dir, command, `${NEXT_TOKEN} ${NEXT_FINGERPRINT} systematic ${CREATED}\nfresh\n0\n`)
     holder.kill()
     expect(result.exitCode).not.toBe(0)
     expect(result.stdout).toContain(READER_LOCK_BUSY_SENTINEL)
     expect(world.file()).toBe(before)
+  })
+})
+
+// ─── The CLI reads the token file the way the gate does ───────────────────────
+
+describe('the gate parser and the CLI classifier agree on whole files', () => {
+  const verdict = (
+    text: string,
+  ): {gate: 'accepts' | 'refuses'; cliBad: number; cliReaders: number; gateReaders: number} => {
+    const gate = parseTokenFile(text)
+    const world = createWorld({file: text})
+    const result = execOnHost(world.dir, READER_REMOTE.list, undefined)
+    return {
+      gate: gate.ok ? 'accepts' : 'refuses',
+      gateReaders: gate.ok ? gate.readers.size : 0,
+      cliBad: Number(/^TRACES_READER_BAD=(\d+)$/m.exec(result.stdout)?.[1]),
+      cliReaders: result.stdout.split('\n').filter(line => line.startsWith('TRACES_READER ')).length,
+    }
+  }
+
+  it.each(ACCEPTED_FILES)('a file with $name is clean to both', ({text}) => {
+    const seen = verdict(text)
+    expect(seen.gate).toBe('accepts')
+    expect(seen.cliBad).toBe(0)
+    expect(seen.cliReaders).toBe(seen.gateReaders)
+  })
+
+  it.each(REFUSED_FILES)('a file with $name is refused by both', ({text}) => {
+    const seen = verdict(text)
+    expect(seen.gate).toBe('refuses')
+    expect(seen.cliBad).toBeGreaterThan(0)
+  })
+
+  it('the fixtures hold at least one case of every kind of line the gate refuses', () => {
+    expect(ACCEPTED_FILES.length).toBeGreaterThan(10)
+    expect(REFUSED_FILES.length).toBeGreaterThan(30)
+    expect(new Set([...ACCEPTED_FILES, ...REFUSED_FILES].map(entry => entry.name)).size).toBe(
+      ACCEPTED_FILES.length + REFUSED_FILES.length,
+    )
+  })
+})
+
+// ─── revoke --all and a concurrent add ────────────────────────────────────────
+
+describe('revoke --all against a concurrent add', () => {
+  let mvDir = ''
+  beforeAll(() => {
+    // A host `mv` that, after the rename, lets another writer append a line: what the re-read has to catch.
+    mvDir = join(sandbox, 'mv-shim')
+    mkdirSync(mvDir)
+    const real = Bun.which('mv') ?? '/bin/mv'
+    writeFileSync(
+      join(mvDir, 'mv'),
+      [
+        '#!/bin/sh',
+        `${real} "$@" || exit $?`,
+        'for last; do :; done',
+        String.raw`if [ -n "$APPEND_AFTER_MV" ]; then printf '%s\n' "$APPEND_AFTER_MV" >> "$last"; fi`,
+        '',
+      ].join('\n'),
+    )
+    chmodSync(join(mvDir, 'mv'), 0o755)
+  })
+
+  const twoConsumers = (): string => readerLine(OLD_A, 'systematic') + readerLine(OLD_B, 'fro-bot-audit') + voidLine(2)
+
+  it('the deny script reports what it re-read: one line, and it is void', () => {
+    const world = createWorld({file: twoConsumers()})
+    const result = execOnHost(world.dir, READER_REMOTE.deny, voidLine(201, CREATED))
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain('TRACES_READER_DENY_LINES=1')
+    expect(result.stdout).toContain('TRACES_READER_DENY_VOID=1')
+    expect(result.stdout.trimEnd().endsWith(readerSentinel('deny'))).toBe(true)
+  })
+
+  it('the deny script counts a line another writer added after the rename', () => {
+    const world = createWorld({file: twoConsumers()})
+    const result = execOnHost(world.dir, READER_REMOTE.deny, voidLine(201, CREATED), {
+      path: mvDir,
+      env: {APPEND_AFTER_MV: readerLine(OLD_C, 'workstation').trim()},
+    })
+    expect(result.stdout).toContain('TRACES_READER_DENY_LINES=2')
+    expect(result.stdout).toContain('TRACES_READER_DENY_VOID=1')
+  })
+
+  it('fails, and says the file is not deny-all, when the re-read finds another line', async () => {
+    const world = createWorld({file: twoConsumers()})
+    world.hostExtra.path = mvDir
+    world.hostExtra.env = {APPEND_AFTER_MV: readerLine(OLD_C, 'workstation').trim()}
+    const outcome = await revoke(world, undefined, undefined, {all: true}, makeDeps(world))
+    expect(outcome.exit).toBe(1)
+    expect(outcome.stderr).toContain('did not hold exactly one void line')
+    expect(outcome.stderr).toContain('2 lines')
+    expect(outcome.stdout).not.toContain('No reader token remains')
+  })
+
+  it('bumps the generation under the lock on every deny, and only then', () => {
+    const world = createWorld({file: twoConsumers()})
+    const generation = (): string => readFileSync(join(world.dir, 'readers', '.generation'), 'utf8')
+    expect(existsSync(join(world.dir, 'readers', '.generation'))).toBe(false)
+    execOnHost(world.dir, READER_REMOTE.deny, voidLine(201, CREATED))
+    expect(generation()).toBe('1\n')
+    execOnHost(world.dir, READER_REMOTE.deny, voidLine(202, CREATED))
+    expect(generation()).toBe('2\n')
+    execOnHost(world.dir, READER_REMOTE.deny, 'not a void line')
+    expect(generation()).toBe('2\n')
+    expect(execOnHost(world.dir, READER_REMOTE.list, undefined).stdout).toContain('TRACES_READER_GENERATION=2')
+  })
+
+  it('the read scripts report the generation, 0 when there is none', () => {
+    const world = createWorld()
+    for (const command of [READER_REMOTE.list, READER_REMOTE.lines]) {
+      expect(execOnHost(world.dir, command, undefined).stdout).toContain('TRACES_READER_GENERATION=0')
+    }
+  })
+
+  it('an add whose token file was denied since it read it writes nothing, delivers nothing and says to run it again', async () => {
+    const world = createWorld()
+    const deps = makeDeps(world)
+    deps.spawn = (argv, options) => {
+      // A `revoke --all` lands between this add's read and its append.
+      if (argv.at(-1) === READER_REMOTE.append) execOnHost(world.dir, READER_REMOTE.deny, voidLine(203, CREATED))
+      return world.spawn(argv, options)
+    }
+    const outcome = await add(world, 'systematic', ghOptions(), deps)
+    expect(outcome.exit).toBe(1)
+    expect(outcome.stderr).toContain('revoke --all')
+    expect(outcome.stderr).toContain('Nothing was written')
+    expect(outcome.stderr).toContain('run add again')
+    expect(world.file()).not.toContain(NEXT_TOKEN)
+    expect(world.ghCalls()).toHaveLength(0)
+    expect(world.calls.filter(call => call.command === READER_REMOTE.remove)).toHaveLength(0)
+  })
+
+  it('an add that reads after the deny is unaffected', async () => {
+    const world = createWorld()
+    execOnHost(world.dir, READER_REMOTE.deny, voidLine(203, CREATED))
+    const outcome = await add(world, 'systematic', ghOptions(), makeDeps(world))
+    expect(outcome.exit).toBeNull()
+    expect(world.accepts(NEXT_TOKEN)).toBe(true)
+  })
+})
+
+// ─── add to several repositories ──────────────────────────────────────────────
+
+describe('traces reader add: several repositories', () => {
+  const repos = ['marcusrbrown/one', 'marcusrbrown/two', 'marcusrbrown/three']
+
+  it('keeps a fresh token once any repository has it, and names what was done and what is left', async () => {
+    const world = createWorld()
+    world.gh.failAfter = 1
+    world.gh.stderr = 'HTTP 403: Resource not accessible'
+
+    const outcome = await add(world, 'systematic', {repo: repos}, makeDeps(world))
+
+    expect(outcome.exit).toBe(1)
+    expect(world.ghCalls()).toHaveLength(2)
+    expect(world.accepts(NEXT_TOKEN)).toBe(true)
+    expect(realLines(world.file())).toEqual([`${NEXT_TOKEN} ${NEXT_FINGERPRINT} systematic ${CREATED}`])
+    expect(world.calls.filter(call => call.command === READER_REMOTE.remove)).toHaveLength(0)
+    expect(outcome.stderr).toContain('HTTP 403')
+    expect(outcome.stderr).toContain('Delivered to: repository marcusrbrown/one')
+    expect(outcome.stderr).toContain('Not delivered to: repository marcusrbrown/two, repository marcusrbrown/three')
+    expect(outcome.stderr).toContain(
+      'infra traces reader add systematic --replace --repo marcusrbrown/one --repo marcusrbrown/two --repo marcusrbrown/three',
+    )
+    expect(outcome.stderr).toContain(`infra traces reader revoke systematic ${NEXT_FINGERPRINT}`)
+    expect(outcome.stdout).not.toContain('was removed and is refused')
+  })
+
+  it('still revokes a fresh token when the first repository fails: nobody holds it', async () => {
+    const world = createWorld()
+    world.gh.failAfter = 0
+    const outcome = await add(world, 'systematic', {repo: repos}, makeDeps(world))
+    expect(outcome.exit).toBe(1)
+    expect(world.ghCalls()).toHaveLength(1)
+    expect(world.accepts(NEXT_TOKEN)).toBe(false)
+    expect(outcome.stdout).toContain('is refused on both routes')
+  })
+
+  it('carries the secret name into the command that finishes the job', async () => {
+    const world = createWorld()
+    world.gh.failAfter = 1
+    const outcome = await add(world, 'systematic', {repo: repos, secretName: 'AUDIT_TOKEN'}, makeDeps(world))
+    expect(outcome.stderr).toContain('--secret-name AUDIT_TOKEN')
+  })
+
+  it('under --replace a partial delivery revokes neither token and lists the repositories', async () => {
+    const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
+    world.gh.failAfter = 1
+    const outcome = await add(world, 'systematic', {repo: repos, replace: true}, makeDeps(world), [NEXT_TOKEN, OLD_A])
+    expect(outcome.exit).toBe(1)
+    expect(world.accepts(NEXT_TOKEN)).toBe(true)
+    expect(world.accepts(OLD_A)).toBe(true)
+    expect(world.calls.filter(call => call.command === READER_REMOTE.remove)).toHaveLength(0)
+    expect(outcome.stderr).toContain('Delivered to: repository marcusrbrown/one')
+    expect(outcome.stderr).toContain('Not delivered to: repository marcusrbrown/two, repository marcusrbrown/three')
+    expect(outcome.stderr).toContain(`infra traces reader revoke systematic ${sha12(OLD_A)}`)
+  })
+
+  it('all repositories delivered: nothing to finish', async () => {
+    const world = createWorld()
+    const outcome = await add(world, 'systematic', {repo: repos}, makeDeps(world))
+    expect(outcome.exit).toBeNull()
+    expect(world.ghCalls()).toHaveLength(3)
+  })
+})
+
+// ─── deadlines ────────────────────────────────────────────────────────────────
+
+describe('every remote call has a deadline', () => {
+  it('add, list and revoke pass an abort signal that has not fired to every ssh call', async () => {
+    const world = createWorld({file: readerLine(OLD_A, 'systematic') + readerLine(OLD_B, 'other') + voidLine(2)})
+    await add(world, 'systematic', {...ghOptions(), replace: true}, makeDeps(world), [NEXT_TOKEN, OLD_A])
+    await run(world, ctx => tracesReaderListAction({}, ctx, makeDeps(world)), {secrets: [NEXT_TOKEN, OLD_B]})
+    await revoke(world, 'other', undefined, {}, makeDeps(world))
+    await revoke(world, undefined, undefined, {all: true}, makeDeps(world))
+    const ssh = world.calls.filter(call => call.argv[0] === 'ssh')
+    expect(ssh.length).toBeGreaterThan(5)
+    for (const call of ssh) {
+      expect(call.options.signal).toBeInstanceOf(AbortSignal)
+      expect(call.options.signal?.aborted).toBe(false)
+    }
+  })
+
+  it('the probe over ssh has one too', async () => {
+    const world = createWorld({publicRoute: 'down'})
+    await add(world, 'systematic', ghOptions(), makeDeps(world))
+    expect(world.probeCalls().length).toBeGreaterThan(0)
+    for (const call of world.probeCalls()) expect(call.options.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('a host that never answers fails the command at the deadline instead of hanging', async () => {
+    const hang: NonNullable<ReaderDeps['spawn']> = (argv, options) => ({
+      stdout: new Response('').body,
+      stderr: new Response('').body,
+      // The close of the shared connection answers at once; every other call waits for its deadline.
+      exited: argv.includes('-O')
+        ? Promise.resolve(0)
+        : new Promise<number>(resolve => {
+            options.signal?.addEventListener('abort', () => resolve(143))
+          }),
+    })
+    const world = createWorld()
+    const outcome = await run(
+      world,
+      ctx => tracesReaderListAction({}, ctx, makeDeps(world, {spawn: hang, deadlineMs: 25})),
+      {
+        secrets: [],
+      },
+    )
+    expect(outcome.exit).toBe(1)
+    expect(outcome.stderr).toContain('could not be read')
+  })
+})
+
+// ─── list --json ──────────────────────────────────────────────────────────────
+
+describe('traces reader list --json', () => {
+  const list = (world: World, options: {json?: boolean} = {json: true}) =>
+    run(world, ctx => tracesReaderListAction(options, ctx, makeDeps(world)), {secrets: [OLD_A, OLD_B, OLD_C]})
+
+  it('prints one JSON object with consumers, duplicates and the malformed count, and no token', async () => {
+    const world = createWorld({
+      file:
+        readerLine(OLD_B, 'systematic', '2026-10-02T00:00:00.000Z') +
+        readerLine(OLD_A, 'fro-bot-audit') +
+        readerLine(OLD_C, 'systematic') +
+        voidLine(3),
+    })
+    const outcome = await list(world)
+    expect(outcome.exit).toBeNull()
+    expect(outcome.stdout.split('\n')).toHaveLength(1)
+    expect(JSON.parse(outcome.stdout)).toEqual({
+      consumers: [
+        {consumer: 'fro-bot-audit', fingerprint: sha12(OLD_A), date: '2026-10-01T00:00:00.000Z'},
+        {consumer: 'systematic', fingerprint: sha12(OLD_B), date: '2026-10-02T00:00:00.000Z'},
+        {consumer: 'systematic', fingerprint: sha12(OLD_C), date: '2026-10-01T00:00:00.000Z'},
+      ],
+      duplicates: ['systematic'],
+      malformed: 0,
+    })
+    expect(outcome.stdout).not.toContain('trc_')
+    expect(outcome.stderr).toBe('')
+  })
+
+  it('an empty roster is an empty list, not text', async () => {
+    const world = createWorld()
+    const outcome = await list(world)
+    expect(JSON.parse(outcome.stdout)).toEqual({consumers: [], duplicates: [], malformed: 0})
+    expect(outcome.exit).toBeNull()
+  })
+
+  it('keeps the exit code: malformed lines print the JSON and fail', async () => {
+    const world = createWorld({file: `${readerLine(OLD_A, 'systematic')}garbage\n`})
+    const outcome = await list(world)
+    expect(outcome.exit).toBe(1)
+    expect(JSON.parse(outcome.stdout)).toEqual({
+      consumers: [{consumer: 'systematic', fingerprint: sha12(OLD_A), date: '2026-10-01T00:00:00.000Z'}],
+      duplicates: [],
+      malformed: 1,
+    })
+  })
+
+  it('a host that does not answer prints no JSON and fails', async () => {
+    const world = createWorld()
+    world.failing.add('list')
+    const outcome = await list(world)
+    expect(outcome.exit).toBe(1)
+    expect(outcome.stdout).toBe('')
+    expect(outcome.stderr).toContain('could not be read')
+  })
+
+  it('without --json the output is the text it was', async () => {
+    const world = createWorld({file: readerLine(OLD_A, 'systematic')})
+    const outcome = await list(world, {})
+    expect(outcome.stdout).toBe(`systematic\n  ${sha12(OLD_A)}  2026-10-01T00:00:00.000Z`)
   })
 })
 

@@ -5,7 +5,8 @@
 //   3. credential  the Langfuse Viewer pair, from the host file. Missing or a placeholder: 502.
 //   4. limits      per-consumer budget and concurrency, global concurrency: 429 with Retry-After.
 //   5. forward     allowlisted request headers, the host credential, redirects never followed, 60 s to headers: 504.
-//   6. answer      allowlisted response headers. An upstream 3xx or Set-Cookie is a 502. The slot is held until the
+//   6. answer      allowlisted response headers. An upstream 3xx or Set-Cookie is a 502, and so is a Langfuse 401 or 403
+//                  (the host-held credential was refused: `credential-refused`). The slot is held until the
 //                  body ends, errors or is cancelled, or the response deadline passes.
 //
 // There is no registry of running requests: a revoked token fails on its next request, and a request already running
@@ -30,6 +31,8 @@ export interface GateEvent {
   status: number
   ms: number
   reason?: string
+  /** The upstream's own status, set only when the gate replaced its answer (`credential-refused`). */
+  upstreamStatus?: number
 }
 
 export interface Deadlines {
@@ -58,6 +61,7 @@ interface Context {
   fingerprint: string
   route: RouteName | 'none'
   reason?: string
+  upstreamStatus?: number
   release?: () => void
 }
 
@@ -102,6 +106,7 @@ export function createServer(deps: ServerDeps): Handler {
       status: response.status,
       ms: deps.clock() - started,
       ...(ctx.reason === undefined ? {} : {reason: ctx.reason}),
+      ...(ctx.upstreamStatus === undefined ? {} : {upstreamStatus: ctx.upstreamStatus}),
     })
     return response
   }
@@ -185,6 +190,14 @@ async function handle(req: Request, deps: ServerDeps, ctx: Context): Promise<Res
   }
 
   const upstream = outcome.response
+  // Langfuse refusing the host-held Viewer pair is the gate's own fault, not the reader's: a 401 or 403 passed through
+  // would read as "your token is bad". Its body is dropped, the refusal is logged. Grafana's refusals are JSON-RPC errors.
+  if (match.upstream === 'langfuse' && (upstream.status === 401 || upstream.status === 403)) {
+    upstream.body?.cancel().catch(() => {})
+    lease.release()
+    ctx.upstreamStatus = upstream.status
+    return badGateway(ctx, 'credential-refused')
+  }
   if (upstream.status >= 300 && upstream.status < 400) {
     upstream.body?.cancel().catch(() => {})
     lease.release()

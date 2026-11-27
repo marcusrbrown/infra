@@ -504,7 +504,7 @@ No credential reaches this terminal, an argument list, a log, a GitHub secret or
 **Langfuse: install or rotate.** The Viewer key is the one step done by hand.
 
 1. In the Langfuse UI (`traces open`, then `http://localhost:3000`, project settings, API keys), create a key with the role **Viewer**. On a rotation, leave the old key in place.
-2. Run `bunx @marcusrbrown/infra traces reader backend langfuse` and paste the two halves at the hidden prompts. The host stages the pair, and the gate's own check must prove that it reads, and that Langfuse refuses a REST write and an MCP write by role. Only then is the pair switched in. On a rotation, the old pair stays on the host as `.previous`.
+2. Run `bunx @marcusrbrown/infra traces reader backend langfuse` and paste the two halves at the hidden prompts. With no terminal, pipe one line, `<public key>:<secret key>`, to its standard input instead; the key still never reaches an argument list or the environment. The host stages the pair, and the gate's own check must prove that it reads, and that Langfuse refuses a REST write and an MCP write by role. Only then is the pair switched in. On a rotation, the old pair stays on the host as `.previous`.
 3. On a rotation, delete the old key in the UI, then run `bunx @marcusrbrown/infra traces reader backend langfuse --confirm-old-revoked`. It proves that Langfuse answers 401 to the old pair, then deletes `.previous`. It prompts for nothing. Until it runs, a new install refuses with `A previous Langfuse pair is still waiting to be confirmed revoked`.
 
 If the check fails, the staged pair is removed and the live pair is unchanged. `rest-write-not-denied` and `mcp-write-not-denied` mean the key can write: it does not have the Viewer role. Delete it in the UI and make a Viewer key. `credential-refused` means Langfuse answered 401: the key was mistyped or deleted. `read-failed`, `mcp-read-failed` and `network-error` mean Langfuse did not answer the reads: `traces status`.
@@ -530,6 +530,10 @@ bunx @marcusrbrown/infra traces reader backend status
 
 Per credential it prints one of: `placeholder (no credential installed: ...)`, `installed`, `installed; the old credential is not yet confirmed revoked` (a `.previous` file waits for `--confirm-old-revoked` or a cleanup retry), `missing (run a deploy)`, or `a staged file is left over from an interrupted run` (run the install command again). It never prints a value.
 
+`--json` prints `{"langfuse":"<state>","grafana":"<state>"}`, each state `placeholder`, `installed`, `pending-old-revocation` or `missing`. A left-over staged file shows in the text output only.
+
+**One backend command at a time.** Each `backend langfuse` and `backend grafana` run holds a lock on the host (`/mnt/traces/app/secrets/.reader-backend.lock`) from its first change to its last, and every step that changes a credential file checks that the lock still names the run. A second run stops at once with `Another reader backend command is running`. A run that was killed leaves the lock behind, and it expires after 30 minutes. Before it switches a Langfuse pair in, the host refuses unless the staged file is the pair the run wrote and checked. Before the Grafana cleanup deletes any token, the host proves that the live file still holds the token the run made.
+
 ### Reader tokens
 
 A reader token has the form `trc_…`. The reader token file, `/mnt/traces/app/readers/token`, holds one line per token (`<token> <fingerprint> <consumer> <date>`) or one void line when there is no reader. It follows the sender lifecycle: the token is made on the operator's machine, sent to the host on stdin, and shown or stored once at its consumer. Only its fingerprint (12 hex characters) is printed.
@@ -543,7 +547,7 @@ bunx @marcusrbrown/infra traces reader add <consumer>
 
 A consumer name has lower-case letters, digits and hyphens, starts with a letter and has at most 31 characters. The command refuses a consumer that already holds a token unless you pass `--replace`. With `--repo` (repeatable), the token goes to the Actions secret `TRACES_READER_TOKEN` (`--secret-name` renames it) through `gh secret set` on stdin. Without it, the token is written to `~/.config/infra/traces-reader-<consumer>.token` with mode 0600, or to `--file`. `--print` shows the token once on a terminal and refuses when output is not a terminal. A file inside a git checkout is refused, and so is an existing file unless you pass `--replace`.
 
-The order is: write the token to the host, prove that both routes accept it (a 200 on the Langfuse health path and on a Grafana MCP `initialize`, through the public route, or from the host over SSH when the public route does not answer as the gate does), then deliver it. Success: `Token <fingerprint> written ...`, `Token <fingerprint> is live: ...`, and a delivery line. If the token is not live, the command removes it and proves the removal. If delivery fails and nobody holds the token, the command revokes it and says to run `add` again. If the host did not confirm the write, the token may or may not be in the file and was delivered nowhere: run `traces reader list`, and revoke the fingerprint if it is there.
+The order is: write the token to the host, prove that both routes accept it (a 200 on the Langfuse health path and on a Grafana MCP `initialize`, through the public route, or from the host over SSH when the public route does not answer as the gate does), then deliver it. Success: `Token <fingerprint> written ...`, `Token <fingerprint> is live: ...`, and a delivery line. If the token is not live, the command removes it and proves the removal. If delivery fails and nobody holds the token, the command revokes it and says to run `add` again. With several `--repo`, once any repository has the token a later failure is uncertain, so the command **keeps** it and prints `Delivered to: ...` and `Not delivered to: ...` with two ways out: `traces reader add <consumer> --replace --repo ...` (a new token to every repository, then the partly delivered one removed) or `traces reader revoke <consumer> <fingerprint>`. If `revoke --all` ran after the command read the token file, the write is refused (`Nothing was written`): run `add` again. If the host did not confirm the write, the token may or may not be in the file and was delivered nowhere: run `traces reader list`, and revoke the fingerprint if it is there.
 
 **Replace (rotate).**
 
@@ -565,7 +569,9 @@ Find which token the consumer uses: `traces logs reader-gate` shows the fingerpr
 bunx @marcusrbrown/infra traces reader list
 ```
 
-It prints each consumer with its fingerprints and creation dates, or `(no reader tokens)`. It never prints a token. It reports a line the gate cannot parse: the gate denies every token while the file holds one.
+It prints each consumer with its fingerprints and creation dates, or `(no reader tokens)`. It never prints a token. It reports a line the gate cannot parse: the gate denies every token while the file holds one. It reads a line the way the gate does (fields split on single spaces only, the same token, fingerprint, consumer and date rules, a token twice, a file with no line), and a test holds the two to the same verdict on a list of files.
+
+`--json` prints one object, `{"consumers":[{"consumer","fingerprint","date"}],"duplicates":["<consumer>"],"malformed":<count>}`, and never a token. The exit code is the same: a malformed line prints the object and exits 1.
 
 **Revoke.**
 
@@ -577,7 +583,7 @@ bunx @marcusrbrown/infra traces reader revoke --all
 
 The first form removes every token of a consumer. The second removes one token by fingerprint, as `list` prints it. Success proves a refusal, not just a deletion: `... revoked: ... answered 401 for it on both routes`. If a removed token is still accepted, the command says so; run `traces reader revoke --all` and find out why the gate still accepts it.
 
-`revoke --all` is the **kill switch**. It writes one fresh void line, so the gate accepts nothing, and it proves that every old token is refused. It takes no consumer and no fingerprint. Use it whenever a token may have leaked or an agent misbehaves, then issue new tokens.
+`revoke --all` is the **kill switch**. It writes one fresh void line, so the gate accepts nothing, and it proves that every old token is refused. Under the same lock it reads the file back and requires exactly one line, a void line; otherwise it fails and says the file is not deny-all. It also bumps a generation counter beside the token file, so an `add` that read the roster earlier cannot write its token after the wipe. It takes no consumer and no fingerprint. Use it whenever a token may have leaked or an agent misbehaves, then issue new tokens.
 
 When a token is cut off:
 
@@ -592,9 +598,12 @@ A restore voids the reader token file by itself: with Docker still stopped and b
 The snapshot also brings back the two backend credentials as they were: a Viewer key or a service-account token that was revoked after the snapshot works again. **Rotate both before you reissue any reader token**, at any point after restore step 6 (the deploy) and before step 8:
 
 1. `bunx @marcusrbrown/infra traces reader backend grafana`. It deletes every other token on the `agent-reader` account, including one the snapshot brought back.
-2. In the Langfuse UI (over `traces open`), create a new Viewer key. Run `bunx @marcusrbrown/infra traces reader backend langfuse` and paste it. Then delete **every other Viewer key** in the API keys list, including the pair the host held before and any the snapshot brought back, and run `bunx @marcusrbrown/infra traces reader backend langfuse --confirm-old-revoked`.
-3. `bunx @marcusrbrown/infra traces reader backend status` must show both `installed`.
-4. After `--reopen-ports`, reissue the three consumers ([Rollout order](#rollout-order), step 6) and replace the secrets and the workstation file.
+2. Run `bunx @marcusrbrown/infra traces reader backend status` and read the Langfuse line first. A new install refuses while a `.previous` pair is on the host, and the snapshot can bring one back.
+   - **`installed; the old credential is not yet confirmed revoked`**: a `.previous` pair came back with the snapshot. Clear it before anything else. In the Langfuse UI (over `traces open`), delete every Viewer key in the API keys list. Ports are closed and no reader token survives, so nothing is reading. Then run `bunx @marcusrbrown/infra traces reader backend langfuse --confirm-old-revoked`. It proves that Langfuse refuses the `.previous` pair and deletes it. Run `status` again: Langfuse must now show `installed` or `placeholder`.
+   - **`installed` or `placeholder`**: nothing is pending. Go on.
+3. In the Langfuse UI, create a new Viewer key. Run `bunx @marcusrbrown/infra traces reader backend langfuse` and paste it. The pair the host held before becomes `.previous`. Delete **every other Viewer key** in the API keys list, and run `bunx @marcusrbrown/infra traces reader backend langfuse --confirm-old-revoked`.
+4. `bunx @marcusrbrown/infra traces reader backend status` must show both `installed`.
+5. After `--reopen-ports`, reissue the three consumers ([Rollout order](#rollout-order), step 6) and replace the secrets and the workstation file.
 
 ### Error answers
 
@@ -616,6 +625,7 @@ The gate answers in this order: token, route, credential, limits, forward. A req
 | Reason | Meaning | For an operator |
 | --- | --- | --- |
 | `credential-unavailable` | the Langfuse Viewer pair is a placeholder, or the file is missing, unreadable or malformed. Only the Langfuse route can give this. The gate log names which: `credential-placeholder`, `credential-missing`, `credential-unreadable` or `credential-malformed` | `traces reader backend status`, then `traces reader backend langfuse`. Expected between the deploy and rollout step 3 |
+| `credential-refused` | Langfuse answered the host-held Viewer pair with `401` or `403`: the key was deleted, or its role changed. Only the Langfuse route can give this. The reader's own token is fine: a Langfuse `401` or `403` is never passed on, because a consumer would read it as a bad token. The gate drops the upstream body and logs the status as `upstreamStatus` | `traces reader backend status`; create a Viewer key in the UI and run `traces reader backend langfuse`. Grafana is different: `grafana-mcp` answers a refused token with a JSON-RPC error inside a normal response, and the gate passes that on |
 | `upstream-unavailable` | Langfuse web or the Grafana MCP server did not answer | `traces status`; `traces logs langfuse-web` or `traces logs grafana-mcp`; `ReaderGateDown` follows after 5 minutes |
 | `upstream-redirect` | the upstream answered with a redirect, which the gate never follows | `traces logs reader-gate`; an upstream change or a configuration fault |
 | `upstream-cookie` | the upstream tried to set a cookie, which the gate never passes | the same |
@@ -629,6 +639,7 @@ A `502` or `503` with no JSON body comes from Caddy, not the gate: the gate cont
 | --- | --- | --- |
 | `ReaderGateDown` fires, or `reader-health` fails in `traces status` | the gate's own `/healthz` reports `langfuse` or `grafana` as false, or the gate does not answer. `ok` is false when either is. The check names the upstream | `traces logs reader-gate`; then the upstream's logs (`langfuse-web`, `grafana-mcp`). Ingest is not affected. The health path fails too, so the external monitor reports it |
 | `502 credential-unavailable` on the Langfuse route | the placeholder is still installed, or the file is missing or malformed | `traces reader backend status`; `traces reader backend langfuse`. A placeholder is expected during setup and does not fail `reader-health` |
+| `502 credential-refused` on the Langfuse route | the Viewer key the host holds was deleted in the UI or lost its role. Every reader sees it, and no reader's token is at fault | `traces reader backend status`; `traces reader backend langfuse` with a new Viewer key |
 | Grafana MCP calls fail, the gate is healthy | the service-account token is a placeholder, revoked or deleted | `traces reader backend status`; `traces reader backend grafana` |
 | the deploy fails `reader-ready` | the reader images did not pull, or a service did not start healthy. The route is untouched | `traces logs reader-gate`, `traces logs grafana-mcp`; deploy again, which recreates both |
 | the deploy fails `agent-routes` | the message names each route and what it answered. `404`: Caddy has no route, so the Caddy config did not reach the running container. `502` or `503`: no gate answered. `unreachable`: nothing answered in time. The proof is skipped when `reader-ready` failed | for `404`, deploy again; for `502`, `503` or `unreachable`, `traces status` and `traces logs reader-gate` |

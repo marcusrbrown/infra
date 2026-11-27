@@ -2868,6 +2868,18 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       'reader-ready',
       'The reader gate and the Grafana MCP server',
       async () => {
+        // The reader token file and the two backend credential files: created only when absent, with a void line or a
+        // placeholder, and never compared or written again. Here and not before the route is decided: a file that
+        // cannot be prepared fails `reader-ready` and must not hold healthy ingest.
+        for (const kind of READER_FILE_KINDS) {
+          const {sentinel} = await sh(
+            `Reader file ${kind}`,
+            readerFileScript(kind, deployId),
+            READER_FILE_SENTINELS,
+            `${readerFileContent(kind, kind === 'token' ? deps.voidTokenLine() : '')}\n`,
+          )
+          if (sentinel === 'TRACES_READER_FILE_CREATED') log(`  created the ${kind} reader file as a placeholder`)
+        }
         await sh('Pull the reader images', pullScript(deployId, 'pull-reader', READER_SERVICES), [
           STEP_SENTINEL('pull-reader'),
         ])
@@ -2982,18 +2994,6 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       )
       if (sentinel === 'TRACES_TOKEN_CREATED') log(`  created a deny-all token file for ${group}`)
     }
-    // The reader token file and the two backend credential files: created only when absent, with a void line or a
-    // placeholder, and never compared or written again. They are not in `files`, so no content drift can reach them.
-    for (const kind of READER_FILE_KINDS) {
-      const {sentinel} = await sh(
-        `Reader file ${kind}`,
-        readerFileScript(kind, deployId),
-        READER_FILE_SENTINELS,
-        `${readerFileContent(kind, kind === 'token' ? deps.voidTokenLine() : '')}\n`,
-      )
-      if (sentinel === 'TRACES_READER_FILE_CREATED') log(`  created the ${kind} reader file as a placeholder`)
-    }
-
     // A bootstrap pair that is not among the inputs but is on the host (in the `.env` about to be replaced) is set
     // aside until Langfuse is proven to refuse it. `.env` is rewritten without it, so this is its only copy.
     const recorded = inputs.bootstrapKey === undefined ? (host.envBootstrap ?? host.pendingBootstrap) : undefined

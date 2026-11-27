@@ -218,6 +218,12 @@ export const TRACES_READER_LANGFUSE_FILE = `${TRACES_APP_DIR}/secrets/reader-gat
 /** The Grafana Viewer service-account token, read by the Grafana MCP server. Owned `root:GRAFANA_MCP_USER_ID`, mode 0440. */
 export const TRACES_GRAFANA_MCP_TOKEN_FILE = `${TRACES_APP_DIR}/secrets/grafana-mcp/token`
 
+/**
+ * Held by one `traces reader backend` run from its first change to its last. The file names the run (`<run id> <epoch>`)
+ * and is empty when free; every script that changes a credential file takes `flock` on it and checks the run id.
+ */
+export const TRACES_READER_BACKEND_LOCK = `${TRACES_APP_DIR}/secrets/.reader-backend.lock`
+
 /** Siblings of a credential file: the candidate being checked, and the one it replaced. */
 export const READER_STAGED_SUFFIX = '.staged'
 export const READER_PREVIOUS_SUFFIX = '.previous'

@@ -1,3 +1,4 @@
+/* eslint-disable no-template-curly-in-string -- the host scripts are shell text, and `${...}` is shell expansion */
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {FetchLike} from './ingest'
@@ -10,7 +11,7 @@ import {dirname, join, resolve} from 'node:path'
 import {z} from 'zod'
 
 import {TRACES_READER_DIR, TRACES_READER_LOCK} from './host'
-import {hasSentinel, runRemote, withRemoteSession} from './remote'
+import {hasSentinel, REMOTE_DEADLINE_MS, runRemote, withRemoteSession} from './remote'
 import {
   COPY_ATTRIBUTES,
   describeStatus,
@@ -96,52 +97,102 @@ export const READER_LOCK_BUSY_SENTINEL = 'TRACES_READER_LOCK_BUSY'
 /** What `append` prints, and exits non-zero, when a fresh add finds a line for the consumer already in the file. */
 export const READER_CONSUMER_EXISTS_SENTINEL = 'TRACES_READER_CONSUMER_EXISTS'
 
+/** What `append` prints, and exits non-zero, when `revoke --all` ran since the caller read the token file. */
+export const READER_GENERATION_CHANGED_SENTINEL = 'TRACES_READER_GENERATION_CHANGED'
+
 const ENTRY_PREFIX = 'TRACES_READER '
 const REMOVED_PREFIX = 'TRACES_READER_REMOVED='
 const REAL_PREFIX = 'TRACES_READER_REAL='
 const BAD_PREFIX = 'TRACES_READER_BAD='
 const PROBE_PREFIX = 'TRACES_READER_PROBE_STATUS='
+const GENERATION_PREFIX = 'TRACES_READER_GENERATION='
+const DENY_LINES_PREFIX = 'TRACES_READER_DENY_LINES='
+const DENY_VOID_PREFIX = 'TRACES_READER_DENY_VOID='
 
 /** The directory, the token file in it, and a refusal to go on when the file is a directory. */
 const LOCATE = [`d=${TRACES_READER_DIR}`, 'f="$d/token"', 'test -d "$d"', 'test ! -d "$f"']
 
 const LOCK = lockFlock(TRACES_READER_LOCK, READER_LOCK_BUSY_SENTINEL)
 
-/**
- * `classify "$@"` sets `kind` to `real`, `void` or `bad` from the fields of one line, and `tok`, `f2`, `f3`, `f4`
- * from its first four fields. It mirrors the gate's parser: a real line is exactly four fields (token, fingerprint,
- * consumer, date), the fingerprint is the first 12 hex characters of the token's SHA-256, and a void line is exactly
- * three. A line that is neither is `bad`, and the gate denies the whole file for it.
- */
-const CLASSIFY = `classify() { ${[
-  'argc=$#',
-  `tok=\${1:-}`,
-  `f2=\${2:-}`,
-  `f3=\${3:-}`,
-  `f4=\${4:-}`,
-  'kind=bad',
-  'case "$tok" in trc_void_*) if [ "$f2" = void ] && [ -n "$f3" ] && [ "$argc" -eq 3 ]; then kind=void; fi; return 0 ;; esac',
-  '[ "$argc" -eq 4 ] || return 0',
-  'case "$tok" in trc_*) ;; *) return 0 ;; esac',
-  'case "$tok" in *[!A-Za-z0-9_-]*) return 0 ;; esac',
-  `[ "\${#tok}" -ge 36 ] || return 0`,
-  `[ "\${#tok}" -le 132 ] || return 0`,
-  'case "$f2" in *[!0-9a-f]*) return 0 ;; ????????????) ;; *) return 0 ;; esac',
-  'case "$f3" in [a-z]*) ;; *) return 0 ;; esac',
-  'case "$f3" in *[!a-z0-9-]*) return 0 ;; esac',
-  `[ "\${#f3}" -le 31 ] || return 0`,
-  'case "$f4" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z) ;; *) return 0 ;; esac',
-  'h=$(printf %s "$tok" | sha256sum | cut -c1-12)',
-  '[ "$h" = "$f2" ] || return 0',
-  'kind=real',
-].join('; ')}; }`
+/** The characters the gate's `trim()` strips from a blank line, as ASCII: space, tab, CR, form feed, vertical tab. */
+const BLANK_CHARACTERS = String.raw`ws=$(printf ' \t\r\f\v')`
+
+const shellFunction = (name: string, ...body: string[]): string => `${name}() { ${body.join('; ')}; }`
+
+/** The gate's `TOKEN_PATTERN` (`^trc_[\w-]{32,128}$`): `trc_` and 32 to 128 characters of `[A-Za-z0-9_-]`. */
+const IS_TOKEN = shellFunction(
+  'istoken',
+  'case "$1" in trc_*) ;; *) return 1 ;; esac',
+  'case "$1" in *[!A-Za-z0-9_-]*) return 1 ;; esac',
+  '[ "${#1}" -ge 36 ] && [ "${#1}" -le 132 ]',
+)
 
 /**
- * One loop over the token file, a line at a time with globbing off. A blank line is skipped; `kind`, `tok` and the
- * fields are set by `classify`. A last line with no newline counts. The caller closes it with `; done < "$f"`.
+ * The gate's `isDate`: `YYYY-MM-DDT<time>Z` where the time is `HH:MM`, `HH:MM:SS` or `HH:MM:SS.f` (one digit or more) and
+ * the date and time are in range. The gate asks `Date.parse`, which takes day 1 to 31 of any month, hour 24 only as
+ * `24:00:00`, minute and second 0 to 59.
+ */
+const IS_DATE = shellFunction(
+  'isdate',
+  'case "$1" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z) ;; *) return 1 ;; esac',
+  'dm=${1#*-}; mo=${dm%%-*}; dd=${dm#*-}; dd=${dd%%T*}; tm=${1#*T}; tm=${tm%Z}',
+  '[ "$mo" -ge 1 ] && [ "$mo" -le 12 ] && [ "$dd" -ge 1 ] && [ "$dd" -le 31 ] || return 1',
+  'fr=0',
+  'case "$tm" in [0-9][0-9]:[0-9][0-9]) hh=${tm%%:*}; mi=${tm#*:}; ss=0 ;; [0-9][0-9]:[0-9][0-9]:[0-9][0-9]) hh=${tm%%:*}; tr=${tm#*:}; mi=${tr%%:*}; ss=${tr#*:} ;; [0-9][0-9]:[0-9][0-9]:[0-9][0-9].*) hh=${tm%%:*}; tr=${tm#*:}; mi=${tr%%:*}; ss=${tr#*:}; fr=${ss#*.}; ss=${ss%%.*}; case "$fr" in ""|*[!0-9]*) return 1 ;; esac ;; *) return 1 ;; esac',
+  '[ "$mi" -le 59 ] && [ "$ss" -le 59 ] || return 1',
+  '[ "$hh" -le 23 ] && return 0',
+  '[ "$hh" -eq 24 ] && [ "$mi" -eq 0 ] && [ "$ss" -eq 0 ] || return 1',
+  'case "$fr" in *[!0]*) return 1 ;; esac',
+)
+
+/**
+ * `classify "$line"` sets `kind` to `blank`, `real`, `void` or `bad`, and `tok`, `f2`, `f3`, `f4` to the first four
+ * fields. It mirrors the gate's parser (`apps/traces/reader-gate/tokens.ts`) rule for rule, and the fields are split the
+ * same way: on single spaces only, so a doubled space, a leading or trailing space or a tab is a field of its own or part
+ * of one, and the line is `bad`. A blank line (only ASCII whitespace) is skipped, as the gate skips it. A real line is
+ * exactly four fields (token, fingerprint, consumer, date), the fingerprint is the first 12 hex characters of the token's
+ * SHA-256, and a void line is exactly three (a void token, `void`, a date). A line that is none of these is `bad`, and
+ * the gate denies the whole file for it. A test holds this to the gate on a list of files.
+ */
+const CLASSIFY = [
+  BLANK_CHARACTERS,
+  IS_TOKEN,
+  IS_DATE,
+  shellFunction(
+    'classify',
+    'tok=; f2=; f3=; f4=; nf=1; kind=bad',
+    'case "$1" in *[!"$ws"]*) ;; *) kind=blank; return 0 ;; esac',
+    'tok=${1%% *}; rest=${1#"$tok"}',
+    'if [ -n "$rest" ]; then rest=${rest# }; nf=2; f2=${rest%% *}; rest=${rest#"$f2"}; fi',
+    'if [ "$nf" -ge 2 ] && [ -n "$rest" ]; then rest=${rest# }; nf=3; f3=${rest%% *}; rest=${rest#"$f3"}; fi',
+    'if [ "$nf" -ge 3 ] && [ -n "$rest" ]; then rest=${rest# }; nf=4; f4=${rest%% *}; rest=${rest#"$f4"}; fi',
+    'if [ "$nf" -ge 4 ] && [ -n "$rest" ]; then nf=5; fi',
+    'case "$tok" in trc_void_*) if [ "$nf" -eq 3 ] && [ "$f2" = void ] && istoken "$tok" && isdate "$f3"; then kind=void; fi; return 0 ;; esac',
+    '[ "$nf" -eq 4 ] || return 0',
+    'istoken "$tok" || return 0',
+    'case "$f2" in *[!0-9a-f]*|"") return 0 ;; ????????????) ;; *) return 0 ;; esac',
+    'case "$f3" in [a-z]*) ;; *) return 0 ;; esac',
+    'case "$f3" in *[!a-z0-9-]*) return 0 ;; esac',
+    '[ "${#f3}" -le 31 ] || return 0',
+    'isdate "$f4" || return 0',
+    'h=$(printf %s "$tok" | sha256sum | cut -c1-12)',
+    '[ "$h" = "$f2" ] || return 0',
+    'kind=real',
+  ),
+].join('; ')
+
+/**
+ * One loop over the token file, a line at a time. `kind`, `tok` and the fields are set by `classify`; a blank line is
+ * skipped. A last line with no newline counts. The caller closes it with `; done < "$f"`.
  */
 const EACH_LINE =
-  'while IFS= read -r line || [ -n "$line" ]; do set -f; set -- $line; if [ $# -eq 0 ]; then continue; fi; classify "$@"'
+  'while IFS= read -r line || [ -n "$line" ]; do classify "$line"; if [ "$kind" = blank ]; then continue; fi'
+
+/** `g` is the number in the generation file beside the token file, 0 when there is none, or it is empty or garbled. */
+const READ_GENERATION = [
+  `if [ -f "$d/.generation" ]; then read -r g < "$d/.generation" || g=0; else g=0; fi`,
+  `case "$g" in ''|*[!0-9]*) g=0 ;; esac`,
+]
 
 /** The consumer name on the first stdin line, in the shape the gate accepts, before anything is touched. */
 const READ_CONSUMER = [
@@ -157,13 +208,20 @@ function readScript(op: 'list' | 'lines'): string {
     op === 'lines'
       ? String.raw`printf "${ENTRY_PREFIX}%s %s %s %s\n" "$f2" "$f3" "$f4" "$tok"`
       : String.raw`printf "${ENTRY_PREFIX}%s %s %s\n" "$f2" "$f3" "$f4"`
+  // A token twice is one the gate refuses (its map would hold it once): the second line is malformed. A file with no
+  // line at all is `empty` to the gate, which denies everything.
+  const each = `${EACH_LINE}; nonblank=$((nonblank+1)); if [ "$kind" = real ]; then case "$seen" in *" $tok "*) kind=bad ;; *) seen="$seen$tok " ;; esac; fi; case "$kind" in real) ${print} ;; void) ;; *) bad=$((bad+1)) ;; esac; done < "$f"`
   return script(
     'set -e',
     ...LOCATE,
     CLASSIFY,
     'bad=0',
-    `if [ -f "$f" ]; then ${EACH_LINE}; case "$kind" in real) ${print} ;; void) ;; *) bad=$((bad+1)) ;; esac; done < "$f"; fi`,
+    'nonblank=0',
+    "seen=' '",
+    `if [ -f "$f" ]; then ${each}; if [ "$nonblank" -eq 0 ]; then bad=$((bad+1)); fi; fi`,
+    ...READ_GENERATION,
     `echo ${BAD_PREFIX}$bad`,
+    `echo ${GENERATION_PREFIX}$g`,
     `echo ${readerSentinel(op)}`,
   )
 }
@@ -176,23 +234,28 @@ export const READER_REMOTE = {
   /**
    * Append the line on stdin line 1 to the token file by writing a new file and renaming it over the old one. The line
    * must classify as a reader line (four fields, the fingerprint of its token), or nothing is touched. Stdin line 2 is
-   * `replace` when the new line goes beside the consumer's old one; anything else, or no line, is a fresh add. A fresh
-   * add rechecks under the lock that the file holds no reader line for the consumer, and when it does prints
-   * `TRACES_READER_CONSUMER_EXISTS` and exits 1 without writing: the check the caller made before the lock can be stale.
+   * `replace` when the new line goes beside the consumer's old one; anything else, or no line, is a fresh add. Line 3 is
+   * the generation the caller read with `list` or `lines`: a `revoke --all` since then has bumped the generation file
+   * under this lock, and the append prints `TRACES_READER_GENERATION_CHANGED` and exits 1 without writing, so a token
+   * issued against a roster that was since wiped is never written. A fresh add also rechecks under the lock that the
+   * file holds no reader line for the consumer, and when it does prints `TRACES_READER_CONSUMER_EXISTS` and exits 1
+   * without writing: the check the caller made before the lock can be stale.
    */
   append: script(
     'set -e',
     'IFS= read -r line',
     'IFS= read -r mode || mode=',
+    'IFS= read -r gen || gen=',
+    `case "$gen" in ''|*[!0-9]*) exit 1 ;; esac`,
     CLASSIFY,
-    'set -f',
-    'set -- $line',
-    'classify "$@"',
+    'classify "$line"',
     '[ "$kind" = real ]',
     'nl="$tok $f2 $f3 $f4"',
     'who="$f3"',
     ...LOCK,
     ...LOCATE,
+    ...READ_GENERATION,
+    `if [ "$g" != "$gen" ]; then echo ${READER_GENERATION_CHANGED_SENTINEL}; exit 1; fi`,
     `if [ "$mode" != replace ] && [ -f "$f" ]; then ${EACH_LINE}; if [ "$kind" = real ] && [ "$f3" = "$who" ]; then echo ${READER_CONSUMER_EXISTS_SENTINEL}; exit 1; fi; done < "$f"; fi`,
     ...TEMP_FILE,
     COPY_ATTRIBUTES,
@@ -227,16 +290,30 @@ export const READER_REMOTE = {
     `echo ${BAD_PREFIX}$b`,
     `echo ${readerSentinel('remove')}`,
   ),
-  /** Replace the file with the void line on stdin and nothing else (deny-all), by the same write-and-rename. */
+  /**
+   * Replace the file with the void line on stdin and nothing else (deny-all), by the same write-and-rename, and bump the
+   * generation file beside it first, under the same lock, so an `append` that read the old roster is refused. Then read
+   * the file back, still under the lock, and print how many lines it holds and how many are void lines: the caller
+   * requires one and one.
+   */
   deny: script(
     'set -e',
     ...READ_VOID_LINE,
+    CLASSIFY,
     ...LOCK,
     ...LOCATE,
     ...TEMP_FILE,
     COPY_ATTRIBUTES,
+    ...READ_GENERATION,
+    'gf="$d/.generation"',
+    String.raw`printf "%s\n" "$((g+1))" > "$gf"`,
     String.raw`printf "%s\n" "$vl" > "$t"`,
     'mv -f "$t" "$f"',
+    'n=0',
+    'v=0',
+    `while IFS= read -r line || [ -n "$line" ]; do classify "$line"; case "$kind" in blank) ;; void) n=$((n+1)); v=$((v+1)) ;; *) n=$((n+1)) ;; esac; done < "$f"`,
+    `echo ${DENY_LINES_PREFIX}$n`,
+    `echo ${DENY_VOID_PREFIX}$v`,
     `echo ${readerSentinel('deny')}`,
   ),
   /**
@@ -273,11 +350,18 @@ export interface ReaderDeps extends RemoteDeps, ProveDeps {
   isTty?: boolean | undefined
   /** The home directory for the default workstation file. The default reads `HOME`. */
   homeDir?: string | undefined
+  /** How long one remote call may take. Defaults to `REMOTE_DEADLINE_MS`. */
+  deadlineMs?: number | undefined
 }
 
 const REQUEST_TIMEOUT_MS = 10_000
 
-const remoteOptions = (deps: ReaderDeps): RunRemoteOptions => ({spawn: deps.spawn, session: deps.session})
+/** Every call gets its own deadline: a host that stops answering fails the command instead of holding it. */
+const remoteOptions = (deps: ReaderDeps): RunRemoteOptions => ({
+  spawn: deps.spawn,
+  session: deps.session,
+  signal: AbortSignal.timeout(deps.deadlineMs ?? REMOTE_DEADLINE_MS),
+})
 
 // ─── Reading the host ─────────────────────────────────────────────────────────
 
@@ -289,7 +373,7 @@ interface ReaderEntry {
   token?: string
 }
 
-type ReadResult = {ok: true; entries: ReaderEntry[]; bad: number} | {ok: false; error: string}
+type ReadResult = {ok: true; entries: ReaderEntry[]; bad: number; generation: string} | {ok: false; error: string}
 
 const ENTRY_LINE = /^TRACES_READER ([\da-f]{12}) ([a-z][\da-z-]{0,30}) (\S+)(?: (trc_[\w-]+))?$/
 
@@ -315,7 +399,14 @@ async function readEntries(host: string, op: 'list' | 'lines', deps: ReaderDeps)
     return {ok: false, error: `exit ${result.exitCode}: ${result.stderr || 'no confirmation from the host'}`}
   }
   const bad = countOf(result.stdout, BAD_PREFIX)
-  return {ok: true, entries: parseEntries(result.stdout, op === 'lines'), bad: Number.isNaN(bad) ? 0 : bad}
+  const generation = new RegExp(String.raw`^${GENERATION_PREFIX}(\d+)$`, 'm').exec(result.stdout)?.[1]
+  if (generation === undefined) return {ok: false, error: 'the host did not report the token file generation'}
+  return {
+    ok: true,
+    entries: parseEntries(result.stdout, op === 'lines'),
+    bad: Number.isNaN(bad) ? 0 : bad,
+    generation,
+  }
 }
 
 const isLockBusy = (result: RemoteResult): boolean =>
@@ -323,6 +414,9 @@ const isLockBusy = (result: RemoteResult): boolean =>
 
 const isConsumerExists = (result: RemoteResult): boolean =>
   result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === READER_CONSUMER_EXISTS_SENTINEL)
+
+const isGenerationChanged = (result: RemoteResult): boolean =>
+  result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === READER_GENERATION_CHANGED_SENTINEL)
 
 const alreadyHasTokenMessage = (consumer: string, fingerprints: readonly string[]): string =>
   `${consumer} already has a reader token${fingerprints.length > 0 ? ` (${fingerprints.join(', ')})` : ''}. Pass --replace to install a new one beside it and remove the old one after delivery, or revoke it first with: infra traces reader revoke ${consumer}`
@@ -549,6 +643,9 @@ function writeWorkstationFile(path: string, token: string, replace: boolean): vo
   }
 }
 
+/** `delivered` and `pending` name the destinations that hold the token and those that do not; empty for a file or a terminal. */
+type Delivery = {ok: true} | {ok: false; error: string; delivered: string[]; pending: string[]}
+
 async function deliver(
   consumer: string,
   plan: DeliveryPlan,
@@ -558,7 +655,7 @@ async function deliver(
   ctx: ActionCtx,
   out: Out,
   deps: ReaderDeps,
-): Promise<{ok: true} | {ok: false; error: string}> {
+): Promise<Delivery> {
   if (plan.kind === 'terminal') {
     // The one deliberate print of a token, to the operator's own terminal, once.
     out.log(`New ${consumer} token (fingerprint ${fingerprint}). It is shown once and is stored nowhere else:`)
@@ -572,20 +669,22 @@ async function deliver(
       return {
         ok: false,
         error: `the token file could not be written (${error instanceof Error ? error.message : 'error'})`,
+        delivered: [],
+        pending: [],
       }
     }
     out.log(`Wrote the ${consumer} token to ${plan.path} (mode 0600).`)
     return {ok: true}
   }
   const done: string[] = []
-  for (const target of plan.targets) {
+  for (const [index, target] of plan.targets.entries()) {
     const result = await setGithubSecret(target.command, token, deps.spawn)
     if (!result.ok) {
       return {
         ok: false,
-        error: `delivery to ${target.label} failed (${result.error}). ${
-          done.length === 0 ? 'It was delivered nowhere.' : `It was delivered to: ${done.join('; ')}.`
-        }`,
+        error: `delivery to ${target.label} failed (${result.error}).${done.length === 0 ? ' It was delivered nowhere.' : ''}`,
+        delivered: done,
+        pending: plan.targets.slice(index).map(entry => entry.label),
       }
     }
     done.push(target.label)
@@ -714,10 +813,17 @@ async function addFlow(
 
   const written = await runRemote(host, READER_REMOTE.append, {
     ...remoteOptions(deps),
-    stdin: `${token} ${fingerprint} ${consumer} ${createdAt}\n${replace ? 'replace' : 'fresh'}\n`,
+    stdin: `${token} ${fingerprint} ${consumer} ${createdAt}\n${replace ? 'replace' : 'fresh'}\n${existing.generation}\n`,
   })
   if (isLockBusy(written)) {
     out.error(LOCK_BUSY_MESSAGE)
+    return false
+  }
+  if (isGenerationChanged(written)) {
+    // `revoke --all` ran since the read above. The host refused under the lock and wrote nothing.
+    out.error(
+      'The reader token file was denied (`infra traces reader revoke --all`) after this command read it. Nothing was written and nothing was delivered. To continue, run add again.',
+    )
     return false
   }
   if (isConsumerExists(written)) {
@@ -749,9 +855,13 @@ async function addFlow(
 
   const delivered = await deliver(consumer, planned.plan, token, fingerprint, options, ctx, out, deps)
   if (!delivered.ok) {
+    const partial = delivered.delivered.length > 0
+    const where = partial
+      ? ` Delivered to: ${delivered.delivered.join(', ')}. Not delivered to: ${delivered.pending.join(', ')}.`
+      : ''
     if (replacing) {
       out.error(
-        `The ${consumer} token ${fingerprint} is live, but ${delivered.error} The consumer may or may not hold it, so neither token was revoked. The consumer now has ${previous.length + 1} tokens.`,
+        `The ${consumer} token ${fingerprint} is live, but ${delivered.error}${where} The consumer may or may not hold it, so neither token was revoked. The consumer now has ${previous.length + 1} tokens.`,
       )
       out.error(`If the new token did not arrive, revoke it: infra traces reader revoke ${consumer} ${fingerprint}`)
       for (const entry of previous) {
@@ -759,6 +869,15 @@ async function addFlow(
           `Once the consumer uses the new one, revoke the old one: infra traces reader revoke ${consumer} ${entry.fingerprint}`,
         )
       }
+      return false
+    }
+    if (partial) {
+      // Some destination holds it, so revoking would break that one. The state is uncertain: keep the token and say how to end it.
+      out.error(
+        `The ${consumer} token ${fingerprint} is live and was NOT revoked, because it reached some destinations: ${delivered.error}${where}`,
+      )
+      out.error(`To finish: ${finishCommand(consumer, options)}`)
+      out.error(`To withdraw it instead: infra traces reader revoke ${consumer} ${fingerprint}`)
       return false
     }
     out.error(
@@ -790,6 +909,13 @@ async function addFlow(
     }
   }
   return ok
+}
+
+/** The command that ends a partial delivery: a new token to every destination, then the partly delivered one removed. */
+function finishCommand(consumer: string, options: AddOptions): string {
+  const repos = (options.repo ?? []).map(repo => `--repo ${repo}`).join(' ')
+  const secret = options.secretName === undefined ? '' : ` --secret-name ${options.secretName}`
+  return `infra traces reader add ${consumer} --replace ${repos}${secret}`
 }
 
 /** Take a token this command wrote back out and prove it refused; say what is left to do if that does not work. */
@@ -831,8 +957,14 @@ export async function tracesReaderAddAction(
 
 // ─── list ─────────────────────────────────────────────────────────────────────
 
+export interface ListOptions {
+  key?: string | undefined
+  /** One JSON object on standard output instead of text. */
+  json?: boolean | undefined
+}
+
 export async function tracesReaderListAction(
-  options: {key?: string | undefined},
+  options: ListOptions,
   ctx: ActionCtx,
   deps: ReaderDeps = {},
 ): Promise<void> {
@@ -842,7 +974,27 @@ export async function tracesReaderListAction(
   if (!ok) ctx.process.exit(1)
 }
 
-async function listFlow(options: {key?: string | undefined}, out: Out, deps: ReaderDeps): Promise<boolean> {
+/** The roster as data: no token, no void line. `duplicates` are the consumers with more than one line. */
+export interface ListReport {
+  consumers: {consumer: string; fingerprint: string; date: string}[]
+  duplicates: string[]
+  malformed: number
+}
+
+function buildListReport(entries: readonly ReaderEntry[], malformed: number): ListReport {
+  const names = [...new Set(entries.map(entry => entry.consumer))].sort()
+  return {
+    consumers: names.flatMap(name =>
+      entries
+        .filter(entry => entry.consumer === name)
+        .map(({consumer, fingerprint, date}) => ({consumer, fingerprint, date})),
+    ),
+    duplicates: names.filter(name => entries.filter(entry => entry.consumer === name).length > 1),
+    malformed,
+  }
+}
+
+async function listFlow(options: ListOptions, out: Out, deps: ReaderDeps): Promise<boolean> {
   const targets = resolveTargets(options.key, false)
   if (!targets.ok) {
     out.error(targets.error)
@@ -852,6 +1004,12 @@ async function listFlow(options: {key?: string | undefined}, out: Out, deps: Rea
   if (!result.ok) {
     out.error(`The reader token file could not be read (${result.error}).`)
     return false
+  }
+  if (options.json === true) {
+    out.log(JSON.stringify(buildListReport(result.entries, result.bad)))
+    // The exit code is the text mode's: a file the gate would refuse fails the command.
+    if (result.bad > 0) out.error(malformedMessage(result.bad))
+    return result.bad === 0
   }
   if (result.entries.length === 0) out.log('(no reader tokens)')
   const consumers = [...new Set(result.entries.map(entry => entry.consumer))].sort()
@@ -992,6 +1150,16 @@ async function revokeAll(options: RevokeOptions, out: Out, secrets: string[], de
     )
     return false
   }
+  // The host read the file back under the same lock. Anything but the one void line means a writer that does not take
+  // the lock got in, and the file is not deny-all.
+  const lines = countOf(denied.stdout, DENY_LINES_PREFIX)
+  const voids = countOf(denied.stdout, DENY_VOID_PREFIX)
+  if (lines !== 1 || voids !== 1) {
+    out.error(
+      `The token file was rewritten, but a read-back under the lock did not hold exactly one void line (${Number.isNaN(lines) ? 'an unknown number of' : lines} lines, ${Number.isNaN(voids) ? 'an unknown number of' : voids} void). Another writer changed it, so the file is not deny-all and tokens may still be accepted. Run \`infra traces reader list\`, then run \`infra traces reader revoke --all\` again.`,
+    )
+    return false
+  }
 
   const route = await chooseRoute(host, origin, deps)
   let ok = true
@@ -1056,6 +1224,14 @@ export function registerTracesReader(cli: ReturnType<typeof goke>): void {
 
   cli
     .command('traces reader list', 'List reader tokens per consumer: fingerprint and date. Never token text.')
+    .option(
+      '--json',
+      z
+        .boolean()
+        .describe(
+          'Output one JSON object: consumers (consumer, fingerprint, date), duplicates (consumers with more than one token) and malformed (a count). Exit codes are the same.',
+        ),
+    )
     .option('--key [key]', keyOption)
     .action((options, ctx) => tracesReaderListAction(options, ctx))
 

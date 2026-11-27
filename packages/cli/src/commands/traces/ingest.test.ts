@@ -33,6 +33,8 @@ import {
   LOCK_BUSY_SENTINEL,
   OPEN_REFUSED_SENTINEL,
   REMOTE_COMMANDS,
+  SERVER_ALIVE_COUNT_MAX,
+  SERVER_ALIVE_INTERVAL,
 } from './remote'
 
 const ENV_KEYS = ['TRACES_HOST', 'TRACES_DOMAIN', 'TRACES_SSH_KEY', 'TRACES_OTHER'] as const
@@ -230,6 +232,10 @@ describe('traces ingest hold', () => {
       `ControlPath=${controlPathOf(call?.argv ?? [])}`,
       '-o',
       `ControlPersist=${CONTROL_PERSIST}`,
+      '-o',
+      `ServerAliveInterval=${SERVER_ALIVE_INTERVAL}`,
+      '-o',
+      `ServerAliveCountMax=${SERVER_ALIVE_COUNT_MAX}`,
       'root@host.example.invalid',
       REMOTE_COMMANDS.writeIngestState('held'),
     ])

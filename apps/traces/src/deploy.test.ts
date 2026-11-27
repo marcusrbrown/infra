@@ -2935,6 +2935,48 @@ describe('the reader services start after the route is decided', () => {
     expect(host.served).toBe('open')
   })
 
+  it.each(READER_FILE_KINDS)(
+    'prepares the %s reader file after the route is decided and before the reader services pull',
+    async kind => {
+      const host = new FakeHost()
+      await run(host)
+      const step = `reader-file:${kind}`
+      expect(host.count(step)).toBe(1)
+      expect(host.indexOf(step)).toBeGreaterThan(host.indexOf('raw:set-state:open'))
+      expect(host.indexOf(step)).toBeGreaterThan(host.indexOf('up-grafana'))
+      expect(host.indexOf(step)).toBeLessThan(host.indexOf('pull-reader'))
+    },
+  )
+
+  // A symlinked, non-regular or unrepairable reader file exits its script non-zero: that fails reader-ready only.
+  it.each(READER_FILE_KINDS)(
+    'a %s reader file that cannot be prepared fails reader-ready and leaves an open route open',
+    async kind => {
+      const host = await openStack()
+      const mark = host.calls.length
+      host.options.override = failAt(`reader-file:${kind}`)
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+      expect((error as OperatorSurfaceError).ingest).toBe('open')
+      expect(host.served).toBe('open')
+      expect(host.setStates()).toEqual(['open'])
+      expect(host.marker).toBeUndefined()
+      expect(ranSince(host, mark, 'pull-reader')).toBe(0)
+      expect(ranSince(host, mark, 'up-reader')).toBe(0)
+      expect(ranSince(host, mark, 'probe-agent-routes')).toBe(0)
+    },
+  )
+
+  it('a reader file that cannot be prepared does not stop Grafana or the embedder', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.override = failAt('reader-file:token')
+    await failure(host)
+    expect(ranSince(host, mark, 'up-grafana')).toBe(1)
+    expect(ranSince(host, mark, 'up-embedder')).toBe(1)
+  })
+
   it('does not start a service whose image did not pull', async () => {
     const host = await openStack()
     const mark = host.calls.length

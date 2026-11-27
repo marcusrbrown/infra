@@ -1,6 +1,9 @@
+/* eslint-disable no-template-curly-in-string -- the host scripts are shell text, and `${...}` is shell expansion */
 import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {RemoteDeps, RemoteResult} from './remote'
+
+import {createHash} from 'node:crypto'
 
 import * as clack from '@clack/prompts'
 import {z} from 'zod'
@@ -10,10 +13,11 @@ import {
   READER_LANGFUSE_PLACEHOLDER,
   TRACES_APP_DIR,
   TRACES_GRAFANA_MCP_TOKEN_FILE,
+  TRACES_READER_BACKEND_LOCK,
   TRACES_READER_LANGFUSE_FILE,
 } from './host'
-import {hasSentinel, runRemote, withRemoteSession} from './remote'
-import {guarded, keyOption, resolveTargets, script, type Out} from './token-common'
+import {hasSentinel, REMOTE_DEADLINE_MS, runRemote, withRemoteSession} from './remote'
+import {guarded, keyOption, lockFlock, resolveTargets, script, type Out, type RandomBytes} from './token-common'
 
 declare const process: {
   env: Record<string, string | undefined>
@@ -72,7 +76,25 @@ const sentinels = {
   api: 'TRACES_GRAFANA_API_DONE',
   createToken: 'TRACES_GRAFANA_CREATE_TOKEN_DONE',
   tokenCheck: 'TRACES_GRAFANA_TOKEN_CHECK_DONE',
+  locked: 'TRACES_READER_BACKEND_LOCKED',
+  released: 'TRACES_READER_BACKEND_RELEASED',
+  liveChecked: 'TRACES_GRAFANA_LIVE_CHECKED',
 } as const
+
+/** Printed, with exit 1, when another backend run holds the rotation lock (or it was not free in 30 seconds). */
+export const LOCK_BUSY_SENTINEL = 'TRACES_READER_BACKEND_BUSY'
+
+/** Printed, with exit 1 and nothing changed, by a step whose run no longer holds the lock (a stale takeover). */
+export const LOCK_LOST_SENTINEL = 'TRACES_READER_BACKEND_LOCK_LOST'
+
+/** Printed, with exit 1 and nothing changed, when the staged Langfuse file is not the one that was checked. */
+export const STAGED_CHANGED_SENTINEL = 'TRACES_READER_BACKEND_STAGED_CHANGED'
+
+/** A lock older than this is taken over. A run takes minutes; one that died holds it this long. */
+export const LOCK_STALE_SECONDS = 1800
+
+/** The same for the Grafana flow, whose token creation and gate read can each wait on Grafana. */
+export const GRAFANA_REMOTE_DEADLINE_MS = 300_000
 
 /** Printed, with exit 1 and nothing changed, when a previous pair is still waiting to be confirmed revoked. */
 export const PREVIOUS_PENDING_SENTINEL = 'TRACES_READER_BACKEND_PREVIOUS_PENDING'
@@ -84,9 +106,36 @@ const STAGED_PREFIX = 'TRACES_GRAFANA_STAGED='
 const KEPT_PREFIX = 'TRACES_READER_BACKEND_PREVIOUS='
 const CREDENTIAL_PREFIX = 'TRACES_READER_CREDENTIAL '
 const UNDO_PREFIX = 'TRACES_READER_BACKEND_UNDO='
+const KEY_SHA_PREFIX = 'TRACES_GRAFANA_KEY_SHA='
+const LIVE_PREFIX = 'TRACES_GRAFANA_LIVE='
 
 const langfuse = CREDENTIALS.langfuse
 const grafana = CREDENTIALS.grafana
+
+/** The run id is the first stdin line of every script that takes the rotation lock: 32 lower-case hex characters. */
+const READ_RUN_ID = ['read -r rid', `case "$rid" in ''|*[!0-9a-f]*) exit 1 ;; esac`, '[ "${#rid}" -eq 32 ] || exit 1']
+
+/** A 64-hex-character SHA-256 on the next stdin line. */
+const readSha = (name: string): string[] => [
+  `read -r ${name}`,
+  `case "$${name}" in ''|*[!0-9a-f]*) exit 1 ;; esac`,
+  `[ "\${#${name}}" -eq 64 ] || exit 1`,
+]
+
+const TAKE_LOCK = lockFlock(TRACES_READER_BACKEND_LOCK, LOCK_BUSY_SENTINEL)
+
+const READ_OWNER = ['owner=', 'read -r owner junk < "$l" || true']
+
+/**
+ * Every script that changes a credential file starts with this: the run id, `flock` on the lock file (held until the
+ * script exits) and a check that the file still names this run. A run whose lock was taken over changes nothing.
+ */
+const HOLD_LOCK = [
+  ...READ_RUN_ID,
+  ...TAKE_LOCK,
+  ...READ_OWNER,
+  `[ "$owner" = "$rid" ] || { echo ${LOCK_LOST_SENTINEL}; exit 1; }`,
+]
 
 /** Give the staged file the directory's group, which deploy sets to the uid of the service that reads it. */
 const OWN_LIKE_DIRECTORY = `chown "$(ls -ld "$d" | awk '{print $3":"$4}')" "$t"`
@@ -113,12 +162,40 @@ const API_ALLOWED = [
 
 export const READER_BACKEND_REMOTE = {
   /**
+   * Take the rotation lock for the run id on stdin line 1. The lock file holds `<run id> <epoch>` and is empty when
+   * free; the read-and-write happens under `flock`. A lock held by another run and younger than the stale limit is
+   * refused (`TRACES_READER_BACKEND_BUSY`, exit 1); an older one is taken over.
+   */
+  acquireLock: script(
+    'set -e',
+    ...READ_RUN_ID,
+    ...TAKE_LOCK,
+    'owner=',
+    'ts=0',
+    'read -r owner ts < "$l" || true',
+    `case "$ts" in ''|*[!0-9]*) ts=0 ;; esac`,
+    'now=$(date +%s)',
+    `if [ -n "$owner" ] && [ "$owner" != "$rid" ] && [ $((now - ts)) -lt ${LOCK_STALE_SECONDS} ]; then echo ${LOCK_BUSY_SENTINEL}; exit 1; fi`,
+    String.raw`printf '%s %s\n' "$rid" "$now" > "$l"`,
+    `echo ${sentinels.locked}`,
+  ),
+  /** Empty the lock file, but only when it still names the run id on stdin line 1. Another run's lock is left alone. */
+  releaseLock: script(
+    'set -e',
+    ...READ_RUN_ID,
+    ...TAKE_LOCK,
+    ...READ_OWNER,
+    'if [ "$owner" = "$rid" ]; then : > "$l"; fi',
+    `echo ${sentinels.released}`,
+  ),
+  /**
    * Write the pair on stdin to `langfuse-basic.staged`: a new file in the credential directory, owned like it, mode
    * 0440, renamed into place. The shape is checked first; the placeholder is refused. A previous pair that has not
    * been confirmed revoked stops it, so one old pair is never lost track of.
    */
   stageLangfuse: script(
     'set -e',
+    ...HOLD_LOCK,
     'read -r pair',
     'case "$pair" in pk-lf-*:sk-lf-*) ;; *) exit 1 ;; esac',
     'case "$pair" in *[!A-Za-z0-9:_-]*) exit 1 ;; esac',
@@ -143,8 +220,12 @@ export const READER_BACKEND_REMOTE = {
    */
   switchLangfuse: script(
     'set -e',
+    ...HOLD_LOCK,
+    ...readSha('want'),
     `f=${langfuse.file}`,
     `test -f "$f${STAGED_SUFFIX}"`,
+    `got=$(sha256sum "$f${STAGED_SUFFIX}" | cut -c1-64)`,
+    `if [ "$got" != "$want" ]; then echo ${STAGED_CHANGED_SENTINEL}; exit 1; fi`,
     `if [ -e "$f${PREVIOUS_SUFFIX}" ]; then echo ${PREVIOUS_PENDING_SENTINEL}; exit 1; fi`,
     `kept=none`,
     `if [ -f "$f" ] && [ "$(cat "$f")" != '${READER_LANGFUSE_PLACEHOLDER}' ]; then cp -p "$f" "$f${PREVIOUS_SUFFIX}"; kept=kept; fi`,
@@ -154,16 +235,29 @@ export const READER_BACKEND_REMOTE = {
   ),
   /** Remove a staged file that was not switched in. The only deletion besides the previous file. */
   discardStaged: (credential: Credential): string =>
-    script('set -e', `f=${CREDENTIALS[credential].file}`, `rm -f "$f${STAGED_SUFFIX}"`, `echo ${sentinels.discard}`),
+    script(
+      'set -e',
+      ...HOLD_LOCK,
+      `f=${CREDENTIALS[credential].file}`,
+      `rm -f "$f${STAGED_SUFFIX}"`,
+      `echo ${sentinels.discard}`,
+    ),
   /** Remove the previous file, once its credential is proven refused. */
   dropPrevious: (credential: Credential): string =>
-    script('set -e', `f=${CREDENTIALS[credential].file}`, `rm -f "$f${PREVIOUS_SUFFIX}"`, `echo ${sentinels.drop}`),
+    script(
+      'set -e',
+      ...HOLD_LOCK,
+      `f=${CREDENTIALS[credential].file}`,
+      `rm -f "$f${PREVIOUS_SUFFIX}"`,
+      `echo ${sentinels.drop}`,
+    ),
   /**
    * Make the staged Grafana token live. The live token is first copied to `.previous` (a placeholder counts: the
    * proof that it is refused is then trivial). Without a live file there is nothing to keep.
    */
   switchGrafana: script(
     'set -e',
+    ...HOLD_LOCK,
     `f=${grafana.file}`,
     `test -f "$f${STAGED_SUFFIX}"`,
     `rm -f "$f${PREVIOUS_SUFFIX}"`,
@@ -178,6 +272,7 @@ export const READER_BACKEND_REMOTE = {
    */
   undoGrafanaSwitch: script(
     'set -e',
+    ...HOLD_LOCK,
     `f=${grafana.file}`,
     `if [ -e "$f${STAGED_SUFFIX}" ]; then rm -f "$f${STAGED_SUFFIX}"; r=unchanged; else test -f "$f${PREVIOUS_SUFFIX}"; mv -f "$f${PREVIOUS_SUFFIX}" "$f"; r=restored; fi`,
     `echo ${UNDO_PREFIX}$r`,
@@ -218,6 +313,7 @@ export const READER_BACKEND_REMOTE = {
    */
   createGrafanaToken: script(
     'set -u',
+    ...HOLD_LOCK,
     'read -r id',
     'read -r name',
     `case "$id" in ''|*[!0-9]*) exit 1 ;; esac`,
@@ -239,8 +335,21 @@ export const READER_BACKEND_REMOTE = {
     String.raw`key=$(printf '%s' "$out" | sed -n 's|.*"key":"\([A-Za-z0-9_=+/.-]*\)".*|\1|p' | head -n 1)`,
     `echo ${HTTP_PREFIX}\${code:-000}`,
     `if [ -n "$tid" ]; then echo ${TOKEN_ID_PREFIX}$tid; fi`,
-    `if [ "\${code:-000}" = 200 ] && [ -n "$key" ] && [ -n "$tid" ]; then printf %s "$key" > "$t"; ${OWN_LIKE_DIRECTORY}; chmod 0440 "$t"; mv -f "$t" "$f${STAGED_SUFFIX}"; echo ${STAGED_PREFIX}1; fi`,
+    `if [ "\${code:-000}" = 200 ] && [ -n "$key" ] && [ -n "$tid" ]; then printf %s "$key" > "$t"; ${OWN_LIKE_DIRECTORY}; chmod 0440 "$t"; mv -f "$t" "$f${STAGED_SUFFIX}"; echo ${STAGED_PREFIX}1; printf '%s%s\\n' '${KEY_SHA_PREFIX}' "$(printf %s "$key" | sha256sum | cut -c1-64)"; fi`,
     `echo ${sentinels.createToken}`,
+  ),
+  /**
+   * Whether the live Grafana token file still holds the key whose SHA-256 is on stdin line 2 (line 1 is the run id).
+   * Prints `same` or `changed`; only the answer, never a value.
+   */
+  verifyGrafanaLive: script(
+    'set -e',
+    ...HOLD_LOCK,
+    ...readSha('want'),
+    `f=${grafana.file}`,
+    `if [ -f "$f" ] && [ "$(sha256sum "$f" | cut -c1-64)" = "$want" ]; then s=same; else s=changed; fi`,
+    `echo ${LIVE_PREFIX}$s`,
+    `echo ${sentinels.liveChecked}`,
   ),
   /**
    * Ask Grafana, with the token in one of the credential files, who it is signed in as: 200 for a live token, 401
@@ -303,11 +412,7 @@ export function parseCheck(result: RemoteResult, kind: CheckInput['kind']): Chec
 }
 
 async function gateCheck(host: string, input: CheckInput, deps: BackendDeps): Promise<CheckVerdict> {
-  const result = await runRemote(host, READER_BACKEND_REMOTE.gateCheck, {
-    spawn: deps.spawn,
-    session: deps.session,
-    stdin: `${JSON.stringify(input)}\n`,
-  })
+  const result = await runOn(host, READER_BACKEND_REMOTE.gateCheck, deps, `${JSON.stringify(input)}\n`)
   return parseCheck(result, input.kind)
 }
 
@@ -320,6 +425,15 @@ export interface BackendDeps extends RemoteDeps {
   /** Asks for a secret without echo. `undefined` is a cancelled prompt. The default reads the terminal. */
   prompt?: ((message: string) => Promise<string | undefined>) | undefined
   now?: (() => Date) | undefined
+  randomBytes?: RandomBytes | undefined
+  /** The run id of the rotation lock this run holds. Set by `withRotationLock`; the steps that change a file need it. */
+  runId?: string | undefined
+  /** How long one remote call may take. Defaults to `REMOTE_DEADLINE_MS`. */
+  deadlineMs?: number | undefined
+  /** Whether standard input is a terminal. The default reads `process.stdin.isTTY`. */
+  isTty?: boolean | undefined
+  /** The whole of standard input, for a run without a terminal. The default reads the process's. */
+  readStdin?: (() => Promise<string>) | undefined
 }
 
 /** A hidden prompt on the terminal. A cancel (Ctrl-C) is `undefined`, never an exit: the ssh session closes first. */
@@ -330,13 +444,83 @@ async function promptHidden(message: string): Promise<string | undefined> {
 }
 
 async function runOn(host: string, command: string, deps: BackendDeps, stdin?: string): Promise<RemoteResult> {
-  return runRemote(host, command, {spawn: deps.spawn, session: deps.session, ...(stdin === undefined ? {} : {stdin})})
+  return runRemote(host, command, {
+    spawn: deps.spawn,
+    session: deps.session,
+    signal: AbortSignal.timeout(deps.deadlineMs ?? REMOTE_DEADLINE_MS),
+    ...(stdin === undefined ? {} : {stdin}),
+  })
+}
+
+/** A step that changes a credential file: the run id goes first on stdin, and the script checks it under the lock. */
+async function runLocked(host: string, command: string, deps: BackendDeps, stdin = ''): Promise<RemoteResult> {
+  if (deps.runId === undefined) throw new Error('A changing step was started without the rotation lock.')
+  return runOn(host, command, deps, `${deps.runId}\n${stdin}`)
 }
 
 const confirmed = (result: RemoteResult, sentinel: string): boolean => hasSentinel(result, sentinel)
 
+const hasLine = (result: RemoteResult, sentinel: string): boolean =>
+  result.stdout.split('\n').some(line => line.trim() === sentinel)
+
 const describeFailure = (result: RemoteResult): string =>
-  `exit ${result.exitCode}: ${result.stderr || 'no confirmation'}`
+  hasLine(result, LOCK_LOST_SENTINEL)
+    ? 'the rotation lock was taken over by another run, so this step changed nothing'
+    : `exit ${result.exitCode}: ${result.stderr || 'no confirmation'}`
+
+// ─── The rotation lock ─────────────────────────────────────────────────────────
+//
+// The steps of one run are separate ssh calls, so no `flock` can span them. The lock is a file on the host that
+// names the run; every step that changes a credential file takes `flock` on it for the length of that step and
+// checks that it still names this run. A crashed run leaves the file behind, so a lock older than
+// `LOCK_STALE_SECONDS` is taken over.
+
+const LOCK_BUSY_MESSAGE = `Another reader backend command is running, or one that was interrupted still holds the lock (it expires after ${LOCK_STALE_SECONDS / 60} minutes). Nothing was changed.`
+
+const newRunId = (random: RandomBytes | undefined): string => {
+  const bytes = (random ?? (length => crypto.getRandomValues(new Uint8Array(length))))(16)
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+/** Take the lock, run `body` with the run id in its deps, and release the lock however `body` ends. */
+async function withRotationLock(
+  host: string,
+  out: Out,
+  deps: BackendDeps,
+  body: (locked: BackendDeps) => Promise<boolean>,
+): Promise<boolean> {
+  const runId = newRunId(deps.randomBytes)
+  const locked: BackendDeps = {...deps, runId}
+  const taken = await runOn(host, READER_BACKEND_REMOTE.acquireLock, locked, `${runId}\n`)
+  if (hasLine(taken, LOCK_BUSY_SENTINEL)) {
+    out.error(LOCK_BUSY_MESSAGE)
+    return false
+  }
+  if (!confirmed(taken, sentinels.locked)) {
+    out.error(`Could not take the rotation lock (${describeFailure(taken)}). Nothing was changed.`)
+    return false
+  }
+  try {
+    return await body(locked)
+  } finally {
+    const failure = await release(host, runId, locked)
+    if (failure !== undefined) {
+      out.error(
+        `The rotation lock could not be released (${failure}). It expires after ${LOCK_STALE_SECONDS / 60} minutes; until then another backend command is refused.`,
+      )
+    }
+  }
+}
+
+/** Why the lock was not released, or undefined when it was. */
+async function release(host: string, runId: string, deps: BackendDeps): Promise<string | undefined> {
+  try {
+    const released = await runOn(host, READER_BACKEND_REMOTE.releaseLock, deps, `${runId}\n`)
+    return confirmed(released, sentinels.released) ? undefined : describeFailure(released)
+  } catch (error) {
+    return error instanceof Error ? error.message : 'error'
+  }
+}
 
 // ─── backend langfuse ─────────────────────────────────────────────────────────
 
@@ -353,8 +537,8 @@ const PREVIOUS_PENDING_MESSAGE =
   'A previous Langfuse pair is still waiting to be confirmed revoked. Delete it in the Langfuse UI (Settings, API keys) and run `infra traces reader backend langfuse --confirm-old-revoked` first. Nothing was changed.'
 
 async function langfuseInstall(host: string, pair: string, out: Out, deps: BackendDeps): Promise<boolean> {
-  const staged = await runOn(host, READER_BACKEND_REMOTE.stageLangfuse, deps, `${pair}\n`)
-  if (staged.stdout.split('\n').some(line => line.trim() === PREVIOUS_PENDING_SENTINEL)) {
+  const staged = await runLocked(host, READER_BACKEND_REMOTE.stageLangfuse, deps, `${pair}\n`)
+  if (hasLine(staged, PREVIOUS_PENDING_SENTINEL)) {
     out.error(PREVIOUS_PENDING_MESSAGE)
     return false
   }
@@ -373,10 +557,19 @@ async function langfuseInstall(host: string, pair: string, out: Out, deps: Backe
   }
   out.log('The staged pair reads Langfuse, and Langfuse refuses both a REST write and an MCP write by role.')
 
-  const switched = await runOn(host, READER_BACKEND_REMOTE.switchLangfuse, deps)
-  if (switched.stdout.split('\n').some(line => line.trim() === PREVIOUS_PENDING_SENTINEL)) {
+  // The file's hash is the one of the pair this run wrote: a staged file swapped since is not the one that was checked.
+  const stagedSha = createHash('sha256').update(pair).digest('hex')
+  const switched = await runLocked(host, READER_BACKEND_REMOTE.switchLangfuse, deps, `${stagedSha}\n`)
+  if (hasLine(switched, PREVIOUS_PENDING_SENTINEL)) {
     await discard(host, 'langfuse', out, deps)
     out.error(PREVIOUS_PENDING_MESSAGE)
+    return false
+  }
+  if (hasLine(switched, STAGED_CHANGED_SENTINEL)) {
+    await discard(host, 'langfuse', out, deps)
+    out.error(
+      'The staged pair changed after the check, so it was not switched in and was removed. The live pair is unchanged.',
+    )
     return false
   }
   if (!confirmed(switched, sentinels.switched)) {
@@ -397,7 +590,7 @@ async function langfuseInstall(host: string, pair: string, out: Out, deps: Backe
 }
 
 async function discard(host: string, credential: Credential, out: Out, deps: BackendDeps): Promise<void> {
-  const result = await runOn(host, READER_BACKEND_REMOTE.discardStaged(credential), deps)
+  const result = await runLocked(host, READER_BACKEND_REMOTE.discardStaged(credential), deps)
   if (!confirmed(result, sentinels.discard)) {
     out.error(`The staged ${credential} file could not be removed (${describeFailure(result)}). Remove it by hand.`)
   }
@@ -416,7 +609,7 @@ async function langfuseConfirm(host: string, out: Out, deps: BackendDeps): Promi
     return false
   }
   out.log('Langfuse refuses the previous pair.')
-  const dropped = await runOn(host, READER_BACKEND_REMOTE.dropPrevious('langfuse'), deps)
+  const dropped = await runLocked(host, READER_BACKEND_REMOTE.dropPrevious('langfuse'), deps)
   if (!confirmed(dropped, sentinels.drop)) {
     out.error(`The previous file could not be removed (${describeFailure(dropped)}). Remove it by hand.`)
     return false
@@ -425,31 +618,70 @@ async function langfuseConfirm(host: string, out: Out, deps: BackendDeps): Promi
   return true
 }
 
-export async function tracesReaderBackendLangfuseAction(
-  options: LangfuseOptions,
-  ctx: ActionCtx,
-  deps: BackendDeps = {},
-): Promise<void> {
-  const secrets: string[] = []
-  // The prompt comes before any connection: a cancel or a bad paste costs no ssh session, and a long wait cannot
-  // outlive the multiplexed connection.
-  let pair: string | undefined
-  let promptFailure: string | undefined
-  if (options.confirmOldRevoked !== true) {
+const NOT_A_PAIR = 'That is not a Langfuse key pair: expected pk-lf-... and sk-lf-.... Nothing was changed.'
+
+const isKeyPair = (publicKey: string, secretKey: string): boolean =>
+  PUBLIC_KEY_SHAPE.test(publicKey) && SECRET_KEY_SHAPE.test(secretKey)
+
+type PairRead = {ok: true; pair: string} | {ok: false; error: string}
+
+/**
+ * The Langfuse pair, from two hidden prompts when there is a terminal (or a prompt was injected), otherwise from one
+ * line `<public>:<secret>` on stdin. Either way it never reaches an argv or an environment, and the same shapes apply.
+ * Everything read is added to `secrets` so no output can carry it.
+ */
+async function readPair(deps: BackendDeps, secrets: string[]): Promise<PairRead> {
+  const interactive = deps.prompt !== undefined || (deps.isTty ?? process.stdin.isTTY === true)
+  if (interactive) {
     const ask = deps.prompt ?? promptHidden
     const publicKey = await ask('Langfuse Viewer public key (pk-lf-...)')
     if (publicKey !== undefined) secrets.push(publicKey)
     const secretKey = publicKey === undefined ? undefined : await ask('Langfuse Viewer secret key (sk-lf-...)')
     if (secretKey !== undefined) secrets.push(secretKey)
     if (publicKey === undefined || secretKey === undefined) {
-      promptFailure =
-        'No key pair was entered (the prompt needs a terminal and was cancelled or unavailable). Nothing was changed.'
-    } else if (!PUBLIC_KEY_SHAPE.test(publicKey.trim()) || !SECRET_KEY_SHAPE.test(secretKey.trim())) {
-      promptFailure = 'That is not a Langfuse key pair: expected pk-lf-... and sk-lf-.... Nothing was changed.'
-    } else {
-      pair = `${publicKey.trim()}:${secretKey.trim()}`
-      secrets.push(pair)
+      return {
+        ok: false,
+        error:
+          'No key pair was entered (the prompt needs a terminal and was cancelled or unavailable). Nothing was changed.',
+      }
     }
+    return isKeyPair(publicKey.trim(), secretKey.trim())
+      ? {ok: true, pair: `${publicKey.trim()}:${secretKey.trim()}`}
+      : {ok: false, error: NOT_A_PAIR}
+  }
+
+  const text = await (deps.readStdin ?? (() => Bun.stdin.text()))()
+  if (text !== '') secrets.push(text, text.trim())
+  const line = text.replace(/\r?\n$/, '')
+  if (line.trim() === '') {
+    return {
+      ok: false,
+      error:
+        'No key pair was entered. Run this in a terminal, or pipe one line, <public key>:<secret key>, to its standard input. Nothing was changed.',
+    }
+  }
+  const parts = line.split(':')
+  const [publicKey, secretKey] = parts
+  if (parts.length !== 2 || publicKey === undefined || secretKey === undefined) return {ok: false, error: NOT_A_PAIR}
+  secrets.push(publicKey, secretKey)
+  return isKeyPair(publicKey, secretKey) ? {ok: true, pair: line} : {ok: false, error: NOT_A_PAIR}
+}
+
+export async function tracesReaderBackendLangfuseAction(
+  options: LangfuseOptions,
+  ctx: ActionCtx,
+  deps: BackendDeps = {},
+): Promise<void> {
+  const secrets: string[] = []
+  // The pair is read before any connection: a cancel or a bad paste costs no ssh session, and a long wait cannot
+  // outlive the multiplexed connection. On a terminal it is two hidden prompts; without one, one line on stdin.
+  let pair: string | undefined
+  let promptFailure: string | undefined
+  if (options.confirmOldRevoked !== true) {
+    const read = await readPair(deps, secrets)
+    if (read.ok) pair = read.pair
+    else promptFailure = read.error
+    if (pair !== undefined) secrets.push(pair)
   }
 
   const ok = await withRemoteSession(deps.spawn, session =>
@@ -463,9 +695,12 @@ export async function tracesReaderBackendLangfuseAction(
         out.error(targets.error)
         return false
       }
-      const withSession = {...deps, session}
-      if (options.confirmOldRevoked === true) return langfuseConfirm(targets.host, out, withSession)
-      return langfuseInstall(targets.host, pair ?? '', out, withSession)
+      const {host} = targets
+      return withRotationLock(host, out, {...deps, session}, locked =>
+        options.confirmOldRevoked === true
+          ? langfuseConfirm(host, out, locked)
+          : langfuseInstall(host, pair ?? '', out, locked),
+      )
     }),
   )
   if (!ok) ctx.process.exit(1)
@@ -536,6 +771,26 @@ type Step =
   | 'switch'
   | 'check-mcp-read'
 
+/**
+ * A rollback that threw (the host could not be reached) has done an unknown part of its work. Say what is pending and
+ * touch nothing: the new token may be the live one.
+ */
+async function rollBackOrReport(
+  host: string,
+  accountId: number,
+  tokenId: number,
+  out: Out,
+  deps: BackendDeps,
+): Promise<void> {
+  try {
+    await rollBack(host, accountId, tokenId, true, out, deps)
+  } catch (error) {
+    out.error(
+      `The rollback could not reach the host (${error instanceof Error ? error.message : 'error'}). The state is pending: token ${tokenId} was created on service account ${accountId} and the live file may use it. If the switch landed, \`${grafana.file}${PREVIOUS_SUFFIX}\` holds the prior token. Nothing was deleted. When the host is reachable, run this command again: it reconciles.`,
+    )
+  }
+}
+
 /** What a run that failed before the commit point must undo, and what it could not. */
 async function rollBack(
   host: string,
@@ -546,7 +801,7 @@ async function rollBack(
   deps: BackendDeps,
 ): Promise<void> {
   if (switched) {
-    const restored = await runOn(host, READER_BACKEND_REMOTE.undoGrafanaSwitch, deps)
+    const restored = await runLocked(host, READER_BACKEND_REMOTE.undoGrafanaSwitch, deps)
     if (!confirmed(restored, sentinels.restore)) {
       // The live file may still point at the new token, so it is not deleted: that would take reads down.
       out.error(
@@ -639,7 +894,7 @@ async function grafanaInstall(host: string, out: Out, deps: BackendDeps): Promis
   }
 
   const stamp = (deps.now?.() ?? new Date()).toISOString().replaceAll(/\D/g, '').slice(0, 14)
-  const made = await runOn(
+  const made = await runLocked(
     host,
     READER_BACKEND_REMOTE.createGrafanaToken,
     deps,
@@ -647,8 +902,16 @@ async function grafanaInstall(host: string, out: Out, deps: BackendDeps): Promis
   )
   const tokenId = Number(/^TRACES_GRAFANA_TOKEN_ID=(\d+)$/m.exec(made.stdout)?.[1])
   const madeCode = /^TRACES_GRAFANA_HTTP=(\d{3})$/m.exec(made.stdout)?.[1]
-  const staged = made.stdout.split('\n').some(line => line.trim() === `${STAGED_PREFIX}1`)
-  if (!confirmed(made, sentinels.createToken) || madeCode !== '200' || !staged || Number.isNaN(tokenId)) {
+  const staged = hasLine(made, `${STAGED_PREFIX}1`)
+  // The key's hash, not the key: it lets cleanup prove the live file still holds this token before it deletes others.
+  const keySha = new RegExp(`^${KEY_SHA_PREFIX}([0-9a-f]{64})$`, 'm').exec(made.stdout)?.[1]
+  if (
+    !confirmed(made, sentinels.createToken) ||
+    madeCode !== '200' ||
+    !staged ||
+    keySha === undefined ||
+    Number.isNaN(tokenId)
+  ) {
     if (Number.isNaN(tokenId)) {
       out.error(
         `Step create-token failed: no token was created (${madeCode === undefined ? describeFailure(made) : `Grafana answered ${madeCode}`}). Nothing was changed.`,
@@ -674,22 +937,36 @@ async function grafanaInstall(host: string, out: Out, deps: BackendDeps): Promis
     return false
   }
 
-  const switched = await runOn(host, READER_BACKEND_REMOTE.switchGrafana, deps)
-  if (!confirmed(switched, sentinels.switched)) {
-    out.error(`Step switch failed: ${describeFailure(switched)}. Checking whether the live file changed.`)
-    // The mv may have landed with only the reply lost: put the previous token back if the file moved.
-    await rollBack(host, accountId, tokenId, true, out, deps)
-    return false
-  }
-
-  const mcp = await gateCheck(host, {kind: 'grafana-mcp'}, deps)
-  if (!mcp.ok) {
-    out.error(`Step check-mcp-read failed: the gate's Grafana MCP read answered ${mcp.reason}.`)
-    await rollBack(host, accountId, tokenId, true, out, deps)
+  // The commit point. A step that fails by returning and one that throws (the host could not be reached) take the
+  // same way back: the mv may have landed with only the reply lost, so the previous token is put back if the file moved.
+  const committed = await commitGrafana(host, deps)
+  if (!committed.ok) {
+    out.error(`Step ${committed.step} failed: ${committed.why}`)
+    await rollBackOrReport(host, accountId, tokenId, out, deps)
     return false
   }
   out.log('The gate reads Grafana through the new token: it is live, and is never rolled back from here.')
-  return grafanaCleanup(host, accountId, tokenId, out, deps)
+  return grafanaCleanup(host, accountId, tokenId, keySha, out, deps)
+}
+
+type Commit = {ok: true} | {ok: false; step: Step; why: string}
+
+/** Switch the staged token in and prove an MCP read through the gate. Nothing here rolls back; the caller does. */
+async function commitGrafana(host: string, deps: BackendDeps): Promise<Commit> {
+  let step: Step = 'switch'
+  try {
+    const switched = await runLocked(host, READER_BACKEND_REMOTE.switchGrafana, deps)
+    if (!confirmed(switched, sentinels.switched)) {
+      return {ok: false, step, why: `${describeFailure(switched)}. Checking whether the live file changed.`}
+    }
+    step = 'check-mcp-read'
+    const mcp = await gateCheck(host, {kind: 'grafana-mcp'}, deps)
+    if (!mcp.ok) return {ok: false, step, why: `the gate's Grafana MCP read answered ${mcp.reason}.`}
+    return {ok: true}
+  } catch (error) {
+    const why = error instanceof Error ? error.message : 'error'
+    return {ok: false, step, why: `${why}. Checking whether the live file changed.`}
+  }
 }
 
 /** Delete every other token on the account, prove each gone, prove the previous token refused, then drop it. */
@@ -697,9 +974,21 @@ async function grafanaCleanup(
   host: string,
   accountId: number,
   keep: number,
+  keySha: string,
   out: Out,
   deps: BackendDeps,
 ): Promise<boolean> {
+  // Nothing is deleted unless the live file still holds the kept token: a token another run switched in is not ours to
+  // revoke. The comparison is by hash; a value is never printed.
+  const live = await runLocked(host, READER_BACKEND_REMOTE.verifyGrafanaLive, deps, `${keySha}\n`)
+  if (!confirmed(live, sentinels.liveChecked) || !hasLine(live, `${LIVE_PREFIX}same`)) {
+    out.error(
+      confirmed(live, sentinels.liveChecked)
+        ? `Cleanup deleted nothing: the live token file no longer holds token ${keep}. Another change replaced it. Check \`infra traces reader backend status\` and run this command again.`
+        : `Cleanup deleted nothing: could not verify that the live token file still holds token ${keep} (${describeFailure(live)}). Run this command again.`,
+    )
+    return false
+  }
   const tokensPath = `/api/serviceaccounts/${accountId}/tokens`
   const listing = await grafanaApi(host, 'GET', tokensPath, undefined, deps)
   const parsed = isOk(listing) ? tokenListSchema.safeParse(listing.body) : undefined
@@ -747,7 +1036,7 @@ async function grafanaCleanup(
     return false
   }
 
-  const dropped = await runOn(host, READER_BACKEND_REMOTE.dropPrevious('grafana'), deps)
+  const dropped = await runLocked(host, READER_BACKEND_REMOTE.dropPrevious('grafana'), deps)
   if (!confirmed(dropped, sentinels.drop)) {
     out.error(`The previous file could not be removed (${describeFailure(dropped)}). Remove it by hand.`)
     return false
@@ -772,7 +1061,9 @@ export async function tracesReaderBackendGrafanaAction(
         out.error(targets.error)
         return false
       }
-      return grafanaInstall(targets.host, out, {...deps, session})
+      const {host} = targets
+      const withSession = {...deps, session, deadlineMs: deps.deadlineMs ?? GRAFANA_REMOTE_DEADLINE_MS}
+      return withRotationLock(host, out, withSession, locked => grafanaInstall(host, out, locked))
     }),
   )
   if (!ok) ctx.process.exit(1)
@@ -788,8 +1079,14 @@ const STATE_TEXT: Record<string, string> = {
   'staged-file-left-over': 'a staged file is left over from an interrupted run',
 }
 
+export interface StatusOptions {
+  key?: string | undefined
+  /** One JSON object, `{langfuse, grafana}`, each a state name, instead of text. */
+  json?: boolean | undefined
+}
+
 export async function tracesReaderBackendStatusAction(
-  options: {key?: string | undefined},
+  options: StatusOptions,
   ctx: ActionCtx,
   deps: BackendDeps = {},
 ): Promise<void> {
@@ -806,16 +1103,20 @@ export async function tracesReaderBackendStatusAction(
         return false
       }
       const seen = new Set<string>()
+      // The state of each credential; the left-over staged file is a second line for the same one, in text only.
+      const states: Partial<Record<Credential, string>> = {}
       for (const match of result.stdout.matchAll(/^TRACES_READER_CREDENTIAL (langfuse|grafana) ([a-z-]+)$/gm)) {
         const [, name, state] = match
         if (name === undefined || state === undefined) continue
         seen.add(name)
-        out.log(`${name}: ${STATE_TEXT[state] ?? 'unknown state'}`)
+        if (state !== 'staged-file-left-over' && (name === 'langfuse' || name === 'grafana')) states[name] = state
+        if (options.json !== true) out.log(`${name}: ${STATE_TEXT[state] ?? 'unknown state'}`)
       }
-      if (seen.size !== 2) {
+      if (seen.size !== 2 || states.langfuse === undefined || states.grafana === undefined) {
         out.error('The host did not report both credentials.')
         return false
       }
+      if (options.json === true) out.log(JSON.stringify({langfuse: states.langfuse, grafana: states.grafana}))
       return true
     }),
   )
@@ -828,7 +1129,7 @@ export function registerTracesReaderBackend(cli: ReturnType<typeof goke>): void 
   cli
     .command(
       'traces reader backend langfuse',
-      'Install or rotate the Langfuse Viewer key the reader gate reads with. Prompts for the pair without echo, proves it on the host (reads; REST and MCP writes refused by role), then switches it in and keeps the old pair until --confirm-old-revoked.',
+      'Install or rotate the Langfuse Viewer key the reader gate reads with. Prompts for the pair without echo (or reads one <public>:<secret> line from stdin when there is no terminal), proves it on the host (reads; REST and MCP writes refused by role), then switches it in and keeps the old pair until --confirm-old-revoked.',
     )
     .option(
       '--confirm-old-revoked',
@@ -849,6 +1150,14 @@ export function registerTracesReaderBackend(cli: ReturnType<typeof goke>): void 
     .command(
       'traces reader backend status',
       'Report each reader backend credential as placeholder, installed or pending old-key revocation. Never prints a value.',
+    )
+    .option(
+      '--json',
+      z
+        .boolean()
+        .describe(
+          'Output one JSON object, {langfuse, grafana}: each is placeholder, installed, pending-old-revocation or missing.',
+        ),
     )
     .option('--key [key]', keyOption)
     .action((options, ctx) => tracesReaderBackendStatusAction(options, ctx))

@@ -76,9 +76,30 @@ function baseSshArgs(): string[] {
  */
 export const CONTROL_PERSIST = '30s'
 
+/**
+ * A master whose peer stops answering is dropped after this many probes, this many seconds apart: a call over a dead
+ * connection ends in about 45 seconds instead of waiting on TCP.
+ */
+export const SERVER_ALIVE_INTERVAL = 15
+export const SERVER_ALIVE_COUNT_MAX = 3
+
+/** The longest one remote call of a session may take before its caller's abort signal kills it. */
+export const REMOTE_DEADLINE_MS = 120_000
+
 /** The options that make a call share (or become) the master connection at `controlPath`. */
 function controlArgs(controlPath: string): string[] {
-  return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${controlPath}`, '-o', `ControlPersist=${CONTROL_PERSIST}`]
+  return [
+    '-o',
+    'ControlMaster=auto',
+    '-o',
+    `ControlPath=${controlPath}`,
+    '-o',
+    `ControlPersist=${CONTROL_PERSIST}`,
+    '-o',
+    `ServerAliveInterval=${SERVER_ALIVE_INTERVAL}`,
+    '-o',
+    `ServerAliveCountMax=${SERVER_ALIVE_COUNT_MAX}`,
+  ]
 }
 
 export interface SshArgv {

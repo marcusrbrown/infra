@@ -669,6 +669,83 @@ describe('redirects and cookies', () => {
   })
 })
 
+// A reader whose own token is good must never be told its token is bad because the host-held credential is. The
+// Langfuse upstream answers 401 or 403 to a refused Viewer pair; the gate turns that into its own 502.
+describe('a Langfuse credential the upstream refuses', () => {
+  const CANARY = 'upstream-body-canary-do-not-forward'
+
+  test.each([401, 403])('an upstream %i gives 502 credential-refused, and the body is discarded', async status => {
+    const stream = controllableStream()
+    stream.push(CANARY)
+    const h = await build({
+      upstream: () => new Response(stream.stream, {status, headers: {'content-type': 'application/json'}}),
+    })
+    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    expect(res.status).toBe(502)
+    expect(await res.json()).toEqual({error: 'bad gateway', reason: 'credential-refused'})
+    expect(stream.cancelled()).toBe(true)
+    expect(h.limits.stats().active).toBe(0)
+  })
+
+  test('the 502 carries nothing of the upstream answer: no www-authenticate, no body, no content type of its own', async () => {
+    const h = await build({
+      upstream: () =>
+        new Response(CANARY, {
+          status: 401,
+          headers: {'www-authenticate': 'Basic realm="langfuse"', 'x-upstream': 'yes'},
+        }),
+    })
+    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    expect(res.headers.get('www-authenticate')).toBeNull()
+    expect(res.headers.get('x-upstream')).toBeNull()
+    expect(await res.text()).not.toContain(CANARY)
+  })
+
+  test('it is logged with its reason and the upstream status, and never the body', async () => {
+    const h = await build({upstream: () => new Response(CANARY, {status: 403})})
+    await (await h.handler(request('/agent/langfuse/api/public/traces'))).text()
+    expect(h.events).toHaveLength(1)
+    expect(h.events[0]).toMatchObject({status: 502, reason: 'credential-refused', upstreamStatus: 403})
+    expect(JSON.stringify(h.events)).not.toContain(CANARY)
+  })
+
+  test('it applies to the MCP path and the REST paths alike', async () => {
+    for (const [path, init] of [
+      ['/agent/langfuse/api/public/mcp', {method: 'POST', body: '{}'}],
+      ['/agent/langfuse/api/public/sessions', {}],
+      ['/agent/langfuse/api/public/health', {}],
+    ] as const) {
+      const h = await build({upstream: () => new Response('nope', {status: 401})})
+      const res = await h.handler(request(path, init))
+      expect(res.status).toBe(502)
+      expect(await res.json()).toEqual({error: 'bad gateway', reason: 'credential-refused'})
+    }
+  })
+
+  test.each([400, 404, 409, 422, 429, 500])('an upstream %i passes through unchanged', async status => {
+    const h = await build({upstream: () => new Response('{"message":"x"}', {status})})
+    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    expect(res.status).toBe(status)
+    expect(await res.text()).toBe('{"message":"x"}')
+  })
+
+  test.each([401, 403])('a Grafana upstream %i is left alone: its refusals are JSON-RPC answers', async status => {
+    const h = await build({upstream: () => new Response('{"jsonrpc":"2.0","error":{"code":-32001}}', {status})})
+    const res = await h.handler(request('/agent/grafana/mcp', {method: 'POST', body: '{}'}))
+    expect(res.status).toBe(status)
+    expect(await res.text()).toContain('-32001')
+  })
+
+  test('a good answer is not touched', async () => {
+    const h = await build()
+    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    expect(res.status).toBe(200)
+    await res.text()
+    expect(h.events[0]?.reason).toBeUndefined()
+    expect(h.events[0]).not.toHaveProperty('upstreamStatus')
+  })
+})
+
 describe('request body', () => {
   test('a declared length over the cap gives 413 and no fetch', async () => {
     const h = await build({maxBodyBytes: 16})

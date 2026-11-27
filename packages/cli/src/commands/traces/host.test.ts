@@ -9,6 +9,7 @@ import {
   TRACES_DEFAULT_HOST,
   TRACES_GRAFANA_MCP_TOKEN_FILE,
   TRACES_GROUPS,
+  TRACES_READER_BACKEND_LOCK,
   TRACES_READER_DIR,
   TRACES_READER_LANGFUSE_FILE,
   TRACES_READER_LOCK,
@@ -93,6 +94,7 @@ describe('constants match the app', async () => {
     expect(constant('TRACES_READER_DIR')).toBe(`${appDir}/readers`)
     expect(constant('TRACES_READER_TOKEN_FILE')).toBe(`${readerDir}/token`)
     expect(constant('TRACES_READER_LOCK')).toBe(`${readerDir}/.lock`)
+    expect(constant('TRACES_READER_BACKEND_LOCK')).toBe(`${appDir}/secrets/.reader-backend.lock`)
     expect(constant('TRACES_READER_LANGFUSE_FILE')).toBe(`${appDir}/secrets/reader-gate/langfuse-basic`)
     expect(constant('TRACES_GRAFANA_MCP_TOKEN_FILE')).toBe(`${appDir}/secrets/grafana-mcp/token`)
     expect(constant('READER_LANGFUSE_PLACEHOLDER')).toBe(READER_LANGFUSE_PLACEHOLDER)
@@ -101,6 +103,7 @@ describe('constants match the app', async () => {
     expect(TRACES_READER_DIR).toBe(`${TRACES_APP_DIR}/readers`)
     expect(TRACES_READER_TOKEN_FILE).toBe(`${TRACES_READER_DIR}/token`)
     expect(TRACES_READER_LOCK).toBe(`${TRACES_READER_DIR}/.lock`)
+    expect(TRACES_READER_BACKEND_LOCK).toBe(`${TRACES_APP_DIR}/secrets/.reader-backend.lock`)
     expect(TRACES_READER_LANGFUSE_FILE).toBe(`${TRACES_APP_DIR}/secrets/reader-gate/langfuse-basic`)
     expect(TRACES_GRAFANA_MCP_TOKEN_FILE).toBe(`${TRACES_APP_DIR}/secrets/grafana-mcp/token`)
   })

@@ -98,6 +98,15 @@ export const READER_LOCK_BUSY_SENTINEL = 'TRACES_READER_LOCK_BUSY'
 /** What `append` prints, and exits non-zero, when a fresh add finds a line for the consumer already in the file. */
 export const READER_CONSUMER_EXISTS_SENTINEL = 'TRACES_READER_CONSUMER_EXISTS'
 
+/**
+ * What `append` prints, and exits non-zero, when the token file's SHA-256 under the lock is not the one the caller read
+ * (another reader command, such as `revoke --all`, ran in between). Nothing is written.
+ */
+export const READER_ROSTER_CHANGED_SENTINEL = 'TRACES_READER_ROSTER_CHANGED'
+
+/** The read scripts print `TRACES_READER_ROSTER_SHA=<64 hex>`: the token file's SHA-256, computed on the host. */
+const ROSTER_SHA_PREFIX = 'TRACES_READER_ROSTER_SHA='
+
 const ENTRY_PREFIX = 'TRACES_READER '
 const REMOVED_PREFIX = 'TRACES_READER_REMOVED='
 const REAL_PREFIX = 'TRACES_READER_REAL='
@@ -180,6 +189,15 @@ const CLASSIFY = [
 ].join('; ')
 
 /**
+ * `rsha` prints the SHA-256 of the token file as 64 hex characters, or of nothing when there is no file, the same answer
+ * the read scripts give and `append` compares. The hash is made here, on the host: the CLI only passes it on.
+ */
+const ROSTER_SHA = shellFunction(
+  'rsha',
+  '{ if [ -f "$f" ]; then sha256sum "$f"; else printf "" | sha256sum; fi; } | cut -c1-64',
+)
+
+/**
  * One loop over the token file, a line at a time. `kind`, `tok` and the fields are set by `classify`; a blank line is
  * skipped. A last line with no newline counts. The caller closes it with `; done < "$f"`.
  */
@@ -203,15 +221,21 @@ function readScript(op: 'list' | 'lines'): string {
   // A token twice is one the gate refuses (its map would hold it once): the second line is malformed. A file with no
   // line at all is `empty` to the gate, which denies everything.
   const each = `${EACH_LINE}; nonblank=$((nonblank+1)); if [ "$kind" = real ]; then case "$seen" in *" $tok "*) kind=bad ;; *) seen="$seen$tok " ;; esac; fi; case "$kind" in real) ${print} ;; void) ;; *) bad=$((bad+1)) ;; esac; done < "$f"`
+  // The hash is taken before the file is read and again after: a file that changed meanwhile fails the script, so the
+  // hash printed is that of the bytes the lines above it came from.
   return script(
     'set -e',
     ...LOCATE,
     CLASSIFY,
+    ROSTER_SHA,
     'bad=0',
     'nonblank=0',
     "seen=' '",
+    'sha=$(rsha)',
     `if [ -f "$f" ]; then ${each}; if [ "$nonblank" -eq 0 ]; then bad=$((bad+1)); fi; fi`,
+    '[ "$(rsha)" = "$sha" ]',
     `echo ${BAD_PREFIX}$bad`,
+    `echo ${ROSTER_SHA_PREFIX}$sha`,
     `echo ${readerSentinel(op)}`,
   )
 }
@@ -227,20 +251,27 @@ export const READER_REMOTE = {
    * `replace` when the new line goes beside the consumer's old one; anything else, or no line, is a fresh add. A fresh
    * add also rechecks under the lock that the file holds no reader line for the consumer, and when it does prints
    * `TRACES_READER_CONSUMER_EXISTS` and exits 1 without writing: the check the caller made before the lock can be
-   * stale. Run one reader command at a time: nothing here guards against a `revoke --all` between the caller's read
-   * and this write.
+   * stale. Stdin line 3 is the SHA-256 of the token file as the caller read it (64 lower-case hex characters, or the
+   * script exits 1 before it takes the lock). Under the lock, first of all, the script hashes the file again, and when
+   * the hash differs it prints `TRACES_READER_ROSTER_CHANGED` and exits 1 without writing: another reader command, a
+   * `revoke --all` for one, ran after the caller read the file. Running one reader command at a time is still the rule.
    */
   append: script(
     'set -e',
     'IFS= read -r line',
     'IFS= read -r mode || mode=',
+    'IFS= read -r roster || roster=',
+    `case "$roster" in ''|*[!0-9a-f]*) exit 1 ;; esac`,
+    '[ "${#roster}" -eq 64 ]',
     CLASSIFY,
+    ROSTER_SHA,
     'classify "$line"',
     '[ "$kind" = real ]',
     'nl="$tok $f2 $f3 $f4"',
     'who="$f3"',
     ...LOCK,
     ...LOCATE,
+    `if [ "$(rsha)" != "$roster" ]; then echo ${READER_ROSTER_CHANGED_SENTINEL}; exit 1; fi`,
     `if [ "$mode" != replace ] && [ -f "$f" ]; then ${EACH_LINE}; if [ "$kind" = real ] && [ "$f3" = "$who" ]; then echo ${READER_CONSUMER_EXISTS_SENTINEL}; exit 1; fi; done < "$f"; fi`,
     ...TEMP_FILE,
     COPY_ATTRIBUTES,
@@ -356,7 +387,8 @@ interface ReaderEntry {
   token?: string
 }
 
-type ReadResult = {ok: true; entries: ReaderEntry[]; bad: number} | {ok: false; error: string}
+type ReadResult =
+  {ok: true; entries: ReaderEntry[]; bad: number; rosterSha: string | undefined} | {ok: false; error: string}
 
 const ENTRY_LINE = /^TRACES_READER ([\da-f]{12}) ([a-z][\da-z-]{0,30}) (\S+)(?: (trc_[\w-]+))?$/
 
@@ -376,13 +408,25 @@ function parseEntries(stdout: string, withToken: boolean): ReaderEntry[] {
 const countOf = (stdout: string, prefix: string): number =>
   Number(new RegExp(String.raw`^${prefix}(\d+)$`, 'm').exec(stdout)?.[1])
 
+/** The hash the host printed, from exactly one well-formed line (64 lower-case hex characters). Anything else is `undefined`. */
+function parseRosterSha(stdout: string): string | undefined {
+  const lines = stdout.split('\n').filter(line => line.startsWith(ROSTER_SHA_PREFIX))
+  if (lines.length !== 1) return undefined
+  return new RegExp(String.raw`^${ROSTER_SHA_PREFIX}([\da-f]{64})$`).exec(lines[0] ?? '')?.[1]
+}
+
 async function readEntries(host: string, op: 'list' | 'lines', deps: ReaderDeps): Promise<ReadResult> {
   const result = await runRemote(host, READER_REMOTE[op], remoteOptions(deps))
   if (!hasSentinel(result, readerSentinel(op))) {
     return {ok: false, error: `exit ${result.exitCode}: ${result.stderr || 'no confirmation from the host'}`}
   }
   const bad = countOf(result.stdout, BAD_PREFIX)
-  return {ok: true, entries: parseEntries(result.stdout, op === 'lines'), bad: Number.isNaN(bad) ? 0 : bad}
+  return {
+    ok: true,
+    entries: parseEntries(result.stdout, op === 'lines'),
+    bad: Number.isNaN(bad) ? 0 : bad,
+    rosterSha: parseRosterSha(result.stdout),
+  }
 }
 
 const isLockBusy = (result: RemoteResult): boolean =>
@@ -390,6 +434,12 @@ const isLockBusy = (result: RemoteResult): boolean =>
 
 const isConsumerExists = (result: RemoteResult): boolean =>
   result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === READER_CONSUMER_EXISTS_SENTINEL)
+
+const isRosterChanged = (result: RemoteResult): boolean =>
+  result.exitCode !== 0 && result.stdout.split('\n').some(line => line.trim() === READER_ROSTER_CHANGED_SENTINEL)
+
+const ROSTER_CHANGED_MESSAGE =
+  'Stopped: the token file changed since it was read (another reader command ran); nothing was written; run add again.'
 
 const alreadyHasTokenMessage = (consumer: string, fingerprints: readonly string[]): string =>
   `${consumer} already has a reader token${fingerprints.length > 0 ? ` (${fingerprints.join(', ')})` : ''}. Pass --replace to install a new one beside it and remove the old one after delivery, or revoke it first with: infra traces reader revoke ${consumer}`
@@ -764,6 +814,11 @@ async function addFlow(
   for (const entry of existing.entries) {
     if (entry.token !== undefined) secrets.push(entry.token)
   }
+  // The host's hash of the file just read goes back with the append, which refuses if the file is no longer that one.
+  if (existing.rosterSha === undefined) {
+    out.error('The host did not report a hash of the token file (a missing or malformed answer). Nothing was changed.')
+    return false
+  }
   if (existing.bad > 0) {
     out.error(`${malformedMessage(existing.bad)} Nothing was changed.`)
     return false
@@ -786,10 +841,16 @@ async function addFlow(
 
   const written = await runRemote(host, READER_REMOTE.append, {
     ...remoteOptions(deps),
-    stdin: `${token} ${fingerprint} ${consumer} ${createdAt}\n${replace ? 'replace' : 'fresh'}\n`,
+    stdin: `${token} ${fingerprint} ${consumer} ${createdAt}\n${replace ? 'replace' : 'fresh'}\n${existing.rosterSha}\n`,
   })
   if (isLockBusy(written)) {
     out.error(LOCK_BUSY_MESSAGE)
+    return false
+  }
+  if (isRosterChanged(written)) {
+    // The host refused under the lock and wrote nothing, so the new token is in no file: nothing to revoke, nothing to
+    // deliver. A `revoke --all` that landed after the read is not undone.
+    out.error(ROSTER_CHANGED_MESSAGE)
     return false
   }
   if (isConsumerExists(written)) {

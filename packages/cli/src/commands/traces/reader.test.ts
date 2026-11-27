@@ -27,6 +27,7 @@ import {
   READER_CONSUMER_EXISTS_SENTINEL,
   READER_LOCK_BUSY_SENTINEL,
   READER_REMOTE,
+  READER_ROSTER_CHANGED_SENTINEL,
   READER_ROUTES,
   readerSentinel,
   tracesReaderAddAction,
@@ -167,6 +168,8 @@ interface World {
   dropReply: Set<string>
   /** Remote operations that find the lock held and change nothing. */
   busy: Set<string>
+  /** Rewrites what the host's two read scripts (`list`, `lines`) print before the CLI sees it. */
+  readFilter: ((stdout: string) => string) | undefined
   /** What the host's scripts run with besides the shims. */
   hostExtra: HostExtra
   /** `failAfter`: the gh calls from this index on (0 is the first) fail. */
@@ -195,6 +198,7 @@ function createWorld(options: WorldOptions = {}): World {
   const dropReply = new Set<string>()
   const busy = new Set<string>()
   const hostExtra: HostExtra = {}
+  const filters: {read: World['readFilter']} = {read: undefined}
   const gh: World['gh'] = {exitCode: 0, stderr: ''}
   let ghCount = 0
 
@@ -237,6 +241,9 @@ function createWorld(options: WorldOptions = {}): World {
       if (busy.has(name)) return {exitCode: 1, stdout: `${READER_LOCK_BUSY_SENTINEL}\n`}
       const result = execOnHost(dir, command, call.stdin, hostExtra)
       if (dropReply.has(name)) return {exitCode: 255, stderr: 'ssh: connection reset by peer'}
+      if ((name === 'list' || name === 'lines') && filters.read !== undefined) {
+        return {...result, stdout: filters.read(result.stdout)}
+      }
       return result
     }
     throw new Error(`unexpected remote command: ${call.command}`)
@@ -256,6 +263,12 @@ function createWorld(options: WorldOptions = {}): World {
     failing,
     dropReply,
     busy,
+    get readFilter() {
+      return filters.read
+    },
+    set readFilter(value) {
+      filters.read = value
+    },
     hostExtra,
     gh,
     file,
@@ -368,7 +381,21 @@ const revoke = (
   secrets: string[] = [OLD_A, OLD_B, OLD_C],
 ) => run(world, ctx => tracesReaderRevokeAction(consumer, fingerprint, options, ctx, deps), {secrets})
 
+const ROSTER_CHANGED_MESSAGE =
+  'the token file changed since it was read (another reader command ran); nothing was written; run add again'
+
 const ghOptions = (repo = 'marcusrbrown/systematic'): AddOptions => ({repo: [repo]})
+
+/** The SHA-256 the host prints for a token file: of its bytes, or of nothing when there is no file. */
+const rosterShaOf = (world: World): string => {
+  let bytes: Uint8Array | string = ''
+  try {
+    bytes = readFileSync(world.path)
+  } catch {
+    // No file, or no regular file: the host hashes nothing, or fails.
+  }
+  return createHash('sha256').update(bytes).digest('hex')
+}
 
 const realLines = (text: string): string[] =>
   text.split('\n').filter(line => line !== '' && !line.startsWith(VOID_TOKEN_PREFIX))
@@ -571,8 +598,9 @@ describe('traces reader add', () => {
     expect(world.ghCalls()).toHaveLength(0)
   })
 
-  // Mutation target: with the recheck gone, two fresh adds for one consumer can both pass the read.
-  it('refuses a fresh add that loses a race: a line for the consumer lands between the read and the append', async () => {
+  // The roster hash closes the window: a line that lands between the read and the append changes the file, so the
+  // append is refused under the lock before it looks at consumers.
+  it('refuses a fresh add that loses a race: a line lands between the read and the append, and nothing is written', async () => {
     const world = createWorld()
     const deps = makeDeps(world)
     const racing = readerLine(OLD_A, 'systematic')
@@ -582,14 +610,14 @@ describe('traces reader add', () => {
     }
     const outcome = await add(world, 'systematic', ghOptions(), deps)
     expect(outcome.exit).toBe(1)
-    expect(outcome.stderr).toContain('already has a reader token')
-    expect(outcome.stderr).toContain('--replace')
+    expect(outcome.stderr).toContain(ROSTER_CHANGED_MESSAGE)
     expect(outcome.stderr).not.toContain('did not confirm')
     expect(world.file()).toContain(racing)
     expect(world.file()).not.toContain(NEXT_TOKEN)
     // The new token never reached the file, so nothing was revoked and nothing was delivered.
     expect(world.calls.filter(call => call.command === READER_REMOTE.remove)).toHaveLength(0)
     expect(world.ghCalls()).toHaveLength(0)
+    expect(world.probeCalls()).toHaveLength(0)
   })
 
   it('--replace tells the host it is a replacement, so the append does not refuse', async () => {
@@ -597,6 +625,98 @@ describe('traces reader add', () => {
     await add(world, 'systematic', {...ghOptions(), replace: true}, makeDeps(world), [NEXT_TOKEN, OLD_A])
     const append = world.calls.find(call => call.command === READER_REMOTE.append)
     expect(append?.stdin?.split('\n')[1]).toBe('replace')
+  })
+
+  it('sends the host-reported hash of the file it read as the third stdin line, for a fresh add and for --replace', async () => {
+    for (const replace of [false, true]) {
+      const world = createWorld({file: replace ? readerLine(OLD_A, 'systematic') + voidLine(2) : voidLine(1)})
+      const read = rosterShaOf(world)
+      await add(world, 'systematic', {...ghOptions(), replace}, makeDeps(world), [NEXT_TOKEN, OLD_A])
+      const append = world.calls.find(call => call.command === READER_REMOTE.append)
+      expect(append?.stdin?.split('\n')[2]).toBe(read)
+      expect(append?.stdin?.split('\n')[2]).toMatch(/^[\da-f]{64}$/)
+    }
+  })
+
+  describe('a hash that is missing or malformed stops add before any write', () => {
+    const SHA_LINE = /^TRACES_READER_ROSTER_SHA=.*\n/gm
+    const cases: [string, (stdout: string) => string][] = [
+      ['no hash line', stdout => stdout.replaceAll(SHA_LINE, '')],
+      ['a short hash', stdout => stdout.replaceAll(SHA_LINE, 'TRACES_READER_ROSTER_SHA=abc123\n')],
+      [
+        'an upper-case hash',
+        stdout => stdout.replaceAll(SHA_LINE, line => `TRACES_READER_ROSTER_SHA=${line.slice(25).toUpperCase()}`),
+      ],
+      [
+        'a 65-character hash',
+        stdout => stdout.replaceAll(SHA_LINE, line => `TRACES_READER_ROSTER_SHA=${line.slice(25).trim()}0\n`),
+      ],
+      ['a trailing blank on the hash line', stdout => stdout.replace(/(TRACES_READER_ROSTER_SHA=\S+)/, '$1 ')],
+      ['two hash lines that differ', stdout => `${stdout}TRACES_READER_ROSTER_SHA=${'0'.repeat(64)}\n`],
+    ]
+    it.each(cases)('%s', async (_name, filter) => {
+      for (const replace of [false, true]) {
+        const world = createWorld({file: replace ? readerLine(OLD_A, 'systematic') + voidLine(2) : voidLine(1)})
+        world.readFilter = filter
+        const before = world.file()
+        const outcome = await add(world, 'systematic', {...ghOptions(), replace}, makeDeps(world), [NEXT_TOKEN, OLD_A])
+        expect(outcome.exit).toBe(1)
+        expect(outcome.stderr).toContain('did not report a hash of the token file')
+        expect(outcome.stderr).toContain('Nothing was changed')
+        expect(world.calls.filter(call => call.command === READER_REMOTE.append)).toHaveLength(0)
+        expect(world.file()).toBe(before)
+        expect(world.ghCalls()).toHaveLength(0)
+      }
+    })
+  })
+
+  // `revoke --all` lands after this command read the file and before it appends. The host refuses under the lock, the
+  // roster stays deny-all, and no delivery is attempted: there is nothing to revoke and nothing to remove.
+  describe.each([
+    ['a fresh add', false, voidLine(1)],
+    ['--replace', true, readerLine(OLD_A, 'systematic') + voidLine(2)],
+  ] as const)('a revoke --all that lands between the read and the append: %s', (_name, replace, file) => {
+    const denyBeforeAppend = (world: World, deps: ReaderDeps): void => {
+      deps.spawn = (argv, options) => {
+        if (argv.at(-1) === READER_REMOTE.append) execOnHost(world.dir, READER_REMOTE.deny, voidLine(201, CREATED))
+        return world.spawn(argv, options)
+      }
+    }
+    const expectDenyAll = (world: World, outcome: Outcome): void => {
+      expect(outcome.exit).toBe(1)
+      expect(outcome.stderr).toContain(ROSTER_CHANGED_MESSAGE)
+      expect(outcome.stderr).not.toContain('did not confirm')
+      expect(outcome.stdout).not.toContain('is live')
+      expect(world.file().split('\n').filter(Boolean)).toHaveLength(1)
+      expect(world.file()).not.toContain(NEXT_TOKEN)
+      expect(gateTokens(world.file())?.size).toBe(0)
+      expect(world.accepts(NEXT_TOKEN)).toBe(false)
+      expect(world.accepts(OLD_A)).toBe(false)
+      // Nothing was proven, removed or delivered.
+      expect(world.probeCalls()).toHaveLength(0)
+      expect(world.fetchCalls).toHaveLength(0)
+      expect(world.calls.filter(call => call.command === READER_REMOTE.remove)).toHaveLength(0)
+      expect(world.ghCalls()).toHaveLength(0)
+    }
+
+    it('delivery by gh is never attempted', async () => {
+      const world = createWorld({file})
+      const deps = makeDeps(world)
+      denyBeforeAppend(world, deps)
+      const outcome = await add(world, 'systematic', {...ghOptions(), replace}, deps, [NEXT_TOKEN, OLD_A])
+      expectDenyAll(world, outcome)
+    })
+
+    it('delivery to a file is never attempted', async () => {
+      const world = createWorld({file})
+      const deps = makeDeps(world)
+      denyBeforeAppend(world, deps)
+      const target = join(sandbox, `rosterfile-${worldCounter}.token`)
+      const outcome = await add(world, 'systematic', {file: target, replace}, deps, [NEXT_TOKEN, OLD_A])
+      expectDenyAll(world, outcome)
+      expect(existsSync(target)).toBe(false)
+      expect(existsSync(join(deps.homeDir ?? '', '.config'))).toBe(false)
+    })
   })
 
   it('proves over ssh from the host when the public route does not answer as the gate does', async () => {
@@ -1123,6 +1243,22 @@ describe('host scripts, run under a real sh', () => {
       expect(run1(world, READER_REMOTE.list).stdout).toContain('TRACES_READER_BAD=1')
     })
 
+    it('prints the SHA-256 of the file as one hex-only line, from the host: of its bytes, or of nothing when it is missing', () => {
+      const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
+      for (const op of [READER_REMOTE.list, READER_REMOTE.lines]) {
+        const lines = run1(world, op).stdout.split('\n')
+        expect(lines.filter(line => line.startsWith('TRACES_READER_ROSTER_SHA='))).toEqual([
+          `TRACES_READER_ROSTER_SHA=${rosterShaOf(world)}`,
+        ])
+      }
+      rmSync(world.path)
+      expect(run1(world, READER_REMOTE.list).stdout).toContain(
+        `TRACES_READER_ROSTER_SHA=${createHash('sha256').update('').digest('hex')}`,
+      )
+      // The CLI never computes it: the text is in the host scripts only.
+      expect(READER_REMOTE.list).toContain('sha256sum')
+    })
+
     it('a missing file is empty, not an error', () => {
       const world = createWorld()
       rmSync(world.path)
@@ -1145,8 +1281,9 @@ describe('host scripts, run under a real sh', () => {
 
   describe('append', () => {
     const newLine = `${NEXT_TOKEN} ${NEXT_FINGERPRINT} systematic ${CREATED}\n`
-    // The host takes the line and the mode, one per line.
-    const appendIn = (line = newLine, mode = 'fresh'): string => `${line}${mode}\n`
+    // The host takes the line, the mode and the SHA-256 of the file as the caller read it, one per line.
+    const appendIn = (world: World, line = newLine, mode = 'fresh', sha = rosterShaOf(world)): string =>
+      `${line}${mode}\n${sha}\n`
 
     it('adds one line, keeps the existing bytes, replaces the file by rename and keeps its mode', () => {
       const world = createWorld({file: readerLine(OLD_A, 'a-one') + voidLine(2)})
@@ -1154,7 +1291,7 @@ describe('host scripts, run under a real sh', () => {
       const before = statSync(world.path)
       const existing = world.file()
 
-      const result = run1(world, READER_REMOTE.append, appendIn())
+      const result = run1(world, READER_REMOTE.append, appendIn(world))
 
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain(readerSentinel('append'))
@@ -1167,14 +1304,14 @@ describe('host scripts, run under a real sh', () => {
 
     it('starts a new line when the file does not end in a newline', () => {
       const world = createWorld({file: readerLine(OLD_A, 'a-one').trimEnd()})
-      run1(world, READER_REMOTE.append, appendIn())
+      run1(world, READER_REMOTE.append, appendIn(world))
       expect(world.file()).toBe(readerLine(OLD_A, 'a-one') + newLine)
     })
 
     it('creates the file when only the directory exists, readable by its group but not by others', () => {
       const world = createWorld()
       rmSync(world.path)
-      const result = run1(world, READER_REMOTE.append, appendIn())
+      const result = run1(world, READER_REMOTE.append, appendIn(world))
       expect(result.exitCode).toBe(0)
       expect(world.file()).toBe(newLine)
       expect(statSync(world.path).mode & 0o777).toBe(0o640)
@@ -1193,7 +1330,7 @@ describe('host scripts, run under a real sh', () => {
         voidLine(3),
       ]
       for (const line of bad) {
-        const result = run1(world, READER_REMOTE.append, appendIn(line))
+        const result = run1(world, READER_REMOTE.append, appendIn(world, line))
         expect(result.exitCode).not.toBe(0)
         expect(result.stdout).not.toContain(readerSentinel('append'))
         expect(world.file()).toBe(before)
@@ -1204,7 +1341,11 @@ describe('host scripts, run under a real sh', () => {
     it('refuses a fresh add when the file already has a line for the consumer, under the lock, and touches nothing', () => {
       const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
       const before = world.file()
-      for (const stdin of [appendIn(), appendIn(newLine, 'fresh'), appendIn(newLine, 'anything-else')]) {
+      for (const stdin of [
+        appendIn(world),
+        appendIn(world, newLine, 'fresh'),
+        appendIn(world, newLine, 'anything-else'),
+      ]) {
         const result = run1(world, READER_REMOTE.append, stdin)
         expect(result.exitCode).not.toBe(0)
         expect(result.stdout.split('\n')).toContain(READER_CONSUMER_EXISTS_SENTINEL)
@@ -1217,7 +1358,7 @@ describe('host scripts, run under a real sh', () => {
     it('refuses a fresh add when the consumer line is the last one and has no trailing newline', () => {
       const world = createWorld({file: voidLine(2) + readerLine(OLD_A, 'systematic').trimEnd()})
       const before = world.file()
-      const result = run1(world, READER_REMOTE.append, appendIn())
+      const result = run1(world, READER_REMOTE.append, appendIn(world))
       expect(result.stdout.split('\n')).toContain(READER_CONSUMER_EXISTS_SENTINEL)
       expect(world.file()).toBe(before)
     })
@@ -1225,7 +1366,7 @@ describe('host scripts, run under a real sh', () => {
     it('does not refuse a fresh add for a consumer the file only resembles', () => {
       const world = createWorld({file: readerLine(OLD_A, 'systematic-two') + readerLine(OLD_B, 'other') + voidLine(2)})
       const existing = world.file()
-      const result = run1(world, READER_REMOTE.append, appendIn())
+      const result = run1(world, READER_REMOTE.append, appendIn(world))
       expect(result.exitCode).toBe(0)
       expect(world.file()).toBe(existing + newLine)
     })
@@ -1233,17 +1374,86 @@ describe('host scripts, run under a real sh', () => {
     it('appends beside the consumer’s existing line when the stdin says replace', () => {
       const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
       const existing = world.file()
-      const result = run1(world, READER_REMOTE.append, appendIn(newLine, 'replace'))
+      const result = run1(world, READER_REMOTE.append, appendIn(world, newLine, 'replace'))
       expect(result.exitCode).toBe(0)
       expect(result.stdout).toContain(readerSentinel('append'))
       expect(world.file()).toBe(existing + newLine)
+    })
+
+    it('refuses, under the lock and with its own sentinel, when the file is not the one the caller read, and writes nothing', () => {
+      const changes: [string, (world: World) => void][] = [
+        ['a revoke --all', world => run1(world, READER_REMOTE.deny, voidLine(201, CREATED))],
+        ['another add', world => appendFileSync(world.path, readerLine(OLD_B, 'other'))],
+        ['a removal', world => run1(world, READER_REMOTE.remove, removeInput('systematic'))],
+        ['one changed byte', world => writeFileSync(world.path, world.file().replace('2026', '2027'))],
+        ['the file removed', world => rmSync(world.path)],
+      ]
+      for (const mode of ['fresh', 'replace']) {
+        for (const [name, change] of changes) {
+          const world = createWorld({file: readerLine(OLD_A, 'systematic') + voidLine(2)})
+          const stdin = appendIn(world, newLine, mode)
+          change(world)
+          const before = existsSync(world.path) ? world.file() : undefined
+          const result = run1(world, READER_REMOTE.append, stdin)
+          expect({name, mode, exit: result.exitCode}).toEqual({name, mode, exit: 1})
+          expect(result.stdout.split('\n')).toContain(READER_ROSTER_CHANGED_SENTINEL)
+          expect(result.stdout).not.toContain(readerSentinel('append'))
+          expect(existsSync(world.path) ? world.file() : undefined).toBe(before)
+          expect(stray(world)).toEqual([])
+        }
+      }
+    })
+
+    it('appends when the file is exactly the one that was read, for a fresh add and for --replace', () => {
+      for (const mode of ['fresh', 'replace']) {
+        const world = createWorld({file: readerLine(OLD_A, 'other') + voidLine(2)})
+        const existing = world.file()
+        const result = run1(world, READER_REMOTE.append, appendIn(world, newLine, mode))
+        expect(result.exitCode).toBe(0)
+        expect(result.stdout).not.toContain(READER_ROSTER_CHANGED_SENTINEL)
+        expect(world.file()).toBe(existing + newLine)
+      }
+    })
+
+    it('takes the hash of a missing file as the hash of nothing, so a first add on a bare directory works', () => {
+      const world = createWorld()
+      rmSync(world.path)
+      expect(run1(world, READER_REMOTE.append, appendIn(world)).exitCode).toBe(0)
+    })
+
+    it.each([
+      ['no hash line', ''],
+      ['an empty hash line', '\n'],
+      ['a short hash', 'abc123\n'],
+      ['an upper-case hash', `${'A'.repeat(64)}\n`],
+      ['a 65-character hash', `${'a'.repeat(65)}\n`],
+      ['a non-hex hash', `${'g'.repeat(64)}\n`],
+    ])('refuses %s, before the lock, and writes nothing', (_name, hashLines) => {
+      const world = createWorld({file: readerLine(OLD_A, 'other') + voidLine(2)})
+      const before = world.file()
+      const result = run1(world, READER_REMOTE.append, `${newLine}fresh\n${hashLines}`)
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout).not.toContain(readerSentinel('append'))
+      expect(result.stdout).not.toContain(READER_ROSTER_CHANGED_SENTINEL)
+      expect(world.file()).toBe(before)
+      expect(stray(world)).toEqual([])
+    })
+
+    it('compares the hash after it takes the lock, and keeps the consumer recheck behind it', () => {
+      const script = READER_REMOTE.append
+      expect(script.indexOf('flock -w 30 9')).toBeGreaterThan(-1)
+      expect(script.indexOf('"$(rsha)" != "$roster"')).toBeGreaterThan(script.indexOf('flock -w 30 9'))
+      expect(script.indexOf(READER_ROSTER_CHANGED_SENTINEL)).toBeGreaterThan(script.indexOf('flock -w 30 9'))
+      expect(script.indexOf(READER_CONSUMER_EXISTS_SENTINEL)).toBeGreaterThan(
+        script.indexOf(READER_ROSTER_CHANGED_SENTINEL),
+      )
     })
 
     it('leaves no temporary file behind when it fails', () => {
       const world = createWorld()
       rmSync(world.path)
       mkdirSync(world.path)
-      const result = run1(world, READER_REMOTE.append, appendIn())
+      const result = run1(world, READER_REMOTE.append, appendIn(world))
       expect(result.exitCode).not.toBe(0)
       expect(stray(world)).toEqual([])
     })
@@ -1366,7 +1576,11 @@ describe('host scripts, run under a real sh', () => {
     const first = await reader.read()
     expect(new TextDecoder().decode(first.value)).toContain('held')
     const before = world.file()
-    const result = execOnHost(world.dir, command, `${NEXT_TOKEN} ${NEXT_FINGERPRINT} systematic ${CREATED}\nfresh\n0\n`)
+    const result = execOnHost(
+      world.dir,
+      command,
+      `${NEXT_TOKEN} ${NEXT_FINGERPRINT} systematic ${CREATED}\nfresh\n${rosterShaOf(world)}\n`,
+    )
     holder.kill()
     expect(result.exitCode).not.toBe(0)
     expect(result.stdout).toContain(READER_LOCK_BUSY_SENTINEL)

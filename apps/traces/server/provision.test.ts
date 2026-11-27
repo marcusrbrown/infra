@@ -16,9 +16,12 @@ import {join} from 'node:path'
 
 import {describe, expect, it} from 'bun:test'
 import {
+  READER_GATE_USER_ID,
   SENDER_GROUPS,
   TRACES_CONTAINERD_ROOT,
   TRACES_DOCKER_ROOT,
+  TRACES_READER_DIR,
+  TRACES_READER_TOKEN_FILE,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
   TRACES_TEMPO_DATA_DIR,
@@ -47,6 +50,8 @@ import {
   parseProvisionArgs,
   parseVolumeRows,
   quiesceScript,
+  readerPurgeScript,
+  readerVoidLine,
   restoreDescription,
   restoreVolumeName,
   rulePortsCover,
@@ -272,6 +277,10 @@ interface HostOptions {
   fs?: 'none' | 'ext4' | 'other'
   dockerBusy?: boolean
   tokens?: 'deny-all' | 'real' | 'missing-root' | 'file-missing' | 'file-empty'
+  /** The reader token file's state when the host starts. A restored snapshot can hold any of them. */
+  readerTokens?: ReaderState
+  /** Replaces the reader purge step's whole answer. */
+  readerPurge?: RunResult
   storage?: RunResult
   /** `<tenant>/<block-uuid>` entries the Tempo quarantine step reports as moved. */
   tornBlocks?: string[]
@@ -283,7 +292,12 @@ interface HostOptions {
   dockerRunning?: boolean
 }
 
+type ReaderState = 'deny-all' | 'real' | 'missing' | 'empty'
+
 class Host {
+  readerState: ReaderState
+  /** The stdin of every reader purge step, in order. */
+  readerPurgeInputs: (string | undefined)[] = []
   swapOn: boolean
   files = new Map<string, string>()
   fs: 'none' | 'ext4' | 'other'
@@ -297,6 +311,7 @@ class Host {
   quiescedFrom: {mounted: boolean; dockerRunning: boolean}[] = []
   constructor(private readonly options: HostOptions = {}) {
     const provisioned = options.provisioned ?? false
+    this.readerState = options.readerTokens ?? 'deny-all'
     this.swapOn = !provisioned
     this.fs = options.fs ?? (provisioned ? 'ext4' : 'none')
     this.mounted = options.mounted ?? provisioned
@@ -374,12 +389,26 @@ class Host {
           ].join('\n'),
         )
       }
+      case 'reader-purge': {
+        this.readerPurgeInputs.push(stdin)
+        if (this.options.readerPurge) return this.options.readerPurge
+        this.readerState = 'deny-all'
+        return ok('TRACES_READER_PURGED')
+      }
       case 'token-check': {
         const tokens = this.options.tokens ?? 'deny-all'
         if (tokens === 'missing-root') return {exitCode: 1, stdout: 'TRACES_TOKEN_ROOT_MISSING\n', stderr: ''}
         if (tokens === 'file-missing') return {exitCode: 1, stdout: 'TRACES_TOKEN_FILE_MISSING=fro-bot\n', stderr: ''}
         if (tokens === 'file-empty') return {exitCode: 1, stdout: 'TRACES_TOKEN_FILE_EMPTY=workstation\n', stderr: ''}
-        return ok(tokens === 'real' ? 'TRACES_TOKENS_REAL' : 'TRACES_TOKENS_DENY_ALL')
+        if (this.readerState === 'missing') {
+          return {exitCode: 1, stdout: 'TRACES_TOKEN_FILE_MISSING=reader\n', stderr: ''}
+        }
+        if (this.readerState === 'empty') return {exitCode: 1, stdout: 'TRACES_TOKEN_FILE_EMPTY=reader\n', stderr: ''}
+        const sendersReal = tokens === 'real'
+        const readerReal = this.readerState === 'real'
+        if (sendersReal && readerReal) return ok('TRACES_SENDER_AND_READER_TOKENS_REAL')
+        if (readerReal) return ok('TRACES_READER_TOKENS_REAL')
+        return ok(sendersReal ? 'TRACES_TOKENS_REAL' : 'TRACES_TOKENS_DENY_ALL')
       }
       default: {
         throw new Error(`unexpected remote step: ${step}`)
@@ -934,8 +963,8 @@ describe('SSH connection multiplexing', () => {
     await runRestore(RESTORE_RUN, deps)
     expect(controlDirs).toHaveLength(1)
     expect(new Set(controlPathsOf(world.sshCalls()))).toEqual(new Set([`ControlPath=${controlDirs[0]}/cm`]))
-    // quiesce, probe, mount, verify the sentinel, quarantine torn Tempo blocks
-    expect(world.sshCalls()).toHaveLength(5)
+    // quiesce, probe, mount, verify the sentinel, purge the reader file, quarantine torn Tempo blocks
+    expect(world.sshCalls()).toHaveLength(6)
     expect(world.closeCalls()).toHaveLength(1)
     expect(removedControlDirs).toEqual(controlDirs)
   })
@@ -1779,7 +1808,14 @@ describe('runRestore', () => {
     expect(detach).toBeGreaterThan(-1)
     expect(attach).toBeGreaterThan(detach)
 
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.steps).toEqual([
+      'restore-quiesce',
+      'fs-probe',
+      'mount',
+      'verify-sentinel',
+      'reader-purge',
+      'tempo-quarantine',
+    ])
     const quiesceCall = world.calls.findIndex(c => c.argv.at(-1)?.includes('restore-quiesce'))
     const detachCall = world.calls.findIndex(c => c.argv.slice(1, 4).join(' ') === 'compute volume-action detach')
     expect(quiesceCall).toBeLessThan(detachCall)
@@ -1827,7 +1863,14 @@ describe('runRestore', () => {
       expect(sleeps.filter(ms => ms === VOLUME_LIST_INTERVAL_MS)).toHaveLength(3)
       expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
       expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
-      expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+      expect(world.host.steps).toEqual([
+        'restore-quiesce',
+        'fs-probe',
+        'mount',
+        'verify-sentinel',
+        'reader-purge',
+        'tempo-quarantine',
+      ])
     })
 
     it('does not sleep when the first listing already shows the volume', async () => {
@@ -1891,7 +1934,14 @@ describe('runRestore: the volume swap when the listing lags the completed action
     expect(pauses(sleeps)).toHaveLength(3)
     expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
     expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.steps).toEqual([
+      'restore-quiesce',
+      'fs-probe',
+      'mount',
+      'verify-sentinel',
+      'reader-purge',
+      'tempo-quarantine',
+    ])
   })
 
   it('keeps reading until the listing shows the new volume attached, and completes the restore', async () => {
@@ -1901,7 +1951,14 @@ describe('runRestore: the volume swap when the listing lags the completed action
 
     expect(pauses(sleeps)).toHaveLength(3)
     expect(world.cloud.volumes.find(v => v.name === NEW_NAME)?.dropletIds).toEqual([DROPLET_ID])
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.steps).toEqual([
+      'restore-quiesce',
+      'fs-probe',
+      'mount',
+      'verify-sentinel',
+      'reader-purge',
+      'tempo-quarantine',
+    ])
   })
 
   it('does not sleep on the normal path, where the first reads are right', async () => {
@@ -2234,7 +2291,14 @@ describe('runRestore: the one attached volume it replaces', () => {
     expect(doctl.some(call => call.includes('vol-restore'))).toBe(false)
     // The quiesce step met Docker already stopped and nothing mounted, and the run went on to the quarantine scan.
     expect(world.host.quiescedFrom).toEqual([{mounted: false, dockerRunning: false}])
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.steps).toEqual([
+      'restore-quiesce',
+      'fs-probe',
+      'mount',
+      'verify-sentinel',
+      'reader-purge',
+      'tempo-quarantine',
+    ])
     expect(world.host.dockerRestarts).toBe(0)
     expect(world.cloud.volumes.find(v => v.id === 'vol-old')?.dropletIds).toEqual([])
     expect(world.cloud.volumes.find(v => v.id === 'vol-restore')?.dropletIds).toEqual([])
@@ -2324,7 +2388,14 @@ describe('runRestore: quarantining torn Tempo blocks on the restored volume', ()
     const {deps, logs} = makeDeps(world.runner)
     await runRestore(RESTORE_INPUT, deps)
 
-    expect(world.host.steps).toEqual(['restore-quiesce', 'fs-probe', 'mount', 'verify-sentinel', 'tempo-quarantine'])
+    expect(world.host.steps).toEqual([
+      'restore-quiesce',
+      'fs-probe',
+      'mount',
+      'verify-sentinel',
+      'reader-purge',
+      'tempo-quarantine',
+    ])
     expect(world.host.dockerRestarts).toBe(0)
     const command = quarantineCommand(world)
     expect(command).toContain(TRACES_TEMPO_DATA_DIR)
@@ -2411,6 +2482,286 @@ describe('runRestore: quarantining torn Tempo blocks on the restored volume', ()
 })
 
 // ---------------------------------------------------------------------------
+// Reader token purge on restore
+// ---------------------------------------------------------------------------
+
+const READER_REAL = 'rdr_PLACEHOLDERrealtoken0000000000000000000000'
+const READER_REAL_LINE = `${READER_REAL} 0123456789ab agent-one 2026-11-20T00:00:00.000Z\n`
+const PURGE_VOID_LINE = `${TRACES_VOID_TOKEN_PREFIX}${'A'.repeat(43)} void 2026-11-20T15:30:00.000Z`
+
+/** `chown` and `findmnt` are shims: the first records its arguments (a test runs as no one in particular). */
+async function runPurge(
+  options: {
+    existing?: string | null
+    dirMissing?: boolean
+    stdin?: string
+    mounted?: boolean
+    symlinkDir?: boolean
+  } = {},
+) {
+  const root = mkdtempSync(join(tmpdir(), 'traces-reader-'))
+  try {
+    const dir = join(root, 'app', 'readers')
+    const file = join(dir, 'token')
+    const secrets = join(root, 'app', 'secrets', 'reader-gate')
+    mkdirSync(secrets, {recursive: true})
+    writeFileSync(join(secrets, 'langfuse-basic'), 'pk-lf-live:sk-lf-live')
+    if (options.symlinkDir === true) {
+      mkdirSync(join(root, 'elsewhere'))
+      symlinkSync(join(root, 'elsewhere'), dir)
+    } else if (options.dirMissing !== true) {
+      mkdirSync(dir, {recursive: true, mode: 0o700})
+      if (options.existing !== null && options.existing !== undefined) writeFileSync(file, options.existing)
+    }
+    const shim = join(root, 'shim')
+    mkdirSync(shim)
+    const chownLog = join(root, 'chown.log')
+    writeFileSync(join(shim, 'chown'), `#!/bin/sh\necho "$@" >> ${chownLog}\n`)
+    writeFileSync(join(shim, 'findmnt'), `#!/bin/sh\n${options.mounted === false ? '' : 'echo /dev/sda'}\n`)
+    chmodSync(join(shim, 'chown'), 0o755)
+    chmodSync(join(shim, 'findmnt'), 0o755)
+
+    const proc = Bun.spawn(['bash', '-o', 'pipefail', '-c', readerPurgeScript({dir, file, mount: root})], {
+      env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+      stdin: new TextEncoder().encode(`${options.stdin ?? PURGE_VOID_LINE}\n`),
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    const read = (path: string) => (existsSync(path) ? readFileSync(path, 'utf8') : undefined)
+    return {
+      stdout: stdout.trim(),
+      stderr,
+      exitCode,
+      content: read(file),
+      fileMode: existsSync(file) ? statSync(file).mode & 0o777 : undefined,
+      dirMode: existsSync(dir) ? statSync(dir).mode & 0o777 : undefined,
+      chowns: (read(chownLog) ?? '').split('\n').filter(Boolean),
+      leftovers: existsSync(dir) ? Bun.spawnSync(['ls', '-A', dir]).stdout.toString().trim().split('\n') : [],
+      backend: read(join(secrets, 'langfuse-basic')),
+    }
+  } finally {
+    rmSync(root, {recursive: true, force: true})
+  }
+}
+
+describe('readerPurgeScript, run against real files in a temp directory', () => {
+  it('replaces a file holding a real token with exactly the void line, root:gate 0640 in a 0750 directory', async () => {
+    const result = await runPurge({existing: READER_REAL_LINE})
+    expect(result.stdout).toBe('TRACES_READER_PURGED')
+    expect(result.exitCode).toBe(0)
+    expect(result.content).toBe(`${PURGE_VOID_LINE}\n`)
+    expect(result.content).not.toContain(READER_REAL)
+    expect(result.fileMode).toBe(0o640)
+    expect(result.dirMode).toBe(0o750)
+  })
+
+  it('creates the directory and the file when a snapshot from before reader tokens has neither', async () => {
+    const result = await runPurge({dirMissing: true})
+    expect(result.stdout).toBe('TRACES_READER_PURGED')
+    expect(result.content).toBe(`${PURGE_VOID_LINE}\n`)
+    expect(result.fileMode).toBe(0o640)
+    expect(result.dirMode).toBe(0o750)
+  })
+
+  it('creates the file when the directory is there and the file is not', async () => {
+    const result = await runPurge({existing: null})
+    expect(result.content).toBe(`${PURGE_VOID_LINE}\n`)
+  })
+
+  it('hands both the directory and the file to root:gate', async () => {
+    const result = await runPurge({existing: READER_REAL_LINE})
+    expect(result.chowns).toHaveLength(2)
+    for (const line of result.chowns) expect(line).toMatch(new RegExp(`^0:${READER_GATE_USER_ID} `))
+  })
+
+  it('leaves no temporary file behind and leaves the backend credential files alone', async () => {
+    const result = await runPurge({existing: READER_REAL_LINE})
+    expect(result.leftovers).toEqual(['token'])
+    expect(result.backend).toBe('pk-lf-live:sk-lf-live')
+  })
+
+  it('refuses a line that is not a void line, before touching the file', async () => {
+    const result = await runPurge({existing: READER_REAL_LINE, stdin: READER_REAL_LINE.trim()})
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toBe('TRACES_READER_VOID_INVALID')
+    expect(result.content).toBe(READER_REAL_LINE)
+  })
+
+  it('refuses an unmounted volume, so it never writes to the root filesystem', async () => {
+    const result = await runPurge({existing: READER_REAL_LINE, mounted: false})
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toBe('TRACES_NOT_MOUNTED')
+    expect(result.content).toBe(READER_REAL_LINE)
+  })
+
+  it('refuses a readers directory that is a symlink', async () => {
+    const result = await runPurge({symlinkDir: true})
+    expect(result.exitCode).toBe(1)
+    expect(result.stdout).toBe('TRACES_READER_PATH_SYMLINK')
+  })
+
+  it('takes the void line from stdin only: the script text holds no token', () => {
+    const script = readerPurgeScript()
+    expect(script).toContain(TRACES_READER_TOKEN_FILE)
+    expect(script).toContain(TRACES_READER_DIR)
+    expect(script).not.toContain(PURGE_VOID_LINE)
+    expect(script).not.toMatch(/\bcat\b/)
+    expect(script).not.toContain('/dev/null')
+  })
+})
+
+describe('readerVoidLine', () => {
+  const bytes = (fill: number) => new Uint8Array(32).fill(fill)
+
+  it('is `<void token> void <date>` with the sender void prefix and a 43-character body', () => {
+    const line = readerVoidLine(new Date('2026-11-20T15:30:00Z'), () => bytes(7))
+    expect(line).toMatch(/^trc_void_[\w-]{43} void 2026-11-20T15:30:00\.000Z$/)
+  })
+
+  it('is different for different random bytes', () => {
+    const at = new Date('2026-11-20T15:30:00Z')
+    expect(readerVoidLine(at, () => bytes(1))).not.toBe(readerVoidLine(at, () => bytes(2)))
+  })
+
+  it('refuses a random source that returns the wrong length', () => {
+    expect(() => readerVoidLine(new Date(), () => new Uint8Array(8))).toThrow(/32 bytes/)
+  })
+})
+
+describe('runRestore: purging reader tokens on the restored volume', () => {
+  const RESTORE_INPUT = {snapshotName: 'traces-data-snap', privateKey: 'placeholder', remoteUser: 'root'}
+  const REOPEN_INPUT = {privateKey: 'placeholder', remoteUser: 'root'}
+  const failureOf = (promise: Promise<unknown>) =>
+    promise.then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+  const withRandom = (deps: ProvisionDeps): ProvisionDeps => ({...deps, randomBytes: () => new Uint8Array(32).fill(7)})
+  const purgeCommand = (world: ReturnType<typeof makeWorld>) =>
+    world.sshCommands().find(command => command.includes('traces-step:reader-purge')) ?? ''
+
+  // Mutation target: dropping the step leaves the restored file as the snapshot held it.
+  it('writes one void line to the reader file after the sentinel is verified and before the Tempo scan', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, readerTokens: 'real'})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, withRandom(deps))
+
+    expect(world.host.steps).toEqual([
+      'restore-quiesce',
+      'fs-probe',
+      'mount',
+      'verify-sentinel',
+      'reader-purge',
+      'tempo-quarantine',
+    ])
+    expect(world.host.readerState).toBe('deny-all')
+    expect(world.host.readerPurgeInputs).toHaveLength(1)
+    expect(world.host.readerPurgeInputs[0]).toMatch(/^trc_void_[\w-]{43} void 2026-11-20T15:30:00\.000Z\n?$/)
+    expect(purgeCommand(world)).toContain(TRACES_READER_TOKEN_FILE)
+    expect(logs.join('\n')).toContain(TRACES_READER_TOKEN_FILE)
+  })
+
+  // Mutation target: a token in argv shows in the process list.
+  it('sends the void line on stdin, never in the command', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, withRandom(deps))
+    const token = (world.host.readerPurgeInputs[0] ?? '').split(' ')[0] ?? ''
+    expect(token).toStartWith(TRACES_VOID_TOKEN_PREFIX)
+    expect(purgeCommand(world)).not.toContain(token)
+    expect(logs.join('\n')).not.toContain(token)
+  })
+
+  it('purges a file the snapshot did not have, and a file it held empty', async () => {
+    for (const readerTokens of ['missing', 'empty'] as const) {
+      const world = makeWorld(provisionedCloud(), {provisioned: true, readerTokens})
+      const {deps} = makeDeps(world.runner)
+      await runRestore(RESTORE_INPUT, withRandom(deps))
+      expect(world.host.steps).toContain('reader-purge')
+      expect(world.host.readerState).toBe('deny-all')
+    }
+  })
+
+  it('does not read the clock again for the void line date', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps} = makeDeps(world.runner)
+    let reads = 0
+    deps.now = () => new Date(['2026-11-20T15:30:59.900Z', '2026-11-20T15:31:00.100Z'][Math.min(reads++, 1)] ?? '')
+    await runRestore(RESTORE_INPUT, withRandom(deps))
+    expect(reads).toBe(1)
+    expect(world.host.readerPurgeInputs[0]).toContain('2026-11-20T15:30:59.900Z')
+  })
+
+  // Mutation target: a purge whose answer is not checked lets a restore end green over a reader file still holding tokens.
+  it.each([
+    ['a non-zero exit', {exitCode: 1, stdout: 'TRACES_READER_PURGED\n', stderr: ''}],
+    ['a refusal', {exitCode: 1, stdout: 'TRACES_NOT_MOUNTED\n', stderr: ''}],
+    ['an unrecognised answer', ok('all good')],
+    ['no output', ok('')],
+  ])('stops the restore when the purge answers with %s, naming the file', async (_label, answer) => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, readerTokens: 'real', readerPurge: answer})
+    const {deps, logs} = makeDeps(world.runner)
+    const failure = await failureOf(runRestore(RESTORE_INPUT, withRandom(deps)))
+
+    expect(failure).toContain('reader token purge')
+    expect(failure).toContain(TRACES_READER_TOKEN_FILE)
+    expect(failure).toContain('Docker is stopped')
+    expect(failure).toContain('Ports 80 and 443 stay closed')
+    expect(failure).toContain('do not run the restore again')
+    expect(world.host.steps).not.toContain('tempo-quarantine')
+    expect(logs.join('\n')).not.toContain('✓')
+    expect(world.host.dockerRestarts).toBe(0)
+  })
+
+  it('does not run before the sentinel is verified', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const originalHandle = world.host.handle.bind(world.host)
+    world.host.handle = (command, stdin) =>
+      command.includes('verify-sentinel') ? fail('TRACES_SENTINEL_UNRECOGNISED') : originalHandle(command, stdin)
+    const {deps} = makeDeps(world.runner)
+    await expect(runRestore(RESTORE_INPUT, withRandom(deps))).rejects.toThrow(
+      /verify sentinel on restored volume failed/,
+    )
+    expect(world.host.steps).not.toContain('reader-purge')
+  })
+
+  it('says to reissue reader tokens and rotate the backend credentials by hand', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true})
+    const {deps, logs} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, withRandom(deps))
+    const text = logs.join('\n')
+    expect(text).toMatch(/reader token/i)
+    expect(text).toMatch(/Viewer key/)
+    expect(text).toMatch(/Grafana service-account token/)
+    // Rotation is a runbook step: the restore touches no backend credential file.
+    expect(world.sshCommands().join('\n')).not.toContain('langfuse-basic')
+    expect(world.sshCommands().join('\n')).not.toContain('grafana-mcp')
+  })
+
+  // The reader file was restored with a real token; after the purge the guard passes.
+  it('after a restore over a real reader token, --reopen-ports succeeds', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, readerTokens: 'real'})
+    const {deps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, withRandom(deps))
+    await runReopen(REOPEN_INPUT, deps)
+    expect(world.doctlCalls().some(call => call.startsWith('compute firewall add-rules'))).toBe(true)
+  })
+
+  it('without the purge, --reopen-ports refuses on that same real reader token', async () => {
+    const world = makeWorld(provisionedCloud(), {provisioned: true, readerTokens: 'real'})
+    const {deps} = makeDeps(world.runner)
+    await runRestore(RESTORE_INPUT, withRandom(deps))
+    world.host.readerState = 'real'
+    await expect(runReopen(REOPEN_INPUT, deps)).rejects.toThrow(new RegExp(TRACES_READER_TOKEN_FILE))
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Reopen mode
 // ---------------------------------------------------------------------------
 
@@ -2467,6 +2818,48 @@ describe('runReopen', () => {
     },
   )
 
+  it('refuses while the reader file holds a real token, names that file, and the ports stay closed', async () => {
+    const world = makeWorld(closedCloud(), {provisioned: true, tokens: 'deny-all', readerTokens: 'real'})
+    const {deps} = makeDeps(world.runner)
+    const failure = await runReopen(REOPEN_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+    expect(failure).toMatch(/Refusing to reopen ports 80 and 443/)
+    expect(failure).toContain(TRACES_READER_TOKEN_FILE)
+    expect(failure).toMatch(/real token/)
+    expect(failure).not.toMatch(/sender token file/)
+    expect(world.doctlCalls().some(call => call.startsWith('compute firewall add-rules'))).toBe(false)
+  })
+
+  it('names both the sender files and the reader file when both hold a real token', async () => {
+    const world = makeWorld(closedCloud(), {provisioned: true, tokens: 'real', readerTokens: 'real'})
+    const {deps} = makeDeps(world.runner)
+    const failure = await runReopen(REOPEN_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+    expect(failure).toContain(TRACES_READER_TOKEN_FILE)
+    expect(failure).toContain(TRACES_TOKEN_ROOT)
+  })
+
+  it.each([
+    ['missing', /the reader token file \S+ is missing/],
+    ['empty', /the reader token file \S+ is empty/],
+  ] as const)('a reader file that is %s is a fault naming the file, not "no token"', async (readerTokens, message) => {
+    const world = makeWorld(closedCloud(), {provisioned: true, readerTokens})
+    const {deps} = makeDeps(world.runner)
+    const failure = await runReopen(REOPEN_INPUT, deps).then(
+      () => '',
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    )
+    expect(failure).toMatch(message)
+    expect(failure).toContain(TRACES_READER_TOKEN_FILE)
+    expect(failure).not.toMatch(/real token/)
+    expect(failure).not.toMatch(/check sender token files failed/)
+    expect(world.doctlCalls().some(call => call.startsWith('compute firewall add-rules'))).toBe(false)
+  })
+
   it('refuses when the token root cannot be read (a missing directory is not "empty")', async () => {
     const world = makeWorld(closedCloud(), {provisioned: true, tokens: 'missing-root'})
     const {deps} = makeDeps(world.runner)
@@ -2506,6 +2899,9 @@ describe('runReopen', () => {
     expect(script).toContain(`index($1, p)`)
     expect(script).toContain(`-v p=${TRACES_VOID_TOKEN_PREFIX}`)
     for (const group of SENDER_GROUPS) expect(script).toContain(group)
+    expect(script).toContain(TRACES_READER_TOKEN_FILE)
+    expect(script).toContain('TRACES_TOKEN_FILE_MISSING=reader')
+    expect(script).toContain('TRACES_TOKEN_FILE_EMPTY=reader')
     expect(script).not.toMatch(/\bcat\b/)
     expect(script).not.toMatch(/\bprint\b[^}]*\$[01]/)
     expect(script).not.toContain('/dev/null')
@@ -2533,8 +2929,8 @@ const voidLineFor = (fill: string): string =>
 
 type TokenFiles = Partial<Record<(typeof SENDER_GROUPS)[number], string | null>>
 
-/** Every group deny-all unless the scenario says otherwise. `null` leaves the file out. */
-async function runTokenCheck(files: TokenFiles, options: {rootMissing?: boolean} = {}) {
+/** Every group and the reader file deny-all unless the scenario says otherwise. `null` leaves the file out. */
+async function runTokenCheck(files: TokenFiles, options: {rootMissing?: boolean; reader?: string | null} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'traces-guard-'))
   try {
     const root = join(dir, 'tokens')
@@ -2547,6 +2943,10 @@ async function runTokenCheck(files: TokenFiles, options: {rootMissing?: boolean}
         if (content !== null && content !== undefined) writeFileSync(join(root, group, 'token'), content)
       }
     }
+    const readerFile = join(dir, 'readers', 'token')
+    mkdirSync(join(dir, 'readers'))
+    const reader = 'reader' in options ? options.reader : voidLineFor('R')
+    if (reader !== null && reader !== undefined) writeFileSync(readerFile, reader)
     const shim = join(dir, 'shim')
     mkdirSync(shim)
     writeFileSync(join(shim, 'findmnt'), '#!/bin/sh\necho /dev/sda\n')
@@ -2554,6 +2954,7 @@ async function runTokenCheck(files: TokenFiles, options: {rootMissing?: boolean}
 
     // Longest paths first: the mount point is a prefix of the others.
     const script = tokenCheckScript()
+      .replaceAll(TRACES_READER_TOKEN_FILE, readerFile)
       .replaceAll(TRACES_TOKEN_ROOT, root)
       .replaceAll(TRACES_SENTINEL_PATH, sentinel)
       .replaceAll(TRACES_VOLUME_MOUNT, dir)
@@ -2630,6 +3031,72 @@ describe('the reopen guard, run against real token files', () => {
   it('faults when the token root is missing, not "no tokens"', async () => {
     const result = await runTokenCheck({}, {rootMissing: true})
     expect(result).toEqual({stdout: 'TRACES_TOKEN_ROOT_MISSING', stderr: '', exitCode: 1})
+  })
+
+  describe('the reader file', () => {
+    it('passes when it holds only a void line, or several', async () => {
+      expect((await runTokenCheck({}, {reader: voidLineFor('x')})).stdout).toBe('TRACES_TOKENS_DENY_ALL')
+      expect((await runTokenCheck({}, {reader: voidLineFor('x') + voidLineFor('y')})).stdout).toBe(
+        'TRACES_TOKENS_DENY_ALL',
+      )
+    })
+
+    it('refuses, naming the reader and not the senders, for a real token beside a void line', async () => {
+      const reader = `${voidLineFor('x')}${REAL} 0123456789ab agent-one 2026-11-20T00:00:00.000Z\n`
+      expect(await runTokenCheck({}, {reader})).toEqual({
+        stdout: 'TRACES_READER_TOKENS_REAL',
+        stderr: '',
+        exitCode: 0,
+      })
+    })
+
+    it('refuses for a last line with no newline, and for a lookalike of the void prefix', async () => {
+      expect((await runTokenCheck({}, {reader: REAL_LINE.trimEnd()})).stdout).toBe('TRACES_READER_TOKENS_REAL')
+      const lookalike = `trc_voidish${'x'.repeat(40)} 0123456789ab agent-one 2026-11-20\n`
+      expect((await runTokenCheck({}, {reader: lookalike})).stdout).toBe('TRACES_READER_TOKENS_REAL')
+    })
+
+    it('says both when a sender file and the reader file hold a real token', async () => {
+      const result = await runTokenCheck({workstation: REAL_LINE}, {reader: REAL_LINE})
+      expect(result.stdout).toBe('TRACES_SENDER_AND_READER_TOKENS_REAL')
+    })
+
+    it('a real sender token alone still says senders only', async () => {
+      expect((await runTokenCheck({workstation: REAL_LINE})).stdout).toBe('TRACES_TOKENS_REAL')
+    })
+
+    it('faults, naming the reader, when the file is missing: absence is not "purged"', async () => {
+      expect(await runTokenCheck({}, {reader: null})).toEqual({
+        stdout: 'TRACES_TOKEN_FILE_MISSING=reader',
+        stderr: '',
+        exitCode: 1,
+      })
+    })
+
+    it.each([
+      ['empty', ''],
+      ['blank lines', '\n  \n\t\n'],
+    ])('faults, naming the reader, when the file is %s', async (_label, reader) => {
+      expect(await runTokenCheck({}, {reader})).toEqual({
+        stdout: 'TRACES_TOKEN_FILE_EMPTY=reader',
+        stderr: '',
+        exitCode: 1,
+      })
+    })
+
+    it('a reader fault wins over a real sender token', async () => {
+      const result = await runTokenCheck({marcusrbrown: REAL_LINE}, {reader: ''})
+      expect(result.exitCode).toBe(1)
+      expect(result.stdout).toBe('TRACES_TOKEN_FILE_EMPTY=reader')
+    })
+
+    it('never prints a reader token, its fingerprint or its consumer', async () => {
+      const result = await runTokenCheck({}, {reader: `${REAL} 0123456789ab agent-one 2026-11-20T00:00:00.000Z\n`})
+      for (const text of [REAL, '0123456789ab', 'agent-one']) {
+        expect(result.stdout).not.toContain(text)
+        expect(result.stderr).not.toContain(text)
+      }
+    })
   })
 })
 

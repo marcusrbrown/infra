@@ -46,6 +46,12 @@ import {createMcpAction} from '@goke/mcp'
  * - `traces sender add`     — mutating, secret-bearing: mints a live sender token and hands it over once; CLI-only
  * - `traces sender list`    — sensitive: lists sender groups, token fingerprints and creation dates; CLI-only
  * - `traces sender revoke`  — mutating: revokes live sender tokens; CLI-only
+ * - `traces reader add`     — mutating, secret-bearing: mints a live reader token with full read access to trace content; CLI-only
+ * - `traces reader list`    — sensitive: lists reader consumers, token fingerprints and creation dates; CLI-only
+ * - `traces reader revoke`  — mutating: revokes live reader tokens, or all of them (the reader kill switch); CLI-only
+ * - `traces reader backend langfuse` — mutating, secret-bearing: installs the Langfuse Viewer key the gate reads with; CLI-only
+ * - `traces reader backend grafana`  — mutating, secret-bearing: creates and rotates the Grafana service-account token; CLI-only
+ * - `traces reader backend status`   — sensitive: reads credential state over SSH; CLI-only
  *
  * A defense-in-depth backstop also denies these in opencode.jsonc `permission`
  * so that even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native

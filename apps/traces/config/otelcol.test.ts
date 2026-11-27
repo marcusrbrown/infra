@@ -234,6 +234,7 @@ describe('collector Tempo branch', () => {
     'gen_ai.usage.total_tokens',
     'gen_ai.usage.cache_read.input_tokens',
     'gen_ai.usage.cache_creation.input_tokens',
+    'gen_ai.usage.cache_write.input_tokens',
     'gen_ai.usage.reasoning.output_tokens',
     'gen_ai.usage.prompt_tokens',
     'gen_ai.usage.completion_tokens',
@@ -268,6 +269,7 @@ describe('collector Tempo branch', () => {
     'fro_bot.agent.role',
     'fro_bot.gate',
     'fro_bot.result',
+    'fro_bot.subagent.session_id',
     // Resource attributes
     'sender.group',
     'service.name',

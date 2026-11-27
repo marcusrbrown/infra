@@ -2,8 +2,17 @@ import {readdirSync} from 'node:fs'
 
 import {describe, expect, it} from 'bun:test'
 
+import {INGEST_SERVICES, INSIGHT_SERVICES, MONITORING_SERVICES} from './src/deploy'
 import {ENDPOINTS, METRIC_NAMES, PATHS, PORTS, THRESHOLDS} from './src/health-report'
-import {EMBEDDER_USER_ID, GRAFANA_USER_ID, PROMETHEUS_USER_ID, TEMPO_USER_ID, TRACES_SENTINEL_PATH} from './src/host'
+import {
+  EMBEDDER_USER_ID,
+  GRAFANA_MCP_USER_ID,
+  GRAFANA_USER_ID,
+  PROMETHEUS_USER_ID,
+  READER_GATE_USER_ID,
+  TEMPO_USER_ID,
+  TRACES_SENTINEL_PATH,
+} from './src/host'
 import {OBJECT_STORE_PREFIXES} from './src/retention'
 
 // Reads the real compose file and the service configs beside it. Image tags and digests are
@@ -129,14 +138,23 @@ describe('traces compose: networks', () => {
   })
 
   it('keeps the stores, Grafana and the worker off the edge network', () => {
-    for (const name of ['clickhouse', 'postgres', 'redis', 'minio', 'grafana', 'langfuse-worker', 'embedder']) {
+    for (const name of [
+      'clickhouse',
+      'postgres',
+      'redis',
+      'minio',
+      'grafana',
+      'langfuse-worker',
+      'embedder',
+      'grafana-mcp',
+    ]) {
       expect(networksOf(name)).toEqual(['backend'])
     }
   })
 
-  it('bridges the two networks only through Langfuse web, Prometheus, Tempo and the health reporter', () => {
+  it('bridges the two networks only through Langfuse web, Prometheus, Tempo, the health reporter and the reader gate', () => {
     const bridges = names.filter(name => networksOf(name).length === 2).sort()
-    expect(bridges).toEqual(['health-reporter', 'langfuse-web', 'prometheus', 'tempo'])
+    expect(bridges).toEqual(['health-reporter', 'langfuse-web', 'prometheus', 'reader-gate', 'tempo'])
   })
 })
 
@@ -153,9 +171,10 @@ describe('traces compose: operations', () => {
     }
   })
 
-  it('gives every service a healthcheck except the two distroless images with no shell', () => {
+  // The Grafana MCP image is Debian slim with no curl or wget; the gate's own health endpoint reports whether it answers.
+  it('gives every service a healthcheck except the two distroless images and the Grafana MCP image, which have no probe tool', () => {
     const without = names.filter(name => service(name).healthcheck === undefined).sort()
-    expect(without).toEqual(['collector', 'tempo'])
+    expect(without).toEqual(['collector', 'grafana-mcp', 'tempo'])
   })
 
   it('never makes another service wait for the collector or Tempo to be healthy', () => {
@@ -306,6 +325,7 @@ describe('traces compose: health reporter', () => {
       'langfuse-worker': [3030],
       grafana: [3000],
       embedder: [8080],
+      'reader-gate': [8091],
       clickhouse: [8123],
       minio: [9000],
     }
@@ -824,6 +844,283 @@ describe('traces compose: Langfuse Topics settings', () => {
   })
 })
 
+// ─── Agent read access ────────────────────────────────────────────────────────
+
+function volumesOf(name: string): string[] {
+  return strings(service(name).volumes ?? [], `${name}.volumes`)
+}
+
+function dependsOn(name: string): string[] {
+  const deps = service(name).depends_on
+  if (deps === undefined) return []
+  return Array.isArray(deps) ? strings(deps, 'depends_on') : Object.keys(record(deps, 'depends_on'))
+}
+
+/** Command-line flags as a map: `-t x`, `--name value` and `--name=value`. A bare flag maps to true. */
+function flagMap(args: string[]): Map<string, string | true> {
+  const flags = new Map<string, string | true>()
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index] ?? ''
+    if (!arg.startsWith('-')) continue
+    const name = arg.replace(/^-+/, '')
+    const eq = name.indexOf('=')
+    if (eq !== -1) {
+      flags.set(name.slice(0, eq), name.slice(eq + 1))
+      continue
+    }
+    const next = args[index + 1]
+    if (next !== undefined && !next.startsWith('-')) {
+      flags.set(name, next)
+      index++
+    } else flags.set(name, true)
+  }
+  return flags
+}
+
+function hostPort(url: string): [string, string] {
+  const parsed = new URL(url)
+  return [parsed.hostname, parsed.port]
+}
+
+async function renovateRule(packageName: string): Promise<Rec | undefined> {
+  const config = record(
+    Bun.JSON5.parse(await Bun.file(new URL('../../.github/renovate.json5', import.meta.url)).text()),
+    'renovate',
+  )
+  return (config.packageRules as unknown[])
+    .map(entry => record(entry, 'rule'))
+    .find(entry => Array.isArray(entry.matchPackageNames) && entry.matchPackageNames.includes(packageName))
+}
+
+const READER_SERVICES = ['reader-gate', 'grafana-mcp'] as const
+
+describe('traces compose: reader gate', () => {
+  const gate = (): Rec => service('reader-gate')
+
+  it('runs the same Bun image as the health reporter, so one pin covers both', () => {
+    expect(gate().image).toBe(service('health-reporter').image)
+    expect(String(gate().image)).toMatch(PINNED_IMAGE)
+  })
+
+  it('runs as its own non-root user on a read-only root filesystem with no capabilities', () => {
+    expect(String(gate().user)).toBe(`${READER_GATE_USER_ID}:${READER_GATE_USER_ID}`)
+    expect(READER_GATE_USER_ID).not.toBe(TEMPO_USER_ID)
+    expect(gate().read_only).toBe(true)
+    expect(strings(gate().cap_drop, 'cap_drop')).toEqual(['ALL'])
+    expect(strings(gate().security_opt, 'security_opt')).toContain('no-new-privileges:true')
+    expect(strings(gate().tmpfs, 'tmpfs')).toEqual(['/tmp'])
+  })
+
+  it('runs its source from a read-only bind mount without installing anything', () => {
+    expect(strings(gate().command, 'command')).toEqual(['bun', 'run', '--no-install', '/app/main.ts'])
+    expect(volumesOf('reader-gate')).toContain('./reader-gate:/app:ro')
+    expect(environment('reader-gate').BUN_RUNTIME_TRANSPILER_CACHE_PATH).toBe('0')
+  })
+
+  it('mounts the reader token directory and its own credential directory, read-only, and nothing else', () => {
+    expect(volumesOf('reader-gate').sort()).toEqual([
+      './reader-gate:/app:ro',
+      './readers:/run/readers:ro',
+      './secrets/reader-gate:/run/secrets/reader-gate:ro',
+    ])
+  })
+
+  it('never mounts sender tokens, the collector, reporter or Grafana secrets, a store or the Docker socket', () => {
+    for (const volume of volumesOf('reader-gate')) {
+      expect(volume).not.toMatch(
+        /tokens|secrets\/(collector|reporter|grafana)\b|grafana-mcp|docker\.sock|clickhouse_data|postgres_data|minio_data|redis_data|tempo_data/,
+      )
+    }
+  })
+
+  it('is the one service that mounts the reader token directory and the gate credential directory', () => {
+    const who = (prefix: string): string[] =>
+      names.filter(name => volumesOf(name).some(volume => volume.startsWith(prefix))).sort()
+    expect(who('./readers:')).toEqual(['reader-gate'])
+    expect(who('./secrets/reader-gate:')).toEqual(['reader-gate'])
+    expect(who('./secrets/grafana-mcp:')).toEqual(['grafana-mcp'])
+    // The collector keeps its own tokens and nothing of the reader store.
+    for (const volume of volumesOf('collector')) expect(volume).not.toMatch(/readers|reader-gate|grafana-mcp/)
+    expect(volumesOf('collector')).toContain('./tokens:/etc/otelcol/tokens:ro')
+    // No service mounts the sender tokens next to the reader store.
+    expect(volumesOf('reader-gate').some(volume => volume.includes('tokens'))).toBe(false)
+  })
+
+  it('is on the edge network, for Caddy and Langfuse web, and the backend one, for the Grafana MCP server', () => {
+    expect(networksOf('reader-gate')).toEqual(['backend', 'edge'])
+  })
+
+  it('publishes no port, shares no host namespace and waits for nothing', () => {
+    for (const key of ['ports', 'expose', 'network_mode', 'pid', 'privileged', 'depends_on']) {
+      expect(gate()[key]).toBeUndefined()
+    }
+  })
+
+  it('has exactly the environment the gate reads: paths, the two upstreams and no secret value', () => {
+    expect(environment('reader-gate')).toEqual({
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
+      READER_TOKEN_FILE: '/run/readers/token',
+      LANGFUSE_BASIC_FILE: '/run/secrets/reader-gate/langfuse-basic',
+      LANGFUSE_UPSTREAM: 'http://langfuse-web:3000',
+      GRAFANA_MCP_UPSTREAM: 'http://grafana-mcp:8000',
+    })
+  })
+
+  it('reads its files from inside the mounts and reaches its upstreams by name, port and a shared network', () => {
+    const env = environment('reader-gate')
+    const targets = volumesOf('reader-gate').map(volume => volume.split(':')[1] ?? '')
+    for (const key of ['READER_TOKEN_FILE', 'LANGFUSE_BASIC_FILE']) {
+      expect(targets.some(target => String(env[key]).startsWith(`${target}/`))).toBe(true)
+    }
+    const published: Record<string, number[]> = {'langfuse-web': [3000], 'grafana-mcp': [8000]}
+    for (const key of ['LANGFUSE_UPSTREAM', 'GRAFANA_MCP_UPSTREAM']) {
+      const [host = '', port = ''] = hostPort(String(env[key]))
+      expect(names).toContain(host)
+      expect(published[host]).toContain(Number(port))
+      expect(networksOf(host).filter(network => networksOf('reader-gate').includes(network)).length).toBeGreaterThan(0)
+    }
+  })
+
+  it('checks that its listeners answer on loopback, whatever the upstreams are doing', () => {
+    const test = strings(record(gate().healthcheck, 'healthcheck').test, 'healthcheck.test').join(' ')
+    expect(test).toContain('bun')
+    expect(test).toContain('http://127.0.0.1:8091/healthz')
+    // A response of any status proves the listener is up; an upstream outage must not make the container unhealthy.
+    expect(test).not.toMatch(/--fail|\bok\b|response\.ok/)
+  })
+
+  it('is proxied to by Caddy on the proxy port, and the health port is not', async () => {
+    const caddyfile = await read('config/Caddyfile')
+    expect(caddyfile).toContain('reverse_proxy reader-gate:8090')
+    expect(caddyfile).not.toContain('8091')
+  })
+})
+
+describe('traces compose: Grafana MCP server', () => {
+  const mcp = (): Rec => service('grafana-mcp')
+  const flags = (): Map<string, string | true> => flagMap(strings(mcp().command, 'grafana-mcp.command'))
+  const TOOL_CATEGORIES = ['datasource', 'prometheus', 'search', 'tempo']
+
+  it('is the mcp-grafana image, pinned by tag and digest', () => {
+    expect(String(mcp().image)).toMatch(/^grafana\/mcp-grafana:\d+\.\d+\.\d+@sha256:[0-9a-f]{64}$/)
+  })
+
+  it('is held out of automerge by a Renovate rule that names the compose file and asks for approval', async () => {
+    const rule = await renovateRule('grafana/mcp-grafana')
+    expect(rule?.matchFileNames).toEqual(['apps/traces/docker-compose.yaml'])
+    expect(rule?.automerge).toBe(false)
+    expect(rule?.dependencyDashboardApproval).toBe(true)
+  })
+
+  it('serves streamable HTTP on a fixed port and accepts only its own Host header', () => {
+    expect(flags().get('t')).toBe('streamable-http')
+    expect(flags().get('address')).toBe(':8000')
+    // The Host header carries the port: the gate reaches it as grafana-mcp:8000, and the match is exact.
+    expect(flags().get('allowed-hosts')).toBe('grafana-mcp:8000')
+    expect(String(flags().get('allowed-hosts'))).not.toContain('*')
+    expect(hostPort(environment('reader-gate').GRAFANA_MCP_UPSTREAM ?? '')).toEqual(['grafana-mcp', '8000'])
+  })
+
+  it('turns write tools off, usage reporting off, and enables only the four read categories', () => {
+    expect(flags().get('disable-write')).toBe(true)
+    expect(flags().get('usage-stats')).toBe('disabled')
+    expect(String(flags().get('enabled-tools')).split(',').sort()).toEqual(TOOL_CATEGORIES)
+  })
+
+  it('opens none of the switches that widen what a caller may reach or do', () => {
+    for (const name of flags().keys()) {
+      expect(name).not.toMatch(
+        /allow-grafana-url-override|allowed-grafana-urls|allow-cross-origin|enable-write-tools|enable-query|tls-skip-verify|require-user-credentials|include-args/,
+      )
+    }
+  })
+
+  it('reads its Grafana address and its service-account token file, and holds no credential value', () => {
+    expect(environment('grafana-mcp')).toEqual({
+      GRAFANA_URL: 'http://grafana:3000',
+      GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE: '/run/secrets/grafana-mcp/token',
+    })
+    const [host = '', port = ''] = hostPort(environment('grafana-mcp').GRAFANA_URL ?? '')
+    expect(names).toContain(host)
+    expect(port).toBe('3000')
+    expect(networksOf(host).filter(network => networksOf('grafana-mcp').includes(network)).length).toBeGreaterThan(0)
+    expect(volumesOf('grafana-mcp')).toEqual(['./secrets/grafana-mcp:/run/secrets/grafana-mcp:ro'])
+  })
+
+  // The image's own user is `mcp-grafana`, uid 1000, primary group 999. Naming 1000:1000 makes the group match the
+  // group of the secret directory, as for Grafana.
+  it('runs as the image user by number, on a read-only root filesystem with no capabilities', () => {
+    expect(GRAFANA_MCP_USER_ID).toBe(1000)
+    expect(String(mcp().user)).toBe(`${GRAFANA_MCP_USER_ID}:${GRAFANA_MCP_USER_ID}`)
+    expect(mcp().read_only).toBe(true)
+    expect(strings(mcp().cap_drop, 'cap_drop')).toEqual(['ALL'])
+    expect(strings(mcp().security_opt, 'security_opt')).toContain('no-new-privileges:true')
+    expect(strings(mcp().tmpfs, 'tmpfs')).toEqual(['/tmp'])
+  })
+
+  it('is on the backend network only, and Grafana is not on the edge network either', () => {
+    expect(networksOf('grafana-mcp')).toEqual(['backend'])
+    expect(networksOf('grafana')).toEqual(['backend'])
+    for (const key of ['ports', 'expose', 'network_mode', 'pid', 'privileged', 'depends_on']) {
+      expect(mcp()[key]).toBeUndefined()
+    }
+  })
+
+  it('is never reached by Caddy, which names only the gate', async () => {
+    expect(await read('config/Caddyfile')).not.toContain('grafana-mcp')
+  })
+})
+
+describe('traces compose: reader services and the ingest route', () => {
+  it('keeps both reader services out of every ingest, monitoring and insight list', () => {
+    for (const name of READER_SERVICES) {
+      expect(INGEST_SERVICES as readonly string[]).not.toContain(name)
+      expect(MONITORING_SERVICES as readonly string[]).not.toContain(name)
+      expect(INSIGHT_SERVICES as readonly string[]).not.toContain(name)
+    }
+  })
+
+  it('has no service that waits for either, and publishes no new port', () => {
+    for (const name of names) {
+      for (const reader of READER_SERVICES)
+        expect({name, waits: dependsOn(name).includes(reader)}).toEqual({name, waits: false})
+    }
+    const published = names.filter(name => service(name).ports !== undefined).sort()
+    expect(published).toEqual(['caddy', 'grafana', 'langfuse-web'])
+    expect(strings(service('caddy').ports, 'caddy.ports')).toEqual(['80:80', '443:443'])
+  })
+
+  it('restarts, hardens and logs both like the rest of the stack', () => {
+    for (const name of READER_SERVICES) {
+      expect(service(name).restart).toBe('unless-stopped')
+      expect(record(service(name).logging, 'logging').driver).toBe('json-file')
+    }
+  })
+})
+
+describe('traces compose: Langfuse MCP host allow-list', () => {
+  it('has Langfuse web enforce API key roles and allow the gate host by name, with no wildcard', () => {
+    const env = environment('langfuse-web')
+    expect(env.API_AUTH_MIGRATION).toBe('enforce')
+    expect(env.API_KEY_PROJECT_ROLES_ENABLE).toBe('true')
+    const hosts = String(env.LANGFUSE_MCP_ALLOWED_HOSTS)
+      .split(',')
+      .map(entry => entry.trim())
+    expect(hosts).toEqual(['langfuse-web:3000'])
+    for (const entry of hosts) expect(entry).not.toContain('*')
+  })
+
+  it('names the very host and port the gate sends to', () => {
+    const [host = '', port = ''] = hostPort(environment('reader-gate').LANGFUSE_UPSTREAM ?? '')
+    expect(environment('langfuse-web').LANGFUSE_MCP_ALLOWED_HOSTS).toBe(`${host}:${port}`)
+    expect(host).toBe('langfuse-web')
+  })
+
+  it('sets it on web only: the worker serves no MCP route', () => {
+    expect(environment('langfuse-worker').LANGFUSE_MCP_ALLOWED_HOSTS).toBeUndefined()
+  })
+})
+
 describe('collector mounts match the collector config', async () => {
   const collectorConfig = await read('config/otelcol.yaml')
 
@@ -847,6 +1144,7 @@ const RULE_TITLES = [
   'LangfuseDown',
   'GrafanaDown',
   'EmbedderDown',
+  'ReaderGateDown',
   'VolumeSpaceWarning',
   'VolumeSpaceCritical',
   'RootSpace',
@@ -994,6 +1292,8 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('TempoAttributeTruncation').labels.severity).toBe('info')
     // Topics is an insight feature: no trace depends on the embedder.
     expect(rule('EmbedderDown').labels.severity).toBe('warning')
+    // The reader gate serves agent reads only: its outage costs reads, never ingest.
+    expect(rule('ReaderGateDown').labels.severity).toBe('warning')
     expect(rule('VolumeSpaceWarning').labels.severity).toBe('warning')
     expect(rule('VolumeSpaceCritical').labels.severity).toBe('critical')
   })
@@ -1081,7 +1381,7 @@ describe('Grafana alerting provisioning', async () => {
       operator: '>',
       value: ((THRESHOLDS.staleAfterIntervals + 1) * THRESHOLDS.intervalMs) / 1000,
     })
-    for (const title of ['TracesTargetDown', 'LangfuseDown', 'GrafanaDown', 'EmbedderDown']) {
+    for (const title of ['TracesTargetDown', 'LangfuseDown', 'GrafanaDown', 'EmbedderDown', 'ReaderGateDown']) {
       expect(rule(title).comparison).toEqual({operator: '<', value: 1})
     }
   })
@@ -1091,6 +1391,8 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('RootSpace').expr).toBe(`${METRIC_NAMES.diskUsedRatio}{mount="root"}`)
     expect(rule('GrafanaDown').expr).toBe(`${METRIC_NAMES.probeUp}{target="grafana"}`)
     expect(rule('EmbedderDown').expr).toBe(`${METRIC_NAMES.probeUp}{target="embedder"}`)
+    expect(rule('ReaderGateDown').expr).toBe(`${METRIC_NAMES.probeUp}{target="reader-gate"}`)
+    expect(rule('ReaderGateDown').group).toBe('stack')
     expect(rule('LangfuseDown').expr).toContain(`${METRIC_NAMES.probeUp}{target=~"langfuse-web|langfuse-worker"}`)
     expect(rule('DataOlderThan31d').expr).toBe(METRIC_NAMES.oldestDataAge)
     expect(rule('ReporterStale').expr).toBe(`time() - ${METRIC_NAMES.lastRun}`)
@@ -1123,6 +1425,7 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('LangfuseDown').for).toBe('5m')
     expect(rule('GrafanaDown').for).toBe('5m')
     expect(rule('EmbedderDown').for).toBe('5m')
+    expect(rule('ReaderGateDown').for).toBe('5m')
   })
 
   // The message is fixed text, the rule's own labels and numbers. No template reads a span, a log line or a body.

@@ -1175,6 +1175,9 @@ const TABLE = {
         fact.volume(composePath('traces'), 'collector_queue'),
       ),
       reporter: maps(fact.service(composePath('traces'), 'health-reporter')),
+      agents: illustrative('Agent runs in consumer repos and on workstations are external callers.'),
+      gate: maps(fact.service(composePath('traces'), 'reader-gate')),
+      mcp: maps(fact.service(composePath('traces'), 'grafana-mcp')),
       web: maps(fact.service(composePath('traces'), 'langfuse-web')),
       worker: maps(fact.service(composePath('traces'), 'langfuse-worker')),
       clickhouse: maps(

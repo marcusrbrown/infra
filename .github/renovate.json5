@@ -148,6 +148,16 @@
       dependencyDashboardApproval: true,
     },
     {
+      // The Grafana MCP server holds a Viewer token for Grafana and sits behind the reader gate. A new release can change
+      // its tool list, its flags (a flag it drops can reopen a write tool or usage reporting) or its Host handling, so each
+      // bump is a reviewed PR: diff `tools/list` and re-prove the read-only flags before it merges.
+      description: ['Require dashboard approval and never automerge the trace stack Grafana MCP server'],
+      matchFileNames: ['apps/traces/docker-compose.yaml'],
+      matchPackageNames: ['grafana/mcp-grafana'],
+      automerge: false,
+      dependencyDashboardApproval: true,
+    },
+    {
       // Langfuse web and worker must run the same version: the worker consumes what web enqueues, and a
       // release can change the queue and ClickHouse schema. One group puts both pins on one branch, so a
       // bump can never move one without the other.

@@ -1,11 +1,18 @@
 import {describe, expect, it} from 'bun:test'
 
 import {
+  READER_GRAFANA_PLACEHOLDER,
+  READER_LANGFUSE_PLACEHOLDER,
   resolveTracesHost,
   resolveTracesOrigin,
   TRACES_APP_DIR,
   TRACES_DEFAULT_HOST,
+  TRACES_GRAFANA_MCP_TOKEN_FILE,
   TRACES_GROUPS,
+  TRACES_READER_DIR,
+  TRACES_READER_LANGFUSE_FILE,
+  TRACES_READER_LOCK,
+  TRACES_READER_TOKEN_FILE,
   TRACES_SERVICES,
   validateTracesHost,
 } from './host'
@@ -73,6 +80,29 @@ describe('constants match the app', async () => {
   it('the log services are exactly the compose services', () => {
     const services = Object.keys((Bun.YAML.parse(composeSource) as {services: Record<string, unknown>}).services)
     expect([...TRACES_SERVICES].sort() as string[]).toEqual(services.sort())
+  })
+
+  it('the reader files and placeholders are the ones apps/traces lays out', () => {
+    const constant = (name: string): string | undefined => {
+      const literal = new RegExp(`${name} = '([^']+)'`).exec(hostSource)?.[1]
+      if (literal !== undefined) return literal
+      return new RegExp(`${name} = \`([^\`]+)\``).exec(hostSource)?.[1]
+    }
+    const appDir = ['$', '{TRACES_APP_DIR}'].join('')
+    const readerDir = ['$', '{TRACES_READER_DIR}'].join('')
+    expect(constant('TRACES_READER_DIR')).toBe(`${appDir}/readers`)
+    expect(constant('TRACES_READER_TOKEN_FILE')).toBe(`${readerDir}/token`)
+    expect(constant('TRACES_READER_LOCK')).toBe(`${readerDir}/.lock`)
+    expect(constant('TRACES_READER_LANGFUSE_FILE')).toBe(`${appDir}/secrets/reader-gate/langfuse-basic`)
+    expect(constant('TRACES_GRAFANA_MCP_TOKEN_FILE')).toBe(`${appDir}/secrets/grafana-mcp/token`)
+    expect(constant('READER_LANGFUSE_PLACEHOLDER')).toBe(READER_LANGFUSE_PLACEHOLDER)
+    expect(constant('READER_GRAFANA_PLACEHOLDER')).toBe(READER_GRAFANA_PLACEHOLDER)
+
+    expect(TRACES_READER_DIR).toBe(`${TRACES_APP_DIR}/readers`)
+    expect(TRACES_READER_TOKEN_FILE).toBe(`${TRACES_READER_DIR}/token`)
+    expect(TRACES_READER_LOCK).toBe(`${TRACES_READER_DIR}/.lock`)
+    expect(TRACES_READER_LANGFUSE_FILE).toBe(`${TRACES_APP_DIR}/secrets/reader-gate/langfuse-basic`)
+    expect(TRACES_GRAFANA_MCP_TOKEN_FILE).toBe(`${TRACES_APP_DIR}/secrets/grafana-mcp/token`)
   })
 
   it('the reporter detail command targets the loopback port and path the reporter serves', async () => {

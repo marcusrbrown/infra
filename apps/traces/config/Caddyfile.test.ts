@@ -2,6 +2,9 @@ import {readdirSync} from 'node:fs'
 
 import {describe, expect, it} from 'bun:test'
 
+import {RESPONSE_DEADLINE_MS} from '../reader-gate/constants'
+import {READER_GATE_DEADLINE_MS} from '../src/host'
+
 // The three ingest states are produced by Caddy itself: the Caddyfile imports
 // `ingest/{$TRACES_INGEST_STATE}.caddy`, and Caddy substitutes the environment value while it parses.
 // `render(state)` reproduces that one substitution (the site address and the import) and nothing
@@ -9,9 +12,13 @@ import {describe, expect, it} from 'bun:test'
 // with `caddy adapt` and a running Caddy container when the files were written.
 //
 // The routing model parses `handle` blocks in file order (Caddy's `handle` is first-match-wins and
-// mutually exclusive), as apps/dashboard/config/Caddyfile.test.ts does.
+// mutually exclusive), as apps/dashboard/config/Caddyfile.test.ts does. The only wildcard matchers in this contract
+// are the two agent routes, which sit in the main file and not in the ingest-state files.
 
 const GROUPS = ['marcusrbrown', 'fro-bot', 'workstation'] as const
+const AGENT_ROUTES = ['langfuse', 'grafana'] as const
+const AGENT_MATCHER = /^\/agent\/(?:langfuse|grafana)\/\*$/
+const GATE_UPSTREAM = 'reader-gate:8090'
 const DOMAIN = 'traces.fro.bot'
 const IMPORT_LINE = /^[^\S\n]*import ingest\/\{\$TRACES_INGEST_STATE\}\.caddy[^\S\n]*$/m
 
@@ -102,10 +109,34 @@ async function resolver(state: string): Promise<(path: string) => Outcome> {
     for (const block of blocks) {
       if (block.matcher === undefined || block.matcher === path) return outcomeOf(block.body)
       if (!block.matcher.startsWith('/')) throw new Error(`unsupported matcher ${block.matcher}`)
-      if (block.matcher.endsWith('*')) throw new Error('wildcard matchers are not part of this contract')
+      if (block.matcher.endsWith('*')) {
+        if (!AGENT_MATCHER.test(block.matcher)) throw new Error('wildcard matchers are not part of this contract')
+        if (path.startsWith(block.matcher.slice(0, -1))) return outcomeOf(block.body)
+      }
     }
     throw new Error(`no route for ${path}`)
   }
+}
+
+/** The text with every agent-route `handle` block removed, so the rules for the other routes can be checked alone. */
+function withoutAgentRoutes(text: string): string {
+  let out = text
+  const opens = [...text.matchAll(/^\thandle \/agent\/[a-z]+\/\*[^\S\n]*\{/gm)]
+  for (const match of opens.reverse()) {
+    const start = match.index ?? 0
+    const close = findMatchingBrace(text, start + match[0].length - 1)
+    out = out.slice(0, start) + out.slice(close + 1)
+  }
+  return out
+}
+
+function agentBlocks(rendered: string): HandleBlock[] {
+  const [site] = siteBlocks(rendered)
+  return handles(site ?? '').filter(block => block.matcher?.startsWith('/agent/') === true)
+}
+
+function seconds(text: string, name: string): number[] {
+  return [...text.matchAll(new RegExp(String.raw`${name}\s+(\d+)s\b`, 'g'))].map(match => Number(match[1]))
 }
 
 const COLLECTOR_PORTS: Record<(typeof GROUPS)[number], number> = {
@@ -130,6 +161,13 @@ const NOT_INGEST = [
   '/Marcusrbrown/v1/traces',
   '/other/v1/traces',
   '/healthz/extra',
+  '/agent',
+  '/agent/',
+  '/agent/langfuse',
+  '/agent/grafana',
+  '/agent/other/x',
+  '/agent/mcp',
+  '/agent/langfuse-extra/x',
 ]
 
 describe('traces Caddyfile', () => {
@@ -159,13 +197,15 @@ describe('traces Caddyfile', () => {
     expect(text.search(IMPORT_LINE)).toBeLessThan(text.indexOf('\thandle {'))
   })
 
-  it('answers within the sender’s 10 seconds: every timeout is under 10 seconds', async () => {
-    const all = stripComments(caddyfile) + stripComments(await ingestFile('open'))
-    const seconds = [...all.matchAll(/(dial_timeout|response_header_timeout|read_header)\s+(\d+)s/g)].map(m =>
+  // The agent routes are the exception: a read may take up to the gate's deadline, so their own timeouts are above it
+  // (see the agent-route tests). Every other route stays under the sender's 10 seconds.
+  it('answers within the sender’s 10 seconds: every timeout outside the agent routes is under 10 seconds', async () => {
+    const all = withoutAgentRoutes(stripComments(caddyfile)) + stripComments(await ingestFile('open'))
+    const values = [...all.matchAll(/(dial_timeout|response_header_timeout|read_header)\s+(\d+)s/g)].map(m =>
       Number(m[2]),
     )
-    expect(seconds.length).toBeGreaterThanOrEqual(4)
-    for (const value of seconds) expect(value).toBeLessThan(10)
+    expect(values.length).toBeGreaterThanOrEqual(4)
+    for (const value of values) expect(value).toBeLessThan(10)
     // The acknowledgement path (collector) waits at most 5 seconds.
     expect(all).toMatch(/response_header_timeout 5s/)
   })
@@ -204,13 +244,18 @@ describe('traces Caddyfile', () => {
     for (const state of ['held', 'open']) {
       const [site] = siteBlocks(await render(state))
       const matchers = handles(site ?? '').map(block => block.matcher)
-      expect(matchers).toEqual([...GROUPS.map(group => `/${group}/v1/traces`), '/healthz', undefined])
+      expect(matchers).toEqual([
+        ...GROUPS.map(group => `/${group}/v1/traces`),
+        '/healthz',
+        ...AGENT_ROUTES.map(route => `/agent/${route}/*`),
+        undefined,
+      ])
     }
   })
 
-  it('routes nothing to Grafana, Langfuse, Tempo, Prometheus or the canary receiver in any state', async () => {
+  it('routes nothing to Grafana, Langfuse, Tempo, Prometheus or the canary receiver in any state, outside the agent routes', async () => {
     for (const state of states) {
-      const rendered = await render(state)
+      const rendered = withoutAgentRoutes(await render(state))
       for (const forbidden of [
         /grafana/i,
         /langfuse/i,
@@ -240,5 +285,115 @@ describe('traces Caddyfile', () => {
       )
       expect(upstreams).toEqual(['8080'])
     }
+  })
+})
+
+// The two agent routes belong to the reader gate. They sit in the main file, outside the ingest-state imports, so they
+// answer in every state: an ingest hold never closes a read, and `revoke --all` is the reader kill switch.
+describe('traces Caddyfile: agent routes', () => {
+  const main = stripComments(caddyfile)
+  const AGENT_PATHS = [
+    '/agent/langfuse/api/public/mcp',
+    '/agent/langfuse/api/public/traces',
+    '/agent/langfuse/',
+    '/agent/grafana/mcp',
+    '/agent/grafana/',
+  ]
+
+  it('has one handle per route, in the main file, ahead of the 404', () => {
+    const [site] = siteBlocks(main.replaceAll('{$TRACES_DOMAIN}', DOMAIN))
+    const matchers = handles(site ?? '').map(block => block.matcher)
+    expect(matchers.filter(matcher => matcher?.startsWith('/agent/'))).toEqual(
+      AGENT_ROUTES.map(route => `/agent/${route}/*`),
+    )
+    expect(matchers.at(-1)).toBeUndefined()
+    expect(main.search(IMPORT_LINE)).toBeLessThan(main.indexOf('handle /agent/'))
+  })
+
+  it.each(states)('%s: both routes reach the reader gate and nothing else', async state => {
+    const resolve = await resolver(state)
+    for (const path of AGENT_PATHS)
+      expect({path, outcome: resolve(path)}).toEqual({path, outcome: {kind: 'proxy', upstream: GATE_UPSTREAM}})
+    expect([...(await render(state)).matchAll(/reader-gate/g)]).toHaveLength(AGENT_ROUTES.length)
+  })
+
+  it.each(states)('%s: the gate is the only upstream of the agent routes, on its proxy port only', async state => {
+    const upstreams = agentBlocks(await render(state)).map(block => outcomeOf(block.body))
+    expect(upstreams).toEqual(AGENT_ROUTES.map(() => ({kind: 'proxy', upstream: GATE_UPSTREAM})))
+    expect(await render(state)).not.toContain('8091')
+  })
+
+  it('leaves the ingest-state files alone: none of them names an agent route or the gate', async () => {
+    for (const state of states) {
+      expect(await ingestFile(state)).not.toMatch(/agent|reader-gate|mcp/i)
+    }
+  })
+
+  it('keeps the bans on every other route: an agent block names no store, canary or metrics port', async () => {
+    for (const state of states) {
+      for (const block of agentBlocks(await render(state))) {
+        for (const forbidden of [
+          /grafana/i,
+          /langfuse/i,
+          /tempo/i,
+          /prometheus/i,
+          /canary/i,
+          /collector/i,
+          /mcp/i,
+          /:3000\b/,
+          /:3001\b/,
+          /:3200\b/,
+          /:8000\b/,
+          /:9090\b/,
+          /:4414\b/,
+          /:13133\b/,
+        ]) {
+          expect(block.body).not.toMatch(forbidden)
+        }
+      }
+    }
+  })
+
+  // Caddy's server timeouts apply to every route. The gate gives an upstream up to its deadline to send headers, so
+  // Caddy's response-header timeout on these routes and its server write timeout must outlast it, in that order: the gate
+  // answers 504 first, and Caddy still has time to write that answer. Only the dial timeout stays short.
+  //
+  // Go's http.Server WriteTimeout is measured from the end of reading the request headers, so the write timeout also has
+  // to cover read_body plus the gate's whole response budget (RESPONSE_DEADLINE_MS, which runs to the end of the body).
+  it('keeps Caddy’s response-header and write timeouts above the gate deadline, with a short dial timeout', async () => {
+    const deadline = READER_GATE_DEADLINE_MS / 1000
+    const blocks = agentBlocks(await render('open'))
+    expect(blocks).toHaveLength(AGENT_ROUTES.length)
+    const [write] = seconds(main, 'write')
+    const [readBody] = seconds(main, 'read_body')
+    expect(readBody).toBeDefined()
+    expect(write).toBeGreaterThan(deadline)
+    expect(write).toBeGreaterThan((readBody ?? Number.POSITIVE_INFINITY) + RESPONSE_DEADLINE_MS / 1000)
+    for (const block of blocks) {
+      expect(seconds(block.body, 'dial_timeout')).toHaveLength(1)
+      expect(seconds(block.body, 'dial_timeout')[0]).toBeLessThanOrEqual(5)
+      const header = seconds(block.body, 'response_header_timeout')
+      expect(header).toHaveLength(1)
+      expect(header[0]).toBeGreaterThan(deadline)
+      expect(write).toBeGreaterThan(header[0] ?? Number.POSITIVE_INFINITY)
+    }
+  })
+
+  it('has one write timeout, so the rule above reads the value Caddy uses', () => {
+    expect(seconds(main, 'write')).toHaveLength(1)
+  })
+
+  // Caddy logs a request, headers included, when a proxy fails; it hides Authorization and Cookie but not X-Api-Key. A
+  // reader token travels in Authorization, so the default logger deletes the three credential headers outright.
+  it('deletes the Authorization, Cookie and X-Api-Key request headers from the default log', () => {
+    const global = main.slice(0, main.indexOf('{$TRACES_DOMAIN}'))
+    expect(global).toMatch(/log \{.*format filter \{.*wrap json/s)
+    for (const header of ['Authorization', 'Cookie', 'X-Api-Key']) {
+      expect(global).toMatch(new RegExp(`request>headers>${header} delete`))
+    }
+  })
+
+  it('never forwards the caller’s credential headers by naming them in a header directive', () => {
+    expect(main).not.toMatch(/header_up\s+(Authorization|Cookie|X-Api-Key)/i)
   })
 })

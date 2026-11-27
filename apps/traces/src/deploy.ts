@@ -11,21 +11,25 @@
 //   4. read the host's state (ingest state, bootstrap key on record, restarts left over from a failed deploy)
 //   5. compare every file with the host. If ingest is open and a gated service (the collector, a backend or
 //      their configuration) is about to change, hold the route (503), and prove it from inside the host
-//   6. write directories, deny-all token files (only if absent), secret files, configs and the reporter source
-//   7. prune images, check free space, pull the ingest services (never Grafana, Prometheus or the Topics embedder)
+//   6. write directories, deny-all token files and the reader token and credential placeholders (only if absent),
+//      secret files, configs, the reporter source and the reader gate source
+//   7. prune images, check free space, pull the ingest services (never Grafana, Prometheus, the reader services or the
+//      Topics embedder)
 //   8. start the stores and Langfuse, assert and read back retention, start Tempo, the collector and the reporter,
 //      verify the collector's image digest
 //   9. run the gates, then set the route: open only when every gate passes AND TRACES_INGEST_OPEN is exactly
 //      `true`; otherwise off (first bring-up) or held (it was open before). The canary gate sends the deploy's one
 //      canary (the reporter's `--canary-once` mode, by exec) once the reporter's verdict is fresh
-//  10. pull and start the services that are not the route, Prometheus, Grafana and then the Topics embedder, then remove
-//      the deploy marker, which ends the route's work. They are monitoring and an insight feature, not the route: they
-//      are pulled and started only after the route is decided, each as an operator gate (`prometheus-ready`,
-//      `grafana-ready`, `embedder-ready`), so a failed pull or start fails the run and never holds or closes ingest. All
-//      three are recreated on every deploy, so a changed file of theirs is applied here. Only
-//      then check Grafana's sign-in (the password file works) and its provisioned alerting (the Discord contact point
-//      and the rule groups exist), unless Grafana did not start: read-only, after the route is final, and a failure
-//      fails the run (`OperatorSurfaceError`) without touching the route
+//  10. pull and start the services that are not the route, Prometheus, Grafana, the reader gate with its Grafana MCP
+//      server and then the Topics embedder, then remove the deploy marker, which ends the route's work. They are
+//      monitoring, agent read access and an insight feature, not the route: they are pulled and started only after the
+//      route is decided, each as an operator gate (`prometheus-ready`, `grafana-ready`, `reader-ready`,
+//      `embedder-ready`), so a failed pull or start fails the run and never holds or closes ingest. All are recreated
+//      on every deploy, so a changed file of theirs is applied here. Only then prove the two agent routes answer 401
+//      without a token (`agent-routes`, unless the reader gate did not start) and check Grafana's sign-in (the password
+//      file works) and its provisioned alerting (the Discord contact point and the rule groups exist), unless Grafana
+//      did not start: read-only, after the route is final, and a failure fails the run (`OperatorSurfaceError`)
+//      without touching the route
 //
 // Overlapping deploys: the last deploy to start owns the host. Each deploy writes a random id into the deploy marker
 // in its first host script; every later script that changes the host checks, in the same script, that the marker
@@ -55,7 +59,7 @@ import type {RetentionReport} from './retention'
 
 import {Buffer} from 'node:buffer'
 import {randomBytes} from 'node:crypto'
-import {existsSync, mkdtempSync, rmSync} from 'node:fs'
+import {existsSync, mkdtempSync, readdirSync, rmSync} from 'node:fs'
 import {tmpdir} from 'node:os'
 import {join, resolve} from 'node:path'
 import {materializeIdentityFile} from '@marcusrbrown/infra-shared/server/droplet-helpers'
@@ -63,17 +67,25 @@ import {materializeIdentityFile} from '@marcusrbrown/infra-shared/server/droplet
 import {bashCommand, checkTracesStorage, shellQuote} from '../server/provision'
 import {
   EMBEDDER_USER_ID,
+  GRAFANA_MCP_USER_ID,
   GRAFANA_USER_ID,
   PROMETHEUS_USER_ID,
+  READER_GATE_USER_ID,
+  READER_GRAFANA_PLACEHOLDER,
+  READER_LANGFUSE_PLACEHOLDER,
   SENDER_GROUPS,
   TEMPO_USER_ID,
   TRACES_APP_DIR,
   TRACES_DEPLOY_MARKER,
   TRACES_DEPLOY_STEP_LOCK,
   TRACES_DOCKER_ROOT,
+  TRACES_GRAFANA_MCP_TOKEN_FILE,
   TRACES_INGEST_LOCK,
   TRACES_LOCK_BUSY_SENTINEL,
   TRACES_PENDING_RESTARTS,
+  TRACES_READER_DIR,
+  TRACES_READER_LANGFUSE_FILE,
+  TRACES_READER_TOKEN_FILE,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
   TRACES_VOID_TOKEN_PREFIX,
@@ -301,6 +313,8 @@ export const SERVICES = [
   'grafana',
   'prometheus',
   'embedder',
+  'reader-gate',
+  'grafana-mcp',
   'health-reporter',
 ] as const
 
@@ -321,8 +335,16 @@ export const MONITORING_SERVICES = ['grafana', 'prometheus'] as const satisfies 
  */
 export const INSIGHT_SERVICES = ['embedder'] as const satisfies readonly Service[]
 
-/** Every service that starts after the route is decided, never before: the monitoring and the insight services. */
-const POST_ROUTE_SERVICES: readonly string[] = [...MONITORING_SERVICES, ...INSIGHT_SERVICES]
+/**
+ * The agent read gate and the Grafana MCP server behind it. No trace passes through either, nothing in the compose file
+ * depends on either, and neither is gated: a down gate answers agents with an error and costs ingest nothing. They start
+ * after the route is decided, as the operator gate `reader-ready`, so a registry or start failure never reaches the route.
+ * They are recreated on every deploy, so a changed gate source file or credential-reading change is applied here.
+ */
+export const READER_SERVICES = ['reader-gate', 'grafana-mcp'] as const satisfies readonly Service[]
+
+/** Every service that starts after the route is decided, never before: the monitoring, reader and insight services. */
+const POST_ROUTE_SERVICES: readonly string[] = [...MONITORING_SERVICES, ...READER_SERVICES, ...INSIGHT_SERVICES]
 
 /** Every other service: the ones the route depends on. The route-critical pull and start cover these and no others. */
 export const INGEST_SERVICES: readonly Service[] = SERVICES.filter(service => !POST_ROUTE_SERVICES.includes(service))
@@ -356,6 +378,8 @@ const COLLECTOR_GID = '65532'
 const GRAFANA_UID = String(GRAFANA_USER_ID)
 const REPORTER_UID = String(TEMPO_USER_ID)
 const PROMETHEUS_UID = String(PROMETHEUS_USER_ID)
+const READER_GATE_GID = String(READER_GATE_USER_ID)
+const GRAFANA_MCP_GID = String(GRAFANA_MCP_USER_ID)
 const EMBEDDER_UID = String(EMBEDDER_USER_ID)
 
 const COMPOSE_PROJECT_VOLUME = 'traces_collector_queue'
@@ -537,10 +561,26 @@ export function buildEnvManagedFile(inputs: DeployInputs): RemoteFile {
   }
 }
 
-/** Reads `apps/traces`'s uploaded files through an injected reader. */
-export async function loadUploadedFiles(readFile: (relative: string) => Promise<string>): Promise<RemoteFile[]> {
+/**
+ * The reader gate's source directory, uploaded as one flat directory and mounted read-only at `/app` in the gate. The
+ * same name locally (under `apps/traces`) and on the host (under the app directory).
+ */
+export const READER_GATE_SOURCE_DIR = 'reader-gate'
+
+/** What a changed gate source file restarts, and the name the pending-restart record gives it. */
+const READER_GATE_TOUCH = 'reader-gate' satisfies Touch
+
+/** A gate file the host runs: a `.ts` file that is neither a test nor the test support module. */
+export function isReaderGateSource(name: string): boolean {
+  return name.endsWith('.ts') && !name.endsWith('.test.ts') && name !== 'testing.ts'
+}
+
+function loadSpecs(
+  readFile: (relative: string) => Promise<string>,
+  specs: readonly {local: string; remote: string; touches: readonly Touch[]}[],
+): Promise<RemoteFile[]> {
   return Promise.all(
-    UPLOADED_FILES.map(async spec => ({
+    specs.map(async spec => ({
       path: spec.remote,
       content: await readFile(spec.local),
       owner: 'root:root',
@@ -549,6 +589,40 @@ export async function loadUploadedFiles(readFile: (relative: string) => Promise<
       kind: 'plain' as const,
     })),
   )
+}
+
+/** The uploaded files the route-critical comparison and write loop handles: every one except the reader gate's source. */
+export function loadRouteFiles(readFile: (relative: string) => Promise<string>): Promise<RemoteFile[]> {
+  return loadSpecs(readFile, UPLOADED_FILES)
+}
+
+/**
+ * The reader gate's source files: the `.ts` files of its directory that the host runs. They are compared, written and
+ * recorded inside the operator gate `reader-ready`, never in the route-critical loop, so a listing, read or write that
+ * fails costs the run and not the route.
+ */
+export async function loadReaderGateFiles(
+  readFile: (relative: string) => Promise<string>,
+  listFiles: (relative: string) => Promise<string[]>,
+): Promise<RemoteFile[]> {
+  const gateNames = (await listFiles(READER_GATE_SOURCE_DIR)).filter(name => isReaderGateSource(name)).sort()
+  if (!gateNames.includes('main.ts')) throw new Error(`${READER_GATE_SOURCE_DIR}/main.ts is missing: nothing to upload`)
+  return loadSpecs(
+    readFile,
+    gateNames.map(name => ({
+      local: `${READER_GATE_SOURCE_DIR}/${name}`,
+      remote: `${READER_GATE_SOURCE_DIR}/${name}`,
+      touches: ['reader-gate'] as readonly Touch[],
+    })),
+  )
+}
+
+/** Every uploaded file, the reader gate's source included. The deploy loads the two parts separately. */
+export async function loadUploadedFiles(
+  readFile: (relative: string) => Promise<string>,
+  listFiles: (relative: string) => Promise<string[]>,
+): Promise<RemoteFile[]> {
+  return [...(await loadRouteFiles(readFile)), ...(await loadReaderGateFiles(readFile, listFiles))]
 }
 
 // ─── Remote scripts ───────────────────────────────────────────────────────────
@@ -577,6 +651,7 @@ function relativeToApp(absolute: string): string {
 const MARKER_FILE = relativeToApp(TRACES_DEPLOY_MARKER)
 const STEP_LOCK_FILE = relativeToApp(TRACES_DEPLOY_STEP_LOCK)
 const PENDING_RESTARTS_FILE = relativeToApp(TRACES_PENDING_RESTARTS)
+const READER_DIR = relativeToApp(TRACES_READER_DIR)
 /** The only files `removeOwnFileScript` will delete. */
 const OWN_FILES: readonly string[] = [MARKER_FILE, PENDING_RESTARTS_FILE, 'secrets/bootstrap-pending']
 
@@ -814,7 +889,11 @@ export function parseHostState(stdout: string): HostState {
 
 export const DIRS_SENTINEL = 'TRACES_DIRS_READY'
 
-/** Directories and their owners. Created or corrected; nothing inside a token directory is touched. */
+/**
+ * Directories and their owners. Created or corrected; nothing inside a token directory is touched. The reader token and
+ * credential directories and the gate's source directory are not here: they are made by `readerDirsScript` and
+ * `readerSourceDirScript` as part of `reader-ready`, so that one that cannot be made never holds ingest.
+ */
 export function prepareDirsScript(id: string): string {
   const dir = (relative: string): string => remotePath(relative)
   const plain = [
@@ -840,6 +919,53 @@ install -d -o root -g ${COLLECTOR_GID} -m ${SECRET_DIR_MODE} ${collector.join(' 
 install -d -o root -g ${GRAFANA_UID} -m ${SECRET_DIR_MODE} ${dir('secrets/grafana')}
 install -d -o root -g ${REPORTER_UID} -m ${SECRET_DIR_MODE} ${dir('secrets/reporter')}
 echo ${DIRS_SENTINEL}`,
+  )
+}
+
+export const READER_SOURCE_DIR_SENTINEL = 'TRACES_READER_SOURCE_DIR_READY'
+
+/**
+ * The reader gate's source directory, `root:root` 0755 like the other plain directories. Run in the operator gate
+ * `reader-ready`, after `readerDirsScript` and before the gate source is compared and written, and not with the
+ * ingest-critical directories: a path that cannot be made (a regular file where the directory should be) exits this
+ * script non-zero and fails `reader-ready` alone, where it would otherwise hold ingest. `appDir` exists so a test can run
+ * the real script against a scratch directory.
+ */
+export function readerSourceDirScript(id: string, appDir: string = TRACES_APP_DIR): string {
+  const path = `${appDir}/${READER_GATE_SOURCE_DIR}`
+  if (!SAFE_PATH.test(path) || path.includes('..')) throw new Error(`Unsafe remote path: ${READER_GATE_SOURCE_DIR}`)
+  return guardedStep(
+    'reader-source-dir',
+    id,
+    `install -d -o root -g root -m 0755 ${path}
+echo ${READER_SOURCE_DIR_SENTINEL}`,
+    {marker: `${appDir}/${MARKER_FILE}`, lock: `${appDir}/${STEP_LOCK_FILE}`},
+  )
+}
+
+export const READER_DIRS_SENTINEL = 'TRACES_READER_DIRS_READY'
+
+/**
+ * The directories the reader token file and the two backend credential files live in, made to the group that reads
+ * each. Run as the first step of the operator gate `reader-ready`, ahead of the placeholder writes, and not with the
+ * ingest-critical directories: a path that cannot be made (a regular file where a directory should be) exits this
+ * script non-zero and fails `reader-ready` alone, where it would otherwise hold ingest. `secrets` exists by then
+ * (`prepareDirsScript`). Nothing inside a directory is touched. `appDir` exists so a test can run the real script against a
+ * scratch directory.
+ */
+export function readerDirsScript(id: string, appDir: string = TRACES_APP_DIR): string {
+  const dir = (relative: string): string => {
+    const path = `${appDir}/${relative}`
+    if (!SAFE_PATH.test(path) || path.includes('..')) throw new Error(`Unsafe remote path: ${relative}`)
+    return path
+  }
+  return guardedStep(
+    'reader-dirs',
+    id,
+    `install -d -o root -g ${READER_GATE_GID} -m ${SECRET_DIR_MODE} ${[READER_DIR, 'secrets/reader-gate'].map(dir).join(' ')}
+install -d -o root -g ${GRAFANA_MCP_GID} -m ${SECRET_DIR_MODE} ${dir('secrets/grafana-mcp')}
+echo ${READER_DIRS_SENTINEL}`,
+    {marker: `${appDir}/${MARKER_FILE}`, lock: `${appDir}/${STEP_LOCK_FILE}`},
   )
 }
 
@@ -883,6 +1009,89 @@ elif [ -f "$f" ]; then
   echo ${TOKEN_SENTINELS[1]}
 else
   echo "token path could not be created" >&2
+  exit 1
+fi`,
+    {marker: `${appDir}/${MARKER_FILE}`, lock: `${appDir}/${STEP_LOCK_FILE}`},
+  )
+}
+
+export const READER_FILE_SENTINELS = ['TRACES_READER_FILE_CREATED', 'TRACES_READER_FILE_PRESENT'] as const
+
+/**
+ * The three files the reader services read and the operator, not the deploy, fills in: the reader token file (a void
+ * line until `traces reader add`), the Langfuse Viewer pair and the Grafana service-account token (placeholders until
+ * `traces reader backend`). They are not deploy-managed content: they are never in the file comparison and never
+ * written by `writeFileScript`, so a drift check cannot see them and a deploy cannot overwrite a real credential.
+ */
+export const READER_FILES = {
+  token: {path: relativeToApp(TRACES_READER_TOKEN_FILE), owner: `root:${READER_GATE_GID}`, mode: '0640', newline: true},
+  langfuse: {
+    path: relativeToApp(TRACES_READER_LANGFUSE_FILE),
+    owner: `root:${READER_GATE_GID}`,
+    mode: '0440',
+    newline: false,
+  },
+  grafana: {
+    path: relativeToApp(TRACES_GRAFANA_MCP_TOKEN_FILE),
+    owner: `root:${GRAFANA_MCP_GID}`,
+    mode: '0440',
+    newline: false,
+  },
+} as const
+
+export type ReaderFileKind = keyof typeof READER_FILES
+
+export const READER_FILE_KINDS = ['token', 'langfuse', 'grafana'] as const satisfies readonly ReaderFileKind[]
+
+/** What a new reader file holds: the void line for the token file, a placeholder for each credential. Not secrets. */
+export function readerFileContent(kind: ReaderFileKind, voidLine: string): string {
+  if (kind === 'token') return voidLine
+  return kind === 'langfuse' ? READER_LANGFUSE_PLACEHOLDER : READER_GRAFANA_PLACEHOLDER
+}
+
+/**
+ * Create one reader file as a placeholder when it does not exist, and never write its content when it does. The content
+ * arrives on stdin (the void line, or the placeholder) and goes to a temporary file in the destination directory with
+ * its owner and mode set, then is hard-linked into place: `ln` fails when the target exists, so a file that appears in
+ * between is never replaced. An existing regular file keeps every byte; only its owner and mode are set again, so a
+ * file whose user or mode drifted is repaired and a real credential is never touched. A symlink or anything that is not
+ * a regular file is an error, never "created". The token file keeps a trailing newline as the sender token files do; a
+ * credential file holds the bare value. `appDir` exists so a test can run the real script against a scratch directory.
+ */
+export function readerFileScript(kind: ReaderFileKind, id: string, appDir: string = TRACES_APP_DIR): string {
+  const spec = READER_FILES[kind]
+  const file = `${appDir}/${spec.path}`
+  const directory = file.slice(0, file.lastIndexOf('/'))
+  if (!SAFE_PATH.test(file) || file.includes('..')) throw new Error('Unsafe reader file path')
+  const write = spec.newline ? String.raw`printf '%s\n' "$line" > "$t"` : 'printf \'%s\' "$line" > "$t"'
+  return guardedStep(
+    `reader-file:${kind}`,
+    id,
+    `f=${file}
+line=$(cat)
+t=$(mktemp ${directory}/.new.XXXXXX)
+trap 'rm -f "$t"' EXIT
+${write}
+chown ${spec.owner} "$t"
+chmod ${spec.mode} "$t"
+if [ -L "$f" ]; then
+  echo "reader file path is a symlink" >&2
+  exit 1
+elif [ -e "$f" ]; then
+  if [ -f "$f" ]; then
+    chown ${spec.owner} "$f"
+    chmod ${spec.mode} "$f"
+    echo ${READER_FILE_SENTINELS[1]}
+  else
+    echo "reader file path exists and is not a regular file" >&2
+    exit 1
+  fi
+elif ln "$t" "$f"; then
+  echo ${READER_FILE_SENTINELS[0]}
+elif [ -f "$f" ]; then
+  echo ${READER_FILE_SENTINELS[1]}
+else
+  echo "reader file could not be created" >&2
   exit 1
 fi`,
     {marker: `${appDir}/${MARKER_FILE}`, lock: `${appDir}/${STEP_LOCK_FILE}`},
@@ -1176,6 +1385,48 @@ export function parseDrift(stdout: string): Service[] | undefined {
 export const REPORTER_DETAIL_SENTINEL = 'TRACES_DETAIL_END'
 export const REPORTER_DETAIL_COMMAND = `${COMPOSE} exec -T health-reporter wget -q -O - http://127.0.0.1:8081/detail && echo && echo ${REPORTER_DETAIL_SENTINEL}`
 
+export const READER_HEALTH_SENTINEL = 'TRACES_READER_HEALTH_CHECKED'
+
+/** The gate's health listener, as the container's own health check reaches it. Neither upstream needs a credential. */
+const READER_HEALTH_URL = 'http://127.0.0.1:8091/healthz'
+
+/** What the gate's `/healthz` says about its two upstreams, or `unreachable` when it did not answer with a verdict. */
+export type ReaderHealth = {langfuse: boolean; grafana: boolean} | 'unreachable'
+
+/**
+ * A short Bun program for the gate container (the image runs Bun and has no curl or wget). It reads `/healthz`, which
+ * answers 200 or 503 with the same JSON body, and prints one line: each upstream as `true` only when the body says
+ * exactly `true`, or `unreachable` when there is no answer or the body is not JSON. Nothing else is printed. `url` exists
+ * so a test can run the real program against a local server.
+ */
+export function readerHealthProgram(url: string = READER_HEALTH_URL): string {
+  return `fetch(${JSON.stringify(url)},{signal:AbortSignal.timeout(5000)}).then(r=>r.json()).then(b=>console.log('TRACES_READER_HEALTH langfuse='+(b.langfuse===true)+' grafana='+(b.grafana===true)),()=>console.log('TRACES_READER_HEALTH unreachable'))`
+}
+
+/**
+ * Asks the reader gate, through `docker compose exec` in its own container, whether it sees Langfuse and Grafana.
+ * Read only: no file is written and no credential is read or sent. A container that is not running makes `exec` fail,
+ * and the script still ends in its sentinel with no verdict line, which `parseReaderHealth` reads as no answer.
+ */
+export function readerHealthScript(): string {
+  return `set -u
+# traces-step:reader-healthz
+${COMPOSE} exec -T reader-gate bun -e ${shellQuote(readerHealthProgram())} || true
+echo ${READER_HEALTH_SENTINEL}`
+}
+
+/** The verdict from a complete answer (the line and the sentinel). Anything else is `undefined`. */
+export function parseReaderHealth(stdout: string): ReaderHealth | undefined {
+  const lines = stdout.split('\n').map(line => line.trim())
+  if (!lines.includes(READER_HEALTH_SENTINEL)) return undefined
+  if (lines.includes('TRACES_READER_HEALTH unreachable')) return 'unreachable'
+  for (const line of lines) {
+    const match = /^TRACES_READER_HEALTH langfuse=(true|false) grafana=(true|false)$/.exec(line)
+    if (match !== null) return {langfuse: match[1] === 'true', grafana: match[2] === 'true'}
+  }
+  return undefined
+}
+
 export const INGEST_PROBE_SENTINEL = 'TRACES_INGEST_PROBED'
 
 /**
@@ -1214,6 +1465,57 @@ const EXPECTED_STATUS: Record<IngestState, number> = {off: 404, held: 503, open:
 /** True only when every group answered, and every answer is the one that state produces. */
 export function provesState(statuses: Record<string, PathStatus>, state: IngestState): boolean {
   return SENDER_GROUPS.every(group => statuses[group] === EXPECTED_STATUS[state])
+}
+
+export const AGENT_PROBE_SENTINEL = 'TRACES_AGENT_ROUTES_PROBED'
+
+/** The two agent routes and the path each is proved on. Neither path needs a token to be answered with 401. */
+export const AGENT_ROUTES = {
+  langfuse: '/agent/langfuse/api/public/health',
+  grafana: '/agent/grafana/mcp',
+} as const
+
+export type AgentRoute = keyof typeof AGENT_ROUTES
+
+/**
+ * An unauthenticated GET to each agent route through Caddy, from inside the host: the gate answers 401 to a request
+ * without a token before it looks at the path, so 401 proves Caddy routed to a running gate in whatever state the ingest
+ * route is. Anything else is not a pass: 404 (no route), 502 or 503 (no gate), 000 (no answer in 10 s). Read only. Like the
+ * ingest proof it uses `--resolve` to reach the real certificate and route, and like the Grafana probe `-q` (honoured
+ * only as curl's first argument) and `--noproxy '*'` keep it off a `.curlrc` and the host's proxy variables. The body is
+ * never printed and no credential is sent.
+ */
+export function probeAgentRoutesScript(domain: string): string {
+  if (!DOMAIN.test(domain)) throw new Error('Unsafe domain')
+  const probes = (Object.entries(AGENT_ROUTES) as [AgentRoute, string][])
+    .map(
+      ([
+        route,
+        path,
+      ]) => `out=$(curl -q -sS --noproxy '*' --max-time 10 --resolve ${domain}:443:127.0.0.1 -w '\\nTRACES_HTTP=%{http_code}' "https://${domain}${path}" 2>&1) || true
+code=$(printf '%s' "$out" | sed -n 's/.*TRACES_HTTP=\\([0-9]*\\)$/\\1/p' | tail -n 1)
+echo "TRACES_AGENT_CODE ${route} \${code:-000}"`,
+    )
+    .join('\n')
+  return `set -u
+# traces-step:probe-agent-routes
+${probes}
+echo ${AGENT_PROBE_SENTINEL}`
+}
+
+/** The status of each route, from a complete answer only (every route and the sentinel). Anything else is `undefined`. */
+export function parseAgentRouteProbe(stdout: string): Record<AgentRoute, PathStatus> | undefined {
+  if (!stdout.split('\n').some(line => line.trim() === AGENT_PROBE_SENTINEL)) return undefined
+  const statuses: Partial<Record<AgentRoute, PathStatus>> = {}
+  for (const line of stdout.split('\n')) {
+    const match = /^TRACES_AGENT_CODE (langfuse|grafana) (\d{3})$/.exec(line.trim())
+    if (match?.[1] !== undefined && match[2] !== undefined) {
+      statuses[match[1] as AgentRoute] = match[2] === '000' ? 'unreachable' : Number(match[2])
+    }
+  }
+  return statuses.langfuse === undefined || statuses.grafana === undefined
+    ? undefined
+    : {langfuse: statuses.langfuse, grafana: statuses.grafana}
 }
 
 export const DISK_SENTINEL = 'TRACES_DISK_PROBED'
@@ -1417,7 +1719,7 @@ export const ALERT_CONTACT_POINT_UID = 'traces-discord'
 
 /** The rule groups the rules file provisions and how many rules each holds; pinned to `rules.yaml` by a test. */
 export const ALERT_RULE_GROUPS: readonly {name: string; rules: number}[] = [
-  {name: 'stack', rules: 5},
+  {name: 'stack', rules: 6},
   {name: 'collector', rules: 3},
   {name: 'tempo', rules: 2},
   {name: 'storage', rules: 4},
@@ -1702,6 +2004,8 @@ export type GateId =
   | 'grafana-alerting'
   | 'prometheus-ready'
   | 'grafana-ready'
+  | 'reader-ready'
+  | 'agent-routes'
   | 'embedder-ready'
 
 export interface GateResult {
@@ -1844,6 +2148,30 @@ export function evaluateGrafanaAlerting(probe: GrafanaAlerting): GateResult {
     true,
     `the Discord contact point and ${ALERT_RULE_GROUPS.length} rule groups (${total} rules) are provisioned`,
   )
+}
+
+/**
+ * The `agent-routes` operator gate. Pure: pass is exactly 401 on both agent routes, which is the gate refusing a request
+ * that carries no token. Every other answer is a fail, and so is a probe that could not be read (`undefined`): 404 means
+ * Caddy has no such route, 502 or 503 that no gate answered, 200 that a route is open without a token, and an
+ * unreachable route that nothing answered in time.
+ */
+export function evaluateAgentRoutes(statuses: Record<AgentRoute, PathStatus> | undefined): GateResult {
+  const gate = (pass: boolean, detail: string): GateResult => ({
+    id: 'agent-routes',
+    status: pass ? 'pass' : 'fail',
+    detail,
+    kind: 'operator',
+  })
+  if (statuses === undefined)
+    return gate(false, 'the agent routes could not be proven (no complete answer from the host)')
+  const wrong = (Object.keys(AGENT_ROUTES) as AgentRoute[]).filter(route => statuses[route] !== 401)
+  return wrong.length === 0
+    ? gate(true, 'both agent routes answer 401 without a token through the public origin')
+    : gate(
+        false,
+        `${wrong.map(route => `${AGENT_ROUTES[route]} answered ${statuses[route] === 'unreachable' ? 'nothing' : statuses[route]}`).join('; ')} (expected 401 on both routes)`,
+      )
 }
 
 /**
@@ -2124,6 +2452,9 @@ export interface Limits {
   /** Tries for Grafana to answer the sign-in check, after the route is final (a 2xx to 4xx answer is settled and is not retried). */
   grafanaAttempts: number
   grafanaIntervalMs: number
+  /** Tries for the reader gate's own `/healthz` to report both upstreams up, inside `reader-ready`. */
+  readerHealthAttempts: number
+  readerHealthIntervalMs: number
 }
 
 export const DEFAULT_LIMITS: Limits = {
@@ -2135,6 +2466,8 @@ export const DEFAULT_LIMITS: Limits = {
   verdictIntervalMs: 5000,
   grafanaAttempts: 12,
   grafanaIntervalMs: 5000,
+  readerHealthAttempts: 6,
+  readerHealthIntervalMs: 6000,
 }
 
 export interface DeployDeps {
@@ -2143,6 +2476,8 @@ export interface DeployDeps {
   resolve: (host: string) => Promise<string[]>
   /** Reads a file of `apps/traces` by its path relative to that directory. */
   readFile: (relative: string) => Promise<string>
+  /** The names of the files directly in a directory of `apps/traces` (relative to it). A subdirectory is an error. */
+  listFiles: (relative: string) => Promise<string[]>
   materializeIdentity: (privateKey: string) => MaterializedIdentity
   makeTempDir: () => {path: string; cleanup: () => void}
   knownHostsFile: string | undefined
@@ -2167,6 +2502,13 @@ export function defaultDeps(env: EnvLike): DeployDeps {
       return answers.map(answer => answer.address)
     },
     readFile: relative => Bun.file(resolve(APP_ROOT, relative)).text(),
+    listFiles: async relative => {
+      const entries = readdirSync(resolve(APP_ROOT, relative), {withFileTypes: true})
+      const nested = entries.find(entry => !entry.isFile())
+      if (nested !== undefined)
+        throw new Error(`${relative}/${nested.name} is not a file: the upload is one flat directory`)
+      return entries.map(entry => entry.name)
+    },
     materializeIdentity: materializeIdentityFile,
     makeTempDir: () => {
       const path = mkdtempSync(join(tmpdir(), 'traces-deploy-'))
@@ -2401,6 +2743,32 @@ async function awaitGrafanaSignIn(exec: RemoteExec, deps: DeployDeps): Promise<G
 }
 
 /**
+ * Asks the reader gate for its own `/healthz` until both upstreams are reported up, a few attempts over about 30
+ * seconds: the gate answers as soon as it listens, and the Grafana MCP server behind it can take a moment longer. Throws,
+ * naming each upstream that was down at the last attempt, when they never are. It runs inside the operator gate
+ * `reader-ready` and only reads, so the failure it throws can never reach the route. An answer that cannot be read, or a
+ * rejected execution, counts as no answer.
+ */
+async function awaitReaderHealth(exec: RemoteExec, deps: DeployDeps): Promise<void> {
+  let last: ReaderHealth | undefined
+  for (let attempt = 1; attempt <= deps.limits.readerHealthAttempts; attempt += 1) {
+    try {
+      const result = await exec(bashCommand(readerHealthScript()))
+      last = result.exitCode === 0 ? parseReaderHealth(result.stdout) : undefined
+    } catch {
+      last = undefined
+    }
+    if (last !== undefined && last !== 'unreachable' && last.langfuse && last.grafana) return
+    if (attempt < deps.limits.readerHealthAttempts) await deps.sleep(deps.limits.readerHealthIntervalMs)
+  }
+  if (last === undefined || last === 'unreachable') {
+    throw new Error("the reader gate's own health check did not answer")
+  }
+  const down = (['langfuse', 'grafana'] as const).filter(upstream => !last?.[upstream])
+  throw new Error(`the reader gate's own health check reports ${down.join(' and ')} down`)
+}
+
+/**
  * One read of Grafana's provisioned alerting. Grafana has already answered the sign-in check, so there is no wait and
  * no retry: a refusal here is a real one, and a second try would only spend another request on the admin account. An
  * answer that cannot be read, or a rejected execution, is a failed check and never a pass. This never throws.
@@ -2424,6 +2792,20 @@ function parseEpoch(result: RunResult): number {
   const epoch = Number(/^epoch=(\d+)$/m.exec(result.stdout)?.[1])
   if (!Number.isInteger(epoch) || epoch <= 0) throw new Error('The host did not report its clock')
   return epoch
+}
+
+/**
+ * Proves both agent routes from inside the host, once, after the route is final. Never throws: a probe that cannot be run or
+ * read is `undefined`, which the gate reads as a failure. It is read only and outside `runDeploy`'s failure handler, so no
+ * outcome can reach the ingest route.
+ */
+async function probeAgentRoutes(exec: RemoteExec, domain: string): Promise<Record<AgentRoute, PathStatus> | undefined> {
+  try {
+    const result = await exec(bashCommand(probeAgentRoutesScript(domain)))
+    return result.exitCode === 0 ? parseAgentRouteProbe(result.stdout) : undefined
+  } catch {
+    return undefined
+  }
 }
 
 function pairToStdin(pair: KeyPair): string {
@@ -2455,6 +2837,17 @@ export async function performDeploy(
     detail: `not run: ${why}`,
     kind: 'operator',
   })
+  // The agent routes need the gate. When it did not start (`reader-ready` is the failure) the proof is not run: it would
+  // only repeat that failure as a 502.
+  const readerDown = routed.gates.some(gate => gate.id === 'reader-ready' && gate.status !== 'pass')
+  const agentRoutes: GateResult = readerDown
+    ? {
+        id: 'agent-routes',
+        status: 'skipped',
+        detail: 'not run: the reader gate did not start (see reader-ready)',
+        kind: 'operator',
+      }
+    : evaluateAgentRoutes(await probeAgentRoutes(rawExec, inputs.domain))
   const grafana = grafanaDown
     ? notRun('grafana-signin', 'Grafana did not start (see grafana-ready)')
     : evaluateGrafana(await awaitGrafanaSignIn(rawExec, deps))
@@ -2466,8 +2859,8 @@ export async function performDeploy(
           'grafana-alerting',
           grafanaDown ? 'Grafana did not start (see grafana-ready)' : 'the sign-in check did not pass',
         )
-  for (const line of describeGates([grafana, alerting])) deps.log(`  ${line}`)
-  const result: DeployResult = {...routed, gates: [...routed.gates, grafana, alerting]}
+  for (const line of describeGates([agentRoutes, grafana, alerting])) deps.log(`  ${line}`)
+  const result: DeployResult = {...routed, gates: [...routed.gates, agentRoutes, grafana, alerting]}
   const failed = failedOperatorGates(result.gates)
   if (failed.length > 0) throw new OperatorSurfaceError(result, failed)
   return result
@@ -2521,6 +2914,10 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
   // The route as this deploy believes it to be. It is only ever a plan: after a failure the host is asked.
   let route: IngestState | 'none' = host.ingest
   let heldForUpdate = false
+  // A `reader-gate` entry in `.pending-restarts` left by older code. No deploy writes one any more: a record there blocks
+  // `traces ingest open`, and a reader failure must never do that. `reader-ready` removes it so it does not linger,
+  // unless the route-critical part clears the whole file first (it does when another entry is owed).
+  const leftoverReaderEntry = {pending: host.pendingRestarts.includes(READER_GATE_TOUCH)}
 
   const setState = async (state: IngestState): Promise<void> => {
     // An open that was attempted counts as open from before the remote call: a lost reply says nothing about the host.
@@ -2567,7 +2964,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
    * failed last time is retried even though the files then match the host's: no pending-restart record is needed.
    */
   const startPostRouteService = async (
-    id: 'prometheus-ready' | 'grafana-ready' | 'embedder-ready',
+    id: 'prometheus-ready' | 'grafana-ready' | 'reader-ready' | 'embedder-ready',
     label: string,
     run: () => Promise<unknown>,
   ): Promise<GateResult> => {
@@ -2594,7 +2991,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
    */
   const startPostRoute = async (): Promise<GateResult[]> => {
     log(
-      '==> Pulling and starting Prometheus, Grafana and the Topics embedder (after the route is decided; a failure here fails the run and never touches the route)',
+      '==> Pulling and starting Prometheus, Grafana, the reader gate and the Topics embedder (after the route is decided; a failure here fails the run and never touches the route)',
     )
     const prometheus = await startPostRouteService('prometheus-ready', 'Prometheus', async () => {
       await sh('Pull the Prometheus image', pullScript(deployId, 'pull-prometheus', ['prometheus']), [
@@ -2616,6 +3013,63 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
         STEP_SENTINEL('up-grafana'),
       ])
     })
+    // The reader gate and the Grafana MCP server behind it. Container healthy is the whole test: the gate starts on a void
+    // token file and placeholder credentials and answers 401 or 502 until the operator fills them in.
+    const reader = await startPostRouteService(
+      'reader-ready',
+      'The reader gate and the Grafana MCP server',
+      async () => {
+        // An entry for this gate left by older code goes first, so that not even a failure below can leave it behind.
+        if (leftoverReaderEntry.pending) {
+          await sh('Remove the leftover reader restart entry', removeOwnFileScript(deployId, PENDING_RESTARTS_FILE), [
+            REMOVED_SENTINEL,
+          ])
+          leftoverReaderEntry.pending = false
+        }
+        // The directories first, then the reader token file and the two backend credential files: each created only
+        // when absent, with a void line or a placeholder, and never compared or written again. Here and not before the
+        // route is decided: a directory or file that cannot be prepared fails `reader-ready` and must not hold healthy
+        // ingest.
+        await sh('Prepare the reader directories', readerDirsScript(deployId), [READER_DIRS_SENTINEL])
+        // The gate's source: its directory, then each file compared and the changed ones written. Also here and not with
+        // the route-critical files: a directory that cannot be made, or a write that fails, fails `reader-ready` and must
+        // not hold healthy ingest. No pending-restart record is kept for it: the start below force-recreates the gate on
+        // every run, so a change to the source alone restarts it.
+        await sh('Prepare the reader source directory', readerSourceDirScript(deployId), [READER_SOURCE_DIR_SENTINEL])
+        const gateFiles = await loadReaderGateFiles(deps.readFile, deps.listFiles)
+        const changedGateFiles: RemoteFile[] = []
+        for (const file of gateFiles) {
+          const {sentinel} = await sh(
+            `Compare ${file.path}`,
+            compareFileScript(file.path, file.kind, file),
+            FILE_COMPARE_SENTINELS,
+            file.content,
+          )
+          if (sentinel !== 'TRACES_FILE_SAME') changedGateFiles.push(file)
+        }
+        for (const file of changedGateFiles) {
+          await sh(`Write ${file.path}`, writeFileScript(deployId, file), [FILE_WRITTEN_SENTINEL], file.content)
+        }
+        for (const kind of READER_FILE_KINDS) {
+          const {sentinel} = await sh(
+            `Reader file ${kind}`,
+            readerFileScript(kind, deployId),
+            READER_FILE_SENTINELS,
+            `${readerFileContent(kind, kind === 'token' ? deps.voidTokenLine() : '')}\n`,
+          )
+          if (sentinel === 'TRACES_READER_FILE_CREATED') log(`  created the ${kind} reader file as a placeholder`)
+        }
+        await sh('Pull the reader images', pullScript(deployId, 'pull-reader', READER_SERVICES), [
+          STEP_SENTINEL('pull-reader'),
+        ])
+        await sh('Start the reader gate', upScript(deployId, 'up-reader', READER_SERVICES, {force: true}), [
+          STEP_SENTINEL('up-reader'),
+        ])
+        // Up and healthy as a container is not enough: the gate must also see Langfuse and Grafana, and the Grafana MCP
+        // server can answer later than the gate does. Read only, and an operator gate like the rest of this one.
+        await awaitReaderHealth(exec, deps)
+      },
+    )
     const embedder = await startPostRouteService('embedder-ready', 'The Topics embedder', async () => {
       await sh('Pull the embedder image', pullScript(deployId, 'pull-embedder', ['embedder']), [
         STEP_SENTINEL('pull-embedder'),
@@ -2626,7 +3080,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
         STEP_SENTINEL('up-embedder'),
       ])
     })
-    return [prometheus, grafana, embedder]
+    return [prometheus, grafana, reader, embedder]
   }
 
   /** The very last step of a deploy that evaluated every gate and left the route in its final state. */
@@ -2646,7 +3100,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
     // `stat` fails) closes the route like any other failure, instead of leaving an open route open and unreported.
     log('==> Comparing files with the host')
     const files: RemoteFile[] = [
-      ...(await loadUploadedFiles(deps.readFile)),
+      ...(await loadRouteFiles(deps.readFile)),
       ...buildSecretFiles(inputs),
       buildEnvManagedFile(inputs),
     ]
@@ -2661,7 +3115,9 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       comparisons.push({file, status: sentinel})
     }
 
-    const restarts = new Set<Touch>(host.pendingRestarts)
+    // A leftover `reader-gate` entry is not a restart the route-critical part owes (`reader-ready` recreates the gate on
+    // every deploy and removes the entry).
+    const restarts = new Set<Touch>(host.pendingRestarts.filter(touch => touch !== READER_GATE_TOUCH))
     for (const {file, status} of comparisons) {
       if (status !== 'TRACES_FILE_SAME') for (const touch of file.touches) restarts.add(touch)
     }
@@ -2722,7 +3178,6 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       )
       if (sentinel === 'TRACES_TOKEN_CREATED') log(`  created a deny-all token file for ${group}`)
     }
-
     // A bootstrap pair that is not among the inputs but is on the host (in the `.env` about to be replaced) is set
     // aside until Langfuse is proven to refuse it. `.env` is rewritten without it, so this is its only copy.
     const recorded = inputs.bootstrapKey === undefined ? (host.envBootstrap ?? host.pendingBootstrap) : undefined
@@ -2866,8 +3321,10 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
     ])
 
     // Every restart this deploy owed has happened, Caddy's included.
-    if (changed.length > 0 || host.pendingRestarts.length > 0) {
+    if (changed.length > 0) {
       await sh('Clear the pending restarts', removeOwnFileScript(deployId, PENDING_RESTARTS_FILE), [REMOVED_SENTINEL])
+      // That removed the whole file, a leftover reader entry included.
+      leftoverReaderEntry.pending = false
     }
 
     // 9. Gates.

@@ -1,7 +1,12 @@
 # One public hostname. Caddy provisions and renews its certificate.
 #
-# Routes: the ingest paths (switched by TRACES_INGEST_STATE), /healthz, and a 404 for everything
-# else. Nothing here reaches Grafana, Langfuse, Tempo or the collector's private canary receiver.
+# Routes: the ingest paths (switched by TRACES_INGEST_STATE), /healthz, the two agent read routes, and a
+# 404 for everything else. The agent routes go to the reader gate and to nothing else: the gate checks the
+# reader token and decides what reaches Langfuse and Grafana. They sit here, outside the ingest-state
+# files, so reads stay up while ingest is held or off. Nothing here names Grafana, Langfuse, Tempo or the
+# collector's private canary receiver as an upstream.
+#   /agent/langfuse/*   the Langfuse MCP endpoint and read API
+#   /agent/grafana/*    the Grafana MCP endpoint (Tempo and Prometheus queries)
 #
 # Ingest state is the environment value TRACES_INGEST_STATE, which selects one file under ingest/:
 #   off   no ingest route at all (first bring-up, and any deploy whose gates have not passed)
@@ -18,13 +23,31 @@
 #   response_header_timeout 5s      a collector that does not acknowledge in 5s answers 504
 # The collector acknowledges once the batch is queued: p95 0.43 s, slowest 0.82 s for 4 MB bodies
 # measured on loopback.
+#
+# The agent routes are the exception: a read can take as long as the gate's deadline (60 s) before the
+# gate answers 504. Their response-header timeout (70 s) stays above it. The server write timeout (110 s)
+# is measured from the end of the request headers, so it must exceed read_body (15 s) plus the gate's
+# whole response budget (90 s), or Caddy would cut off the gate's own answer. It applies to every route;
+# ingest bodies are capped at 4.5 MiB, so the looser value costs ingest little. A test pins the rule
+# against READER_GATE_DEADLINE_MS in src/host.ts and RESPONSE_DEADLINE_MS in reader-gate/constants.ts.
 {
 	servers {
 		timeouts {
 			read_header 5s
 			read_body 15s
-			write 15s
+			write 110s
 			idle 60s
+		}
+	}
+
+	# Default logger (runtime and proxy-error logs): a proxy error logs the whole request. Caddy hides Authorization
+	# and Cookie but not X-Api-Key, and a reader token travels in Authorization. Delete all three.
+	log {
+		format filter {
+			wrap json
+			request>headers>Authorization delete
+			request>headers>Cookie delete
+			request>headers>X-Api-Key delete
 		}
 	}
 }
@@ -42,6 +65,26 @@
 			transport http {
 				dial_timeout 2s
 				response_header_timeout 3s
+			}
+		}
+	}
+
+	# The gate takes the path unchanged and strips the prefix itself. It checks the token and the allowlist; nothing
+	# else here sees either.
+	handle /agent/langfuse/* {
+		reverse_proxy reader-gate:8090 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 70s
+			}
+		}
+	}
+
+	handle /agent/grafana/* {
+		reverse_proxy reader-gate:8090 {
+			transport http {
+				dial_timeout 2s
+				response_header_timeout 70s
 			}
 		}
 	}

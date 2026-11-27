@@ -1,16 +1,29 @@
 import {describe, expect, it} from 'bun:test'
 
 import {
+  GRAFANA_MCP_USER_ID,
   isSenderGroup,
+  READER_GATE_DEADLINE_MS,
+  READER_GATE_USER_ID,
+  READER_GRAFANA_PLACEHOLDER,
+  READER_LANGFUSE_PLACEHOLDER,
+  READER_PREVIOUS_SUFFIX,
+  READER_STAGED_SUFFIX,
   SENDER_GROUPS,
+  TEMPO_USER_ID,
   TRACES_APP_DIR,
   TRACES_CONTAINERD_ROOT,
   TRACES_DEPLOY_MARKER,
   TRACES_DEPLOY_STEP_LOCK,
   TRACES_DOCKER_ROOT,
+  TRACES_GRAFANA_MCP_TOKEN_FILE,
   TRACES_INGEST_LOCK,
   TRACES_LOCK_BUSY_SENTINEL,
   TRACES_PENDING_RESTARTS,
+  TRACES_READER_DIR,
+  TRACES_READER_LANGFUSE_FILE,
+  TRACES_READER_LOCK,
+  TRACES_READER_TOKEN_FILE,
   TRACES_SENTINEL_PATH,
   TRACES_TOKEN_ROOT,
   TRACES_TOKENS_LOCK,
@@ -128,5 +141,43 @@ describe('deploy state and locks', () => {
 describe('token files', () => {
   it('pins the void token prefix', () => {
     expect(TRACES_VOID_TOKEN_PREFIX).toBe('trc_void_')
+  })
+})
+
+describe('reader files and users', () => {
+  it('pins the contract paths to their exact values', () => {
+    expect(TRACES_READER_DIR).toBe('/mnt/traces/app/readers')
+    expect(TRACES_READER_TOKEN_FILE).toBe('/mnt/traces/app/readers/token')
+    expect(TRACES_READER_LOCK).toBe('/mnt/traces/app/readers/.lock')
+    expect(TRACES_READER_LANGFUSE_FILE).toBe('/mnt/traces/app/secrets/reader-gate/langfuse-basic')
+    expect(TRACES_GRAFANA_MCP_TOKEN_FILE).toBe('/mnt/traces/app/secrets/grafana-mcp/token')
+    expect(READER_STAGED_SUFFIX).toBe('.staged')
+    expect(READER_PREVIOUS_SUFFIX).toBe('.previous')
+  })
+
+  it('keeps the reader store outside the sender token root, which the collector mounts', () => {
+    expect(TRACES_READER_DIR.startsWith(`${TRACES_APP_DIR}/`)).toBe(true)
+    expect(TRACES_READER_DIR.startsWith(`${TRACES_TOKEN_ROOT}/`)).toBe(false)
+    expect(TRACES_READER_TOKEN_FILE.startsWith(`${TRACES_READER_DIR}/`)).toBe(true)
+    expect(TRACES_READER_LOCK.startsWith(`${TRACES_READER_DIR}/`)).toBe(true)
+    expect(TRACES_READER_LOCK).not.toBe(TRACES_TOKENS_LOCK)
+    for (const path of [TRACES_READER_LANGFUSE_FILE, TRACES_GRAFANA_MCP_TOKEN_FILE]) {
+      expect(path.startsWith(`${TRACES_APP_DIR}/secrets/`)).toBe(true)
+    }
+  })
+
+  it('pins the placeholders, which are never a working credential', () => {
+    expect(READER_LANGFUSE_PLACEHOLDER).toBe('pk-lf-unset:sk-lf-unset')
+    expect(READER_GRAFANA_PLACEHOLDER).toBe('glsa_unset')
+  })
+
+  it('gives the gate and the Grafana MCP server their own ids, apart from the other stack users', () => {
+    expect(READER_GATE_USER_ID).toBe(10_003)
+    expect(GRAFANA_MCP_USER_ID).toBe(1000)
+    expect(new Set([READER_GATE_USER_ID, GRAFANA_MCP_USER_ID, TEMPO_USER_ID]).size).toBe(3)
+  })
+
+  it('pins the gate deadline: Caddy timeouts must stay above it', () => {
+    expect(READER_GATE_DEADLINE_MS).toBe(60_000)
   })
 })

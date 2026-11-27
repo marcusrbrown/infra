@@ -11,8 +11,8 @@
  *   (default)                     create or repair the droplet, volume, firewall and host
  *   --check-exists                print whether the droplet exists
  *   --restore-snapshot NAME       close 80/443, then swap the volume for one made from a snapshot
- *   --reopen-ports                reopen 80/443, refused while any group holds a real token (a deny-all file, one
- *                                 void line, is fine; a missing or empty token file is a fault)
+ *   --reopen-ports                reopen 80/443, refused while any sender group or the reader file holds a real token
+ *                                 (a deny-all file, one void line, is fine; a missing or empty token file is a fault)
  *
  * Image store decision: containerd's root is moved to the volume through
  * /etc/containerd/config.toml, and Docker's data root through daemon.json. The
@@ -30,6 +30,8 @@ import type {
   WaitForSshOptions,
 } from '@marcusrbrown/infra-shared/server/droplet-helpers'
 
+import {Buffer} from 'node:buffer'
+import {randomBytes as nodeRandomBytes} from 'node:crypto'
 import {chmodSync, mkdtempSync, rmSync} from 'node:fs'
 import {join, resolve} from 'node:path'
 import {
@@ -47,11 +49,14 @@ import {
 
 import {
   isSenderGroup,
+  READER_GATE_USER_ID,
   SENDER_GROUPS,
   TRACES_APP_DIR,
   TRACES_CONTAINERD_ROOT,
   TRACES_DOCKER_ROOT,
   TRACES_DROPLET_NAME,
+  TRACES_READER_DIR,
+  TRACES_READER_TOKEN_FILE,
   TRACES_SENTINEL_CONTENT,
   TRACES_SENTINEL_PATH,
   TRACES_TEMPO_DATA_DIR,
@@ -166,6 +171,8 @@ export interface ProvisionDeps {
   sleep: (ms: number) => Promise<void>
   now: () => Date
   log: (message: string) => void
+  /** Random bytes for the void token. Tests inject a fixed source; the default is `node:crypto`. */
+  randomBytes?: (size: number) => Uint8Array
 }
 
 export function defaultDeps(): ProvisionDeps {
@@ -1120,9 +1127,17 @@ export async function checkTracesStorage(exec: RemoteExec): Promise<void> {
 // Token files (reopen guard)
 // ---------------------------------------------------------------------------
 
-const TOKEN_CHECK_SENTINELS = ['TRACES_TOKENS_DENY_ALL', 'TRACES_TOKENS_REAL'] as const
+const TOKEN_CHECK_SENTINELS = [
+  'TRACES_TOKENS_DENY_ALL',
+  'TRACES_TOKENS_REAL',
+  'TRACES_READER_TOKENS_REAL',
+  'TRACES_SENDER_AND_READER_TOKENS_REAL',
+] as const
 
 const TOKEN_FILE_FAULT_RE = /^TRACES_TOKEN_FILE_(MISSING|EMPTY)=(\S+)$/m
+
+/** The name a fault gives the reader file, in the place of a sender group. */
+const READER_FAULT_NAME = 'reader'
 
 /**
  * A token file is never empty (the collector's credential watcher rejects an empty file), so "no token" is a
@@ -1131,11 +1146,15 @@ const TOKEN_FILE_FAULT_RE = /^TRACES_TOKEN_FILE_(MISSING|EMPTY)=(\S+)$/m
  * leaves it. A group whose file is missing, or has no non-blank line, is a fault and not "no token": it exits
  * non-zero with its own sentinel. Every group is checked before a verdict, so a fault is never hidden by a real
  * token in an earlier group. Needs the volume mounted and the sentinel present; a missing token root is an error too.
+ *
+ * The reader file is checked the same way after the sender groups, and a fault there names `reader`. The verdict says
+ * which kind holds a real token (senders, the reader file, or both), so the refusal can name the file.
  */
 export function tokenCheckScript(): string {
   const mnt = safePath(TRACES_VOLUME_MOUNT)
   const file = safePath(TRACES_SENTINEL_PATH)
   const root = safePath(TRACES_TOKEN_ROOT)
+  const readerFile = safePath(TRACES_READER_TOKEN_FILE)
   if (!/^\w+$/.test(TRACES_VOID_TOKEN_PREFIX)) throw new Error('Unsafe void token prefix')
   return `set -eu
 # traces-step:token-check
@@ -1152,7 +1171,17 @@ for g in ${SENDER_GROUPS.join(' ')}; do
   if [ "$1" -eq 0 ]; then echo "TRACES_TOKEN_FILE_EMPTY=$g"; exit 1; fi
   if [ "$2" -gt 0 ]; then real=1; fi
 done
-if [ "$real" = 1 ]; then echo TRACES_TOKENS_REAL; else echo TRACES_TOKENS_DENY_ALL; fi`
+rf=${readerFile}
+if [ ! -f "$rf" ]; then echo "TRACES_TOKEN_FILE_MISSING=${READER_FAULT_NAME}"; exit 1; fi
+counts=$(awk -v p=${TRACES_VOID_TOKEN_PREFIX} 'NF > 0 { n++; if (index($1, p) != 1) r++ } END { print n + 0, r + 0 }' "$rf")
+set -- $counts
+if [ "$1" -eq 0 ]; then echo "TRACES_TOKEN_FILE_EMPTY=${READER_FAULT_NAME}"; exit 1; fi
+reader_real=0
+if [ "$2" -gt 0 ]; then reader_real=1; fi
+if [ "$real" = 1 ] && [ "$reader_real" = 1 ]; then echo TRACES_SENDER_AND_READER_TOKENS_REAL
+elif [ "$real" = 1 ]; then echo TRACES_TOKENS_REAL
+elif [ "$reader_real" = 1 ]; then echo TRACES_READER_TOKENS_REAL
+else echo TRACES_TOKENS_DENY_ALL; fi`
 }
 
 /**
@@ -1163,6 +1192,13 @@ export async function checkTokenFiles(exec: RemoteExec): Promise<(typeof TOKEN_C
   const result = await exec(bashCommand(tokenCheckScript()))
   const fault = result.exitCode === 0 ? undefined : TOKEN_FILE_FAULT_RE.exec(result.stdout)
   const group = fault?.[2]
+  if (fault && group === READER_FAULT_NAME) {
+    throw new Error(
+      fault[1] === 'MISSING'
+        ? `Refusing to reopen ports 80 and 443: the reader token file ${TRACES_READER_TOKEN_FILE} is missing. A missing file is never read as purged, and the gate may not start without it. Write one void line to it by hand (root:${READER_GATE_USER_ID}, mode 0640). Ports stay closed.`
+        : `Refusing to reopen ports 80 and 443: the reader token file ${TRACES_READER_TOKEN_FILE} is empty. An empty file is never read as purged. Write one void line to it by hand (root:${READER_GATE_USER_ID}, mode 0640). Ports stay closed.`,
+    )
+  }
   if (fault && group !== undefined && isSenderGroup(group)) {
     throw new Error(
       fault[1] === 'MISSING'
@@ -1171,6 +1207,65 @@ export async function checkTokenFiles(exec: RemoteExec): Promise<(typeof TOKEN_C
     )
   }
   return expectSentinel(result, TOKEN_CHECK_SENTINELS, 'check sender token files')
+}
+
+// ---------------------------------------------------------------------------
+// Reader token purge (restore)
+// ---------------------------------------------------------------------------
+
+const VOID_TOKEN_BYTES = 32
+const READER_PURGED = 'TRACES_READER_PURGED'
+
+/**
+ * `<void token> void <date>`, the sender void-line format: a token nobody knows, so the file is deny-all and not
+ * empty. The token is drawn here and sent on stdin; it is never printed or kept.
+ */
+export function readerVoidLine(at: Date, random: (size: number) => Uint8Array = nodeRandomBytes): string {
+  const bytes = random(VOID_TOKEN_BYTES)
+  if (bytes.length !== VOID_TOKEN_BYTES) throw new Error(`the random source must return ${VOID_TOKEN_BYTES} bytes`)
+  return `${TRACES_VOID_TOKEN_PREFIX}${Buffer.from(bytes).toString('base64url')} void ${at.toISOString()}`
+}
+
+export interface ReaderPurgeOptions {
+  dir?: string
+  file?: string
+  mount?: string
+}
+
+/**
+ * Replaces the reader token file with the one void line on stdin, by write-and-rename (never an empty file, and the
+ * old content is gone with the rename). The directory is made, or fixed, to `root:<gate gid>` 0750 and the file to
+ * `root:<gate gid>` 0640. A file or directory the snapshot did not have is created: a missing file is never read as
+ * purged. Needs the volume mounted. It touches nothing else; the backend credential files are left as restored and
+ * their rotation is a runbook step. Prints `TRACES_READER_PURGED` only after reading the void line back.
+ */
+export function readerPurgeScript(options: ReaderPurgeOptions = {}): string {
+  const mnt = safePath(options.mount ?? TRACES_VOLUME_MOUNT)
+  const dir = safePath(options.dir ?? TRACES_READER_DIR)
+  const file = safePath(options.file ?? TRACES_READER_TOKEN_FILE)
+  if (!Number.isInteger(READER_GATE_USER_ID) || READER_GATE_USER_ID <= 0) throw new Error('Unsafe reader gate group id')
+  if (!/^\w+$/.test(TRACES_VOID_TOKEN_PREFIX)) throw new Error('Unsafe void token prefix')
+  const owner = `0:${READER_GATE_USER_ID}`
+  return `set -eu
+# traces-step:reader-purge
+src=$(findmnt -n -o SOURCE --mountpoint ${mnt})
+if [ -z "$src" ]; then echo TRACES_NOT_MOUNTED; exit 1; fi
+dir=${dir}
+file=${file}
+IFS= read -r vl || [ -n "$vl" ]
+case "$vl" in ${TRACES_VOID_TOKEN_PREFIX}*) ;; *) echo TRACES_READER_VOID_INVALID; exit 1 ;; esac
+if [ -L "$dir" ]; then echo TRACES_READER_PATH_SYMLINK; exit 1; fi
+mkdir -p "$dir"
+chown ${owner} "$dir"
+chmod 0750 "$dir"
+t=$(mktemp "$dir/.token.XXXXXX")
+trap 'rm -f "$t"' EXIT
+printf '%s\n' "$vl" > "$t"
+chown ${owner} "$t"
+chmod 0640 "$t"
+mv -f "$t" "$file"
+grep -qxF -- "$vl" "$file"
+echo ${READER_PURGED}`
 }
 
 // ---------------------------------------------------------------------------
@@ -1573,6 +1668,7 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
   // report names all carry the same stamp, even if the run crosses a UTC minute.
   const startedAt = deps.now()
   const stamp = restoreStamp(startedAt)
+  const voidLine = readerVoidLine(startedAt, deps.randomBytes)
 
   const {exists} = await checkDropletExistence(run)
   if (!exists) throw new Error(`Droplet "${TRACES_DROPLET_NAME}" does not exist; provision it before restoring`)
@@ -1667,6 +1763,16 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
     await runStep(exec, 'mount restored volume', mountScript(device), MOUNT_SENTINELS)
     await runStep(exec, 'verify sentinel on restored volume', verifySentinelScript(), ['TRACES_SENTINEL_PRESENT'])
 
+    // Before the Tempo scan, so a failed scan never leaves reader tokens a snapshot brought back. A restored reader
+    // file may hold tokens revoked since the snapshot; the file is made deny-all whatever it held, or was missing.
+    try {
+      await runStep(exec, 'reader token purge', readerPurgeScript(), [READER_PURGED], `${voidLine}\n`)
+    } catch (error) {
+      throw new Error(
+        `${causeOf(error)}. Restore interrupted: Docker is stopped. Ports 80 and 443 stay closed; ${newName} is attached and mounted and the reader token file ${TRACES_READER_TOKEN_FILE} was not confirmed void. Write one void line to it by hand (root:${READER_GATE_USER_ID}, mode 0640) and do not run the restore again: it would start another restore from this volume.`,
+      )
+    }
+
     // Docker is still stopped, so Tempo is not writing. A torn block would stop it serving any stored block.
     try {
       quarantined = parseTempoQuarantine(await exec(bashCommand(tempoQuarantineScript({stamp}))))
@@ -1683,6 +1789,12 @@ export async function runRestore(input: RestoreInput, deps: ProvisionDeps): Prom
   log('Docker is stopped and ports 80 and 443 are closed at the cloud firewall.')
   log('Next: start Docker, make every token file deny-all (traces sender revoke --all), run a normal deploy,')
   log('then run this script with --reopen-ports and reissue all three tokens.')
+  log(
+    `The reader token file ${TRACES_READER_TOKEN_FILE} now holds one void line; reissue reader tokens after the reopen.`,
+  )
+  log(
+    'The restore leaves the Langfuse Viewer key and the Grafana service-account token as the snapshot held them: rotate both by hand, as the runbook says.',
+  )
   log(`The old volume ${previous.name} still exists; delete it after the restore is proven.`)
   reportQuarantine(log, quarantined, stamp)
 }
@@ -1692,8 +1804,21 @@ export interface ReopenInput {
   remoteUser: string
 }
 
+const SENDER_REAL_REFUSAL = `a sender token file under ${TRACES_TOKEN_ROOT} still holds a real token. Make every token file deny-all first (traces sender revoke --all).`
+const READER_REAL_REFUSAL = `the reader token file ${TRACES_READER_TOKEN_FILE} still holds a real token. Revoke every reader token first, so the file is deny-all.`
+
+function realTokenRefusal(verdict: Exclude<(typeof TOKEN_CHECK_SENTINELS)[number], 'TRACES_TOKENS_DENY_ALL'>): string {
+  const reason =
+    verdict === 'TRACES_TOKENS_REAL'
+      ? SENDER_REAL_REFUSAL
+      : verdict === 'TRACES_READER_TOKENS_REAL'
+        ? READER_REAL_REFUSAL
+        : `${SENDER_REAL_REFUSAL} Also, ${READER_REAL_REFUSAL}`
+  return `Refusing to reopen ports 80 and 443: ${reason} Ports stay closed.`
+}
+
 /**
- * Reopens 80 and 443 only after the host reports every sender token file deny-all (void lines only, no real token).
+ * Reopens 80 and 443 only after the host reports every sender token file and the reader token file deny-all (void lines only, no real token).
  * Refuses on a real token, and faults on a missing or empty token file. Refuses on anything else.
  */
 export async function runReopen(input: ReopenInput, deps: ProvisionDeps): Promise<void> {
@@ -1711,11 +1836,7 @@ export async function runReopen(input: ReopenInput, deps: ProvisionDeps): Promis
     return checkTokenFiles(exec)
   })
 
-  if (verdict !== 'TRACES_TOKENS_DENY_ALL') {
-    throw new Error(
-      `Refusing to reopen ports 80 and 443: a sender token file under ${TRACES_TOKEN_ROOT} still holds a real token. Make every token file deny-all first (traces sender revoke --all). Ports stay closed.`,
-    )
-  }
+  if (verdict !== 'TRACES_TOKENS_DENY_ALL') throw new Error(realTokenRefusal(verdict))
 
   await openWebPorts(run, dropletId, firewallId)
   log(

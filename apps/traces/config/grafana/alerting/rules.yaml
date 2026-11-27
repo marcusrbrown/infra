@@ -228,6 +228,55 @@ groups:
         labels:
           severity: warning
         isPaused: false
+      - uid: traces-reader-gate-down
+        title: ReaderGateDown
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: prometheus
+              expr: 'traces_probe_up{target="reader-gate"}'
+              instant: true
+              range: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: reduce
+              expression: A
+              reducer: last
+              settings:
+                mode: dropNN
+              refId: B
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              datasource:
+                type: __expr__
+                uid: __expr__
+              type: math
+              expression: $B < 1
+              refId: C
+        noDataState: OK
+        execErrState: KeepLast
+        for: 5m
+        annotations:
+          summary: The agent reader gate is unhealthy
+          description: 'The health reporter has found {{ $labels.target }} unhealthy for 5 minutes: the gate, or an upstream it reads from, does not answer. Agent reads of traces and metrics fail; ingest is not affected. The health path also fails, which the external monitor reports.'
+        labels:
+          severity: warning
+        isPaused: false
       - uid: traces-reporter-stale
         title: ReporterStale
         condition: C

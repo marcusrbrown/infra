@@ -17,6 +17,8 @@ import {
   OPEN_REFUSED_SENTINEL,
   REMOTE_COMMANDS,
   runRemote,
+  SERVER_ALIVE_COUNT_MAX,
+  SERVER_ALIVE_INTERVAL,
   TRACES_DEPLOY_MARKER,
   TRACES_INGEST_LOCK,
   TRACES_PENDING_RESTARTS,
@@ -413,6 +415,23 @@ describe('the control options on the ssh argv', () => {
 
   it('ControlPersist is short: long enough to bridge the gaps in one command, short enough not to outlive it', () => {
     expect(CONTROL_PERSIST).toBe('30s')
+  })
+
+  it('a session connection probes its peer: ServerAliveInterval=15 and ServerAliveCountMax=3, each its own -o', () => {
+    const {argv, cleanup} = buildRemoteArgv(HOST, 'true', '/tmp/tr-abc123/cm')
+    cleanup()
+    expect(SERVER_ALIVE_INTERVAL).toBe(15)
+    expect(SERVER_ALIVE_COUNT_MAX).toBe(3)
+    for (const value of ['ServerAliveInterval=15', 'ServerAliveCountMax=3']) {
+      expect(argv.filter(arg => arg === value)).toHaveLength(1)
+      expect(argv[argv.indexOf(value) - 1]).toBe('-o')
+    }
+  })
+
+  it('a plain call carries no keep-alive of its own: it has no connection to keep', () => {
+    const {argv, cleanup} = buildRemoteArgv(HOST, 'true')
+    cleanup()
+    expect(argv.some(arg => arg.startsWith('ServerAlive'))).toBe(false)
   })
 })
 

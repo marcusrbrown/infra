@@ -41,6 +41,19 @@ export const TRACES_DEFAULT_HOST = 'traces.fro.bot'
 /** The app directory on the host (compose file, `.env`, configs, secrets); pinned to `TRACES_APP_DIR` in apps/traces. */
 export const TRACES_APP_DIR = '/mnt/traces/app'
 
+/** The reader token directory, file and lock; pinned to the `TRACES_READER_*` constants in apps/traces. */
+export const TRACES_READER_DIR = `${TRACES_APP_DIR}/readers`
+export const TRACES_READER_TOKEN_FILE = `${TRACES_READER_DIR}/token`
+export const TRACES_READER_LOCK = `${TRACES_READER_DIR}/.lock`
+
+/** The two host-held reader credentials; pinned to `TRACES_READER_LANGFUSE_FILE` and `TRACES_GRAFANA_MCP_TOKEN_FILE`. */
+export const TRACES_READER_LANGFUSE_FILE = `${TRACES_APP_DIR}/secrets/reader-gate/langfuse-basic`
+export const TRACES_GRAFANA_MCP_TOKEN_FILE = `${TRACES_APP_DIR}/secrets/grafana-mcp/token`
+
+/** What a credential file holds until a real one is installed; pinned to the constants of the same name in apps/traces. */
+export const READER_LANGFUSE_PLACEHOLDER = 'pk-lf-unset:sk-lf-unset'
+export const READER_GRAFANA_PLACEHOLDER = 'glsa_unset'
+
 /** The sender groups; pinned to `SENDER_GROUPS` in apps/traces. */
 export const TRACES_GROUPS = ['marcusrbrown', 'fro-bot', 'workstation'] as const
 
@@ -59,6 +72,8 @@ export const TRACES_SERVICES = [
   'prometheus',
   'embedder',
   'health-reporter',
+  'reader-gate',
+  'grafana-mcp',
 ] as const
 
 export type TracesService = (typeof TRACES_SERVICES)[number]

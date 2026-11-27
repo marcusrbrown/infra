@@ -73,6 +73,13 @@
     "infra_traces_sender_add": "deny",
     "infra_traces_sender_list": "deny",
     "infra_traces_sender_revoke": "deny",
+    // Reader tokens give read access to full trace content; the backend commands install the credentials the gate reads with.
+    "infra_traces_reader_add": "deny",
+    "infra_traces_reader_list": "deny",
+    "infra_traces_reader_revoke": "deny",
+    "infra_traces_reader_backend_langfuse": "deny",
+    "infra_traces_reader_backend_grafana": "deny",
+    "infra_traces_reader_backend_status": "deny",
     "infra_cliproxy_monitor": "deny",
     "infra_cliproxy_reset-quota": "deny",
     // Discord MCP (saseq/discord-mcp) exposes 65 guild tools. opencode resolves

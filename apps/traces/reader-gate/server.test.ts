@@ -174,11 +174,11 @@ describe('forwarding', () => {
 
   test('a token supplied as the Basic password forwards a GET read with its query', async () => {
     const h = await build()
-    const res = await h.handler(request('/agent/langfuse/api/public/traces?limit=5&page=2', {basic: true}))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects?limit=5&page=2', {basic: true}))
     expect(res.status).toBe(200)
     await res.text()
     const call = h.calls[0]
-    expect(call?.url).toBe('http://langfuse-web:3000/api/public/traces?limit=5&page=2')
+    expect(call?.url).toBe('http://langfuse-web:3000/api/public/projects?limit=5&page=2')
     expect(call?.init.method).toBe('GET')
     expect(call?.init.body).toBeUndefined()
     expect(headerObject(call?.init ?? {}).authorization).toBe(VIEWER_AUTH)
@@ -211,7 +211,7 @@ describe('forwarding', () => {
   test('the forwarded request carries only allowlisted headers', async () => {
     const h = await build()
     const res = await h.handler(
-      request('/agent/langfuse/api/public/traces', {
+      request('/agent/langfuse/api/public/projects', {
         headers: {
           accept: 'application/json',
           'user-agent': 'opencode',
@@ -234,7 +234,7 @@ describe('forwarding', () => {
   })
 
   test.each([
-    ['/agent/langfuse/api/public/traces', 'GET', 'http://langfuse-web:3000/api/public/traces', 'langfuse-web:3000'],
+    ['/agent/langfuse/api/public/projects', 'GET', 'http://langfuse-web:3000/api/public/projects', 'langfuse-web:3000'],
     ['/agent/langfuse/api/public/mcp', 'POST', 'http://langfuse-web:3000/api/public/mcp', 'langfuse-web:3000'],
     ['/agent/grafana/mcp', 'POST', 'http://grafana-mcp:8000/mcp', 'grafana-mcp:8000'],
   ])('%s reaches its upstream with Host %s, whatever the client sent', async (path, method, url, host) => {
@@ -269,7 +269,7 @@ describe('forwarding', () => {
           },
         }),
     })
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     await res.text()
     expect([...res.headers.keys()].sort()).toEqual(['content-type', 'mcp-session-id'])
   })
@@ -278,21 +278,21 @@ describe('forwarding', () => {
     const h = await build({
       upstream: () => new Response(`upstream ${status}`, {status, headers: {'content-type': 'text/plain'}}),
     })
-    const res = await h.handler(request('/agent/langfuse/api/public/traces/abc'))
+    const res = await h.handler(request('/agent/langfuse/api/public/v2/observations?traceId=abc'))
     expect(res.status).toBe(status)
     expect(await res.text()).toBe(`upstream ${status}`)
   })
 
   test('an upstream 429 keeps its Retry-After', async () => {
     const h = await build({upstream: () => new Response('slow down', {status: 429, headers: {'retry-after': '7'}})})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(429)
     expect(res.headers.get('retry-after')).toBe('7')
   })
 
   test('an upstream with no body (204) answers with no body', async () => {
     const h = await build({upstream: () => new Response(null, {status: 204})})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(204)
     expect(res.body).toBeNull()
     expect(h.limits.stats().active).toBe(0)
@@ -306,7 +306,7 @@ describe('authentication', () => {
     ['a sender token', senderToken],
   ])('%s gives 401 and never reaches the upstream', async (_name, token) => {
     const h = await build()
-    for (const path of ['/agent/langfuse/api/public/traces', '/agent/grafana/mcp', '/agent/langfuse/nope']) {
+    for (const path of ['/agent/langfuse/api/public/projects', '/agent/grafana/mcp', '/agent/langfuse/nope']) {
       const res = await h.handler(
         request(path, {
           token,
@@ -337,7 +337,7 @@ describe('authentication', () => {
   test.each(bad)('a token file that is %s at start gives 401 for every token', async (_name, file) => {
     const h = await build({file})
     for (const token of [alice, bob, senderToken]) {
-      const res = await h.handler(request('/agent/langfuse/api/public/traces', {token}))
+      const res = await h.handler(request('/agent/langfuse/api/public/projects', {token}))
       expect(res.status).toBe(401)
     }
     expect(h.calls).toHaveLength(0)
@@ -345,11 +345,11 @@ describe('authentication', () => {
 
   test.each(bad)('a token file that becomes %s after a reload gives 401 for every token', async (_name, file) => {
     const h = await build()
-    expect((await h.handler(request('/agent/langfuse/api/public/traces'))).status).toBe(200)
+    expect((await h.handler(request('/agent/langfuse/api/public/projects'))).status).toBe(200)
     h.setFile(file)
     await h.store.refresh()
     for (const token of [alice, bob]) {
-      const res = await h.handler(request('/agent/langfuse/api/public/traces', {token}))
+      const res = await h.handler(request('/agent/langfuse/api/public/projects', {token}))
       expect(res.status).toBe(401)
     }
     expect(h.calls).toHaveLength(1)
@@ -357,18 +357,18 @@ describe('authentication', () => {
 
   test('a rename-replace that removes one token makes only that token 401 on its next request', async () => {
     const h = await build()
-    expect((await h.handler(request('/agent/langfuse/api/public/traces', {token: alice}))).status).toBe(200)
-    expect((await h.handler(request('/agent/langfuse/api/public/traces', {token: bob}))).status).toBe(200)
+    expect((await h.handler(request('/agent/langfuse/api/public/projects', {token: alice}))).status).toBe(200)
+    expect((await h.handler(request('/agent/langfuse/api/public/projects', {token: bob}))).status).toBe(200)
     h.setFile(tokenLine(bob, 'fro-bot-audit'))
     await h.store.refresh()
-    expect((await h.handler(request('/agent/langfuse/api/public/traces', {token: alice}))).status).toBe(401)
-    expect((await h.handler(request('/agent/langfuse/api/public/traces', {token: bob}))).status).toBe(200)
+    expect((await h.handler(request('/agent/langfuse/api/public/projects', {token: alice}))).status).toBe(401)
+    expect((await h.handler(request('/agent/langfuse/api/public/projects', {token: bob}))).status).toBe(200)
   })
 
   test('a revoked token does not abort a request already in flight', async () => {
     const stream = controllableStream()
     const h = await build({upstream: () => new Response(stream.stream)})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     h.setFile(voidLine())
     await h.store.refresh()
     stream.push('still ')
@@ -380,9 +380,9 @@ describe('authentication', () => {
 
 describe('method and path', () => {
   test.each([
-    ['DELETE', '/agent/langfuse/api/public/traces'],
-    ['POST', '/agent/langfuse/api/public/traces'],
-    ['PUT', '/agent/langfuse/api/public/sessions/abc'],
+    ['DELETE', '/agent/langfuse/api/public/projects'],
+    ['POST', '/agent/langfuse/api/public/projects'],
+    ['PUT', '/agent/langfuse/api/public/v2/observations'],
     ['GET', '/agent/langfuse/api/public/mcp'],
     ['DELETE', '/agent/langfuse/api/public/mcp'],
     ['GET', '/agent/grafana/mcp'],
@@ -398,6 +398,9 @@ describe('method and path', () => {
     '/agent/langfuse/project/x/traces',
     '/agent/langfuse/api/public/scores',
     '/agent/langfuse/api/public/ingestion',
+    '/agent/langfuse/api/public/traces',
+    '/agent/langfuse/api/public/traces/abc',
+    '/agent/langfuse/api/public/sessions',
     '/agent/grafana/api/dashboards',
     '/agent/grafana/login',
     '/healthz',
@@ -410,14 +413,14 @@ describe('method and path', () => {
   })
 
   const refused = [
-    'http://gate:8090/agent/langfuse/api/public/../traces',
-    'http://gate:8090/agent/langfuse/api/public/%2e%2e/traces',
-    'http://gate:8090/agent/langfuse/api/public/traces%2fabc',
-    'http://gate:8090/agent/langfuse/api/public/traces%5cabc',
-    'http://gate:8090/agent/langfuse/api/public//traces',
-    'http://gate:8090/agent/langfuse/api/public/traces;x=1',
-    'http://gate:8090/agent/langfuse/api/public/traces/a.b',
-    'http://gate:8090/agent/langfuse/api/public/traces/abc%00',
+    'http://gate:8090/agent/langfuse/api/public/../projects',
+    'http://gate:8090/agent/langfuse/api/public/%2e%2e/projects',
+    'http://gate:8090/agent/langfuse/api/public/projects%2fabc',
+    'http://gate:8090/agent/langfuse/api/public/projects%5cabc',
+    'http://gate:8090/agent/langfuse/api/public//projects',
+    'http://gate:8090/agent/langfuse/api/public/projects;x=1',
+    'http://gate:8090/agent/langfuse/api/public/projects%00',
+    'http://gate:8090/agent/langfuse/api/public/v2/observations/',
     'http://gate:8090/agent/grafana/mcp/../../api/admin',
     'http://gate:8090/agent/langfuse/../grafana/mcp',
   ]
@@ -437,7 +440,7 @@ describe('credentials', () => {
     ['unreadable', {ok: false, reason: 'unreadable'}],
   ] as const)('a %s Langfuse credential gives 502 with a fixed reason and no fetch', async (_name, credential) => {
     const h = await build({credential})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(502)
     expect(await res.json()).toEqual({error: 'bad gateway', reason: 'credential-unavailable'})
     expect(h.calls).toHaveLength(0)
@@ -456,15 +459,15 @@ describe('limits', () => {
   test('an over-budget consumer gets 429 with Retry-After while another consumer still passes', async () => {
     const h = await build({requestsPerWindow: 2})
     for (let i = 0; i < 2; i += 1) {
-      const res = await h.handler(request('/agent/langfuse/api/public/traces', {token: alice}))
+      const res = await h.handler(request('/agent/langfuse/api/public/projects', {token: alice}))
       await res.text()
       expect(res.status).toBe(200)
     }
-    const denied = await h.handler(request('/agent/langfuse/api/public/traces', {token: alice}))
+    const denied = await h.handler(request('/agent/langfuse/api/public/projects', {token: alice}))
     expect(denied.status).toBe(429)
     expect(Number(denied.headers.get('retry-after'))).toBeGreaterThanOrEqual(1)
     expect(await denied.json()).toEqual({error: 'too many requests', reason: 'rate'})
-    const other = await h.handler(request('/agent/langfuse/api/public/traces', {token: bob}))
+    const other = await h.handler(request('/agent/langfuse/api/public/projects', {token: bob}))
     expect(other.status).toBe(200)
     await other.text()
     expect(h.calls).toHaveLength(3)
@@ -472,7 +475,7 @@ describe('limits', () => {
 
   test('the budget spans both routes', async () => {
     const h = await build({requestsPerWindow: 2})
-    await (await h.handler(request('/agent/langfuse/api/public/traces'))).text()
+    await (await h.handler(request('/agent/langfuse/api/public/projects'))).text()
     await (await h.handler(request('/agent/grafana/mcp', {method: 'POST', body: '{}'}))).text()
     const denied = await h.handler(request('/agent/grafana/mcp', {method: 'POST', body: '{}'}))
     expect(denied.status).toBe(429)
@@ -482,9 +485,9 @@ describe('limits', () => {
     const h = await build({requestsPerWindow: 1})
     for (let i = 0; i < 5; i += 1) {
       expect((await h.handler(request('/agent/langfuse/nope'))).status).toBe(404)
-      expect((await h.handler(request('/agent/langfuse/api/public/traces', {method: 'DELETE'}))).status).toBe(405)
+      expect((await h.handler(request('/agent/langfuse/api/public/projects', {method: 'DELETE'}))).status).toBe(405)
     }
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(200)
     await res.text()
   })
@@ -493,9 +496,9 @@ describe('limits', () => {
     const streams = [controllableStream(), controllableStream(), controllableStream()]
     const queue = [...streams]
     const h = await build({perConsumerConcurrency: 2, upstream: () => new Response(queue.shift()?.stream)})
-    const first = await h.handler(request('/agent/langfuse/api/public/traces'))
-    const second = await h.handler(request('/agent/langfuse/api/public/traces'))
-    const third = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const first = await h.handler(request('/agent/langfuse/api/public/projects'))
+    const second = await h.handler(request('/agent/langfuse/api/public/projects'))
+    const third = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(third.status).toBe(429)
     expect(await third.json()).toEqual({error: 'too many requests', reason: 'concurrency'})
     expect(third.headers.get('retry-after')).not.toBeNull()
@@ -506,7 +509,7 @@ describe('limits', () => {
     expect(await first.text()).toBe('a')
     expect(h.limits.stats().active).toBe(1)
 
-    const fourth = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const fourth = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(fourth.status).toBe(200)
     expect(h.limits.stats().active).toBe(2)
     streams[1]?.end()
@@ -519,9 +522,9 @@ describe('limits', () => {
   test('the slot is freed when the client cancels the body', async () => {
     const stream = controllableStream()
     const h = await build({perConsumerConcurrency: 1, upstream: () => new Response(stream.stream)})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(h.limits.stats().active).toBe(1)
-    expect((await h.handler(request('/agent/langfuse/api/public/traces'))).status).toBe(429)
+    expect((await h.handler(request('/agent/langfuse/api/public/projects'))).status).toBe(429)
     await res.body?.cancel()
     expect(h.limits.stats().active).toBe(0)
     expect(stream.cancelled()).toBe(true)
@@ -530,7 +533,7 @@ describe('limits', () => {
   test('the slot is freed when the client cancels with a chunk still unread', async () => {
     const stream = controllableStream()
     const h = await build({perConsumerConcurrency: 1, upstream: () => new Response(stream.stream)})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     stream.push('unread')
     await Bun.sleep(0)
     expect(h.limits.stats().active).toBe(1)
@@ -543,7 +546,7 @@ describe('limits', () => {
     const stream = controllableStream()
     const h = await build({perConsumerConcurrency: 1, upstream: () => new Response(stream.stream)})
     const abort = new AbortController()
-    const res = await h.handler(request('/agent/langfuse/api/public/traces', {signal: abort.signal}))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects', {signal: abort.signal}))
     expect(h.limits.stats().active).toBe(1)
     abort.abort()
     expect(h.limits.stats().active).toBe(0)
@@ -554,7 +557,7 @@ describe('limits', () => {
   test('the slot is freed when the upstream body errors', async () => {
     const stream = controllableStream()
     const h = await build({perConsumerConcurrency: 1, upstream: () => new Response(stream.stream)})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     const read = res.text().then(
       () => 'completed',
       () => 'errored',
@@ -570,9 +573,9 @@ describe('limits', () => {
   test('the global cap gives 429 across consumers', async () => {
     const queue = [controllableStream(), controllableStream()]
     const h = await build({globalConcurrency: 2, upstream: () => new Response(queue.shift()?.stream)})
-    await h.handler(request('/agent/langfuse/api/public/traces', {token: alice}))
-    await h.handler(request('/agent/langfuse/api/public/traces', {token: bob}))
-    const third = await h.handler(request('/agent/langfuse/api/public/sessions', {token: alice}))
+    await h.handler(request('/agent/langfuse/api/public/projects', {token: alice}))
+    await h.handler(request('/agent/langfuse/api/public/projects', {token: bob}))
+    const third = await h.handler(request('/agent/langfuse/api/public/v2/observations', {token: alice}))
     expect(third.status).toBe(429)
     expect(await third.json()).toEqual({error: 'too many requests', reason: 'concurrency'})
   })
@@ -581,7 +584,7 @@ describe('limits', () => {
 describe('deadlines', () => {
   test('an upstream that sends no headers within the deadline gives 504 and frees the slot', async () => {
     const h = await build({perConsumerConcurrency: 1, upstream: () => new Promise<Response>(() => {})})
-    const pending = h.handler(request('/agent/langfuse/api/public/traces'))
+    const pending = h.handler(request('/agent/langfuse/api/public/projects'))
     await Bun.sleep(0)
     expect(h.timers.filter(timer => timer.ms === 60_000)).toHaveLength(1)
     expect(h.limits.stats().active).toBe(1)
@@ -595,7 +598,7 @@ describe('deadlines', () => {
 
   test('the header deadline is cancelled once headers arrive', async () => {
     const h = await build()
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     await res.text()
     const headerTimers = h.timers.filter(timer => timer.ms === 60_000)
     expect(headerTimers).toHaveLength(1)
@@ -605,7 +608,7 @@ describe('deadlines', () => {
   test('a body that never ends is cut at the response deadline and frees the slot', async () => {
     const stream = controllableStream()
     const h = await build({perConsumerConcurrency: 1, upstream: () => new Response(stream.stream)})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     const read = res.text().then(
       () => 'completed',
       () => 'errored',
@@ -624,7 +627,7 @@ describe('deadlines', () => {
         throw new Error('connect ECONNREFUSED 10.0.0.1:3000')
       },
     })
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(502)
     expect(await res.json()).toEqual({error: 'bad gateway', reason: 'upstream-unavailable'})
     expect(h.limits.stats().active).toBe(0)
@@ -636,7 +639,7 @@ describe('redirects and cookies', () => {
     const h = await build({
       upstream: () => new Response(null, {status: 302, headers: {location: 'http://evil.example/login'}}),
     })
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(502)
     expect(await res.json()).toEqual({error: 'bad gateway', reason: 'upstream-redirect'})
     expect(res.headers.get('location')).toBeNull()
@@ -647,7 +650,7 @@ describe('redirects and cookies', () => {
 
   test.each([301, 303, 307, 308])('a %i is a 502 too', async status => {
     const h = await build({upstream: () => new Response(null, {status, headers: {location: '/x'}})})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(502)
   })
 
@@ -660,7 +663,7 @@ describe('redirects and cookies', () => {
           headers: {'set-cookie': 'session=abc; Path=/', 'content-type': 'text/html'},
         }),
     })
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(502)
     expect(await res.json()).toEqual({error: 'bad gateway', reason: 'upstream-cookie'})
     expect(res.headers.get('set-cookie')).toBeNull()
@@ -681,7 +684,7 @@ describe('a Langfuse credential the upstream refuses', () => {
     const h = await build({
       upstream: () => new Response(stream.stream, {status: 401, headers: {'content-type': 'application/json'}}),
     })
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(502)
     expect(await res.json()).toEqual({error: 'bad gateway', reason: 'credential-refused'})
     expect(stream.cancelled()).toBe(true)
@@ -696,7 +699,7 @@ describe('a Langfuse credential the upstream refuses', () => {
           headers: {'www-authenticate': 'Basic realm="langfuse"', 'x-upstream': 'yes'},
         }),
     })
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.headers.get('www-authenticate')).toBeNull()
     expect(res.headers.get('x-upstream')).toBeNull()
     expect(await res.text()).not.toContain(CANARY)
@@ -704,7 +707,7 @@ describe('a Langfuse credential the upstream refuses', () => {
 
   test('it is logged with its reason and the upstream status, and never the body', async () => {
     const h = await build({upstream: () => new Response(CANARY, {status: 401})})
-    await (await h.handler(request('/agent/langfuse/api/public/traces'))).text()
+    await (await h.handler(request('/agent/langfuse/api/public/projects'))).text()
     expect(h.events).toHaveLength(1)
     expect(h.events[0]).toMatchObject({status: 502, reason: 'credential-refused', upstreamStatus: 401})
     expect(JSON.stringify(h.events)).not.toContain(CANARY)
@@ -713,7 +716,7 @@ describe('a Langfuse credential the upstream refuses', () => {
   test('it applies to the MCP path and the REST paths alike', async () => {
     for (const [path, init] of [
       ['/agent/langfuse/api/public/mcp', {method: 'POST', body: '{}'}],
-      ['/agent/langfuse/api/public/sessions', {}],
+      ['/agent/langfuse/api/public/v2/observations', {}],
       ['/agent/langfuse/api/public/health', {}],
     ] as const) {
       const h = await build({upstream: () => new Response('nope', {status: 401})})
@@ -730,7 +733,7 @@ describe('a Langfuse credential the upstream refuses', () => {
     const h = await build({
       upstream: () => new Response(body, {status: 403, headers: {'content-type': 'application/json'}}),
     })
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(403)
     expect(res.headers.get('content-type')).toBe('application/json')
     expect(await res.text()).toBe(body)
@@ -751,7 +754,7 @@ describe('a Langfuse credential the upstream refuses', () => {
 
   test.each([400, 404, 409, 422, 429, 500])('an upstream %i passes through unchanged', async status => {
     const h = await build({upstream: () => new Response('{"message":"x"}', {status})})
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(status)
     expect(await res.text()).toBe('{"message":"x"}')
   })
@@ -765,7 +768,7 @@ describe('a Langfuse credential the upstream refuses', () => {
 
   test('a good answer is not touched', async () => {
     const h = await build()
-    const res = await h.handler(request('/agent/langfuse/api/public/traces'))
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(200)
     await res.text()
     expect(h.events[0]?.reason).toBeUndefined()
@@ -813,12 +816,12 @@ describe('request body', () => {
 describe('audit log', () => {
   test('records consumer, route, status and fingerprint, and never any token or credential text', async () => {
     const h = await build()
-    await (await h.handler(request('/agent/langfuse/api/public/traces', {token: alice, basic: true}))).text()
+    await (await h.handler(request('/agent/langfuse/api/public/projects', {token: alice, basic: true}))).text()
     await (await h.handler(request('/agent/grafana/mcp', {token: bob, method: 'POST', body: '{}'}))).text()
-    await h.handler(request('/agent/langfuse/api/public/traces', {token: senderToken}))
-    await h.handler(request('/agent/langfuse/api/public/traces', {token: null}))
+    await h.handler(request('/agent/langfuse/api/public/projects', {token: senderToken}))
+    await h.handler(request('/agent/langfuse/api/public/projects', {token: null}))
     await h.handler(request('/agent/langfuse/nope', {token: alice}))
-    await h.handler(request('/agent/langfuse/api/public/traces', {token: alice, method: 'DELETE'}))
+    await h.handler(request('/agent/langfuse/api/public/projects', {token: alice, method: 'DELETE'}))
 
     const byStatus = h.events.map(event => ({consumer: event.consumer, route: event.route, status: event.status}))
     expect(byStatus).toEqual([
@@ -841,16 +844,20 @@ describe('audit log', () => {
 
   test('records 429 with a reason and 502 and 504 with their status', async () => {
     const h = await build({requestsPerWindow: 1, upstream: () => new Response(null, {status: 302})})
-    await h.handler(request('/agent/langfuse/api/public/traces'))
-    await h.handler(request('/agent/langfuse/api/public/traces'))
+    await h.handler(request('/agent/langfuse/api/public/projects'))
+    await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(h.events.map(event => event.status)).toEqual([502, 429])
     expect(h.events[1]?.reason).toBe('rate')
     expect(h.events[0]?.reason).toBe('upstream-redirect')
   })
 
-  test('never logs the query string or the path ids', async () => {
+  test('never logs the query string', async () => {
     const h = await build()
-    await (await h.handler(request('/agent/langfuse/api/public/traces/secret-trace-id?name=private-question'))).text()
+    await (
+      await h.handler(
+        request('/agent/langfuse/api/public/v2/observations?traceId=secret-trace-id&name=private-question'),
+      )
+    ).text()
     const text = JSON.stringify(h.events)
     expect(text).not.toContain('secret-trace-id')
     expect(text).not.toContain('private-question')
@@ -875,7 +882,7 @@ describe('internal faults', () => {
       log: event => h.events.push(event),
       deadlines: {headersMs: 1, responseMs: 2, maxBodyBytes: 3},
     })
-    const res = await broken(request('/agent/langfuse/api/public/traces'))
+    const res = await broken(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(502)
     const text = await res.text()
     expect(text).not.toContain(alice)

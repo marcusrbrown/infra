@@ -488,6 +488,19 @@ describe('parseCheck', () => {
     expect(parseCheck(result('READER_CHECK_OK langfuse\n', 1), 'langfuse')).toEqual({ok: true})
   })
 
+  it('keeps the HTTP status a failure reason carries', () => {
+    expect(parseCheck(result('READER_CHECK_FAIL langfuse read-failed:404\n'), 'langfuse')).toEqual({
+      ok: false,
+      reason: 'read-failed:404',
+    })
+    expect(
+      parseCheck(result('READER_CHECK_FAIL langfuse-refused unexpected-status:503\n'), 'langfuse-refused'),
+    ).toEqual({
+      ok: false,
+      reason: 'unexpected-status:503',
+    })
+  })
+
   it.each([
     ['no line', ''],
     ['two lines', 'READER_CHECK_OK langfuse\nREADER_CHECK_OK langfuse\n'],
@@ -496,6 +509,10 @@ describe('parseCheck', () => {
     ['an OK with a reason', 'READER_CHECK_OK langfuse extra\n'],
     ['a malformed line', 'READER_CHECK_MAYBE langfuse\n'],
     ['an upper-case reason', 'READER_CHECK_FAIL langfuse BAD_REASON\n'],
+    ['a status that is not three digits', 'READER_CHECK_FAIL langfuse read-failed:4040\n'],
+    ['a status that is not a number', 'READER_CHECK_FAIL langfuse read-failed:abc\n'],
+    ['a colon with no status', 'READER_CHECK_FAIL langfuse read-failed:\n'],
+    ['a status with a body after it', 'READER_CHECK_FAIL langfuse read-failed:404:secret\n'],
   ])('%s is a failure', (_name, stdout) => {
     expect(parseCheck(result(stdout), 'langfuse').ok).toBe(false)
   })

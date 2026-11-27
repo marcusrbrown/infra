@@ -1,8 +1,12 @@
 // Path canonicalisation and the route allowlist. The gate matches the request target as text and forwards the
 // canonical path it matched, never the raw one. Anything that is not plainly a path of letters, digits, `-`, `_`, `.`
 // and `/` is refused with 404: no percent-encoding (so no `%2e`, `%2f`, `%5c` or `%00`), no `;` parameter, no
-// backslash. A dot segment, an empty segment or a trailing slash is refused as well. A `{id}` segment must match a
-// strict id charset.
+// backslash. A dot segment, an empty segment or a trailing slash is refused as well.
+//
+// Langfuse runs in events-only mode (`LANGFUSE_MIGRATION_V4_WRITE_MODE` unset). There the v1 trace, session,
+// observation-by-id, v2 score and v1 metrics routes answer 404 before auth, so they are not on the allowlist: a
+// consumer reads through `v2/observations`, `v3/scores` and `v2/metrics`. A route that is added back needs a probe
+// against the running Langfuse, not a reading of the source.
 //
 // Bun's HTTP server resolves dot segments before the handler sees the URL, so `..` normally never arrives. The check
 // stays as a second line, and a collapsed path is still only forwarded if it lands on an allowlisted route.
@@ -22,12 +26,10 @@ interface Entry {
   route: RouteName
   upstream: UpstreamName
   methods: readonly string[]
-  /** The path the upstream sees; `{id}` is replaced by the matched segment. */
+  /** The path the upstream sees. */
   upstreamSegments: readonly string[]
 }
 
-const ID = '{id}'
-const ID_PATTERN = /^[\w-]{1,128}$/
 const SEGMENT_PATTERN = /^[\w.-]+$/
 const QUERY_PATTERN = /^[\x21-\x7E]*$/
 
@@ -44,16 +46,10 @@ const LANGFUSE: readonly Entry[] = [
     methods: ['POST'],
     upstreamSegments: ['api', 'public', 'mcp'],
   },
-  rest('traces'),
-  rest('traces', ID),
-  rest('sessions'),
-  rest('sessions', ID),
   rest('v2', 'observations'),
-  rest('observations', ID),
-  rest('v2', 'scores'),
   rest('v3', 'scores'),
-  rest('metrics'),
   rest('v2', 'metrics'),
+  rest('projects'),
   rest('health'),
 ]
 
@@ -98,7 +94,7 @@ export function matchRequest(url: string, method: string): MatchResult {
   if (!entry) return {kind: 'not-found'}
   if (!entry.methods.includes(method)) return {kind: 'method-not-allowed', allow: entry.methods.join(', ')}
 
-  const upstreamPath = `/${entry.upstreamSegments.map((segment, index) => (segment === ID ? (tail[index] ?? '') : segment)).join('/')}`
+  const upstreamPath = `/${entry.upstreamSegments.join('/')}`
   const forwardedQuery = entry.methods.includes('GET') ? query : ''
   if (forwardedQuery.length > LIMITS.maxQueryBytes || !QUERY_PATTERN.test(forwardedQuery)) return {kind: 'not-found'}
   return {kind: 'match', route: entry.route, upstream: entry.upstream, upstreamPath, query: forwardedQuery}
@@ -110,8 +106,5 @@ function isPlainSegment(segment: string): boolean {
 
 function matches(pattern: readonly string[], segments: readonly string[]): boolean {
   if (pattern.length !== segments.length) return false
-  return pattern.every((expected, index) => {
-    const actual = segments[index] ?? ''
-    return expected === ID ? ID_PATTERN.test(actual) : expected === actual
-  })
+  return pattern.every((expected, index) => expected === segments[index])
 }

@@ -93,6 +93,10 @@ const OLD_SK = 'sk-lf-44444444-dddd'
 const OLD_PAIR = `${OLD_PK}:${OLD_SK}`
 const ADMIN_PASSWORD = 'AdminPasswordNotInAnyArgv123'
 
+/** The hex-only line the stage step prints: the sha256 of the staged file, computed on the host. */
+const STAGED_SHA_PREFIX = 'TRACES_READER_BACKEND_STAGED_SHA='
+const shaOfText = (text: string): string => createHash('sha256').update(text).digest('hex')
+
 const FILES = {
   langfuse: TRACES_READER_LANGFUSE_FILE.replace(TRACES_APP_DIR, ''),
   grafana: TRACES_GRAFANA_MCP_TOKEN_FILE.replace(TRACES_APP_DIR, ''),
@@ -148,6 +152,11 @@ interface World {
   checks: unknown[]
   /** Runs after the gate's Langfuse check has answered, before the next call: another run's move. */
   afterCheck: (() => void) | undefined
+  /**
+   * Replaces the hash line the stage step prints with this value (an empty string drops the line): the host reporting
+   * something else than the staged file's hash.
+   */
+  stagedShaReply: string | undefined
   /** Runs before the live Grafana token is verified for cleanup: another run's switch. */
   beforeVerifyLive: (() => void) | undefined
   /** A previous token's key is valid iff it is in the model. */
@@ -217,6 +226,7 @@ function createWorld(): World {
     checkReply: undefined,
     checks,
     afterCheck: undefined,
+    stagedShaReply: undefined,
     beforeVerifyLive: undefined,
     grafanaServes: () => validKey(read(grafanaFile)),
     seedAccount: (name = GRAFANA_ACCOUNT_NAME, role = 'Viewer') => {
@@ -343,6 +353,12 @@ function createWorld(): World {
         if (failures.has('switch')) return {exitCode: 1, stderr: 'switch failed on the host'}
         const result = execOnHost(dir, call.command, call.stdin)
         return failures.has('switch-reply-lost') ? {exitCode: 255, stderr: 'ssh: connection reset by peer'} : result
+      }
+      case READER_BACKEND_REMOTE.stageLangfuse: {
+        const result = execOnHost(dir, call.command, call.stdin)
+        if (world.stagedShaReply === undefined) return result
+        const line = world.stagedShaReply === '' ? '' : `${STAGED_SHA_PREFIX}${world.stagedShaReply}\n`
+        return {...result, stdout: result.stdout.replace(/^TRACES_READER_BACKEND_STAGED_SHA=.*\n/m, line)}
       }
       case READER_BACKEND_REMOTE.verifyGrafanaLive:
         world.beforeVerifyLive?.()
@@ -877,6 +893,42 @@ describe('the hash checks that remain', () => {
     expect(world.read(world.langfuseFile)).toBe(OLD_PAIR)
     expect(world.read(`${world.langfuseFile}.previous`)).toBeUndefined()
     expect(world.read(`${world.langfuseFile}.staged`)).toBeUndefined()
+  })
+
+  it('hashes the staged file on the host: the CLI sends the hash the host reported, and computes none of its own', async () => {
+    const world = createWorld()
+    world.pairs.set(PAIR, 'viewer')
+    // The host reports a hash that is not the staged file's: the CLI passes it on as it is, and the switch refuses it.
+    world.stagedShaReply = 'a'.repeat(64)
+    const outcome = await installLangfuse(world)
+    const sw = world.calls.find(call => call.command === READER_BACKEND_REMOTE.switchLangfuse)
+    expect(sw?.stdin).toBe(`${'a'.repeat(64)}\n`)
+    expect(outcome.exit).toBe(1)
+    expect(outcome.stderr).toContain('changed after the check')
+    expect(world.read(world.langfuseFile)).toBe(READER_LANGFUSE_PLACEHOLDER)
+    expect(world.read(`${world.langfuseFile}.staged`)).toBeUndefined()
+  })
+
+  it.each([
+    ['no hash line', ''],
+    ['a hash that is not 64 hex characters', 'abc123'],
+    ['an upper-case hash', 'A'.repeat(64)],
+  ])('stops, removes the staged file and switches nothing when the host reports %s', async (_name, reply) => {
+    const world = createWorld()
+    world.pairs.set(PAIR, 'viewer')
+    world.stagedShaReply = reply
+    const outcome = await installLangfuse(world)
+    expect(outcome.exit).toBe(1)
+    expect(outcome.stderr).toContain('did not report a hash of the staged pair')
+    expect(world.calls.some(call => call.command === READER_BACKEND_REMOTE.switchLangfuse)).toBe(false)
+    expect(world.read(world.langfuseFile)).toBe(READER_LANGFUSE_PLACEHOLDER)
+    expect(world.read(`${world.langfuseFile}.staged`)).toBeUndefined()
+  })
+
+  it('does not hash the credential pair in the CLI (CodeQL js/insufficient-password-hash)', () => {
+    const source = readFileSync(new URL('reader-backend.ts', import.meta.url), 'utf8')
+    expect(source).not.toContain('node:crypto')
+    expect(source).not.toContain('createHash')
   })
 
   it('sends the hash of the staged pair, never the pair, to the switch', async () => {
@@ -1647,8 +1699,10 @@ describe('host scripts, run under a real sh', () => {
       const world = createWorld()
       const result = execOnHost(world.dir, READER_BACKEND_REMOTE.stageLangfuse, `${PAIR}\n`)
       expect(result.exitCode).toBe(0)
+      // The host hashes the file it wrote and prints that hash on a hex-only line before the sentinel.
       expect(result.stdout.trim().split('\n')).toEqual([
         'TRACES_READER_BACKEND_SETTLED=none',
+        `${STAGED_SHA_PREFIX}${shaOfText(PAIR)}`,
         'TRACES_READER_BACKEND_STAGED',
       ])
       expect(world.read(`${world.langfuseFile}.staged`)).toBe(PAIR)

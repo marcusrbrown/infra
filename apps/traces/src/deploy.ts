@@ -567,26 +567,18 @@ export function buildEnvManagedFile(inputs: DeployInputs): RemoteFile {
  */
 export const READER_GATE_SOURCE_DIR = 'reader-gate'
 
+/** What a changed gate source file restarts, and the name the pending-restart record gives it. */
+const READER_GATE_TOUCH = 'reader-gate' satisfies Touch
+
 /** A gate file the host runs: a `.ts` file that is neither a test nor the test support module. */
 export function isReaderGateSource(name: string): boolean {
   return name.endsWith('.ts') && !name.endsWith('.test.ts') && name !== 'testing.ts'
 }
 
-/** Reads `apps/traces`'s uploaded files through an injected reader. */
-export async function loadUploadedFiles(
+function loadSpecs(
   readFile: (relative: string) => Promise<string>,
-  listFiles: (relative: string) => Promise<string[]>,
+  specs: readonly {local: string; remote: string; touches: readonly Touch[]}[],
 ): Promise<RemoteFile[]> {
-  const gateNames = (await listFiles(READER_GATE_SOURCE_DIR)).filter(name => isReaderGateSource(name)).sort()
-  if (!gateNames.includes('main.ts')) throw new Error(`${READER_GATE_SOURCE_DIR}/main.ts is missing: nothing to upload`)
-  const specs = [
-    ...UPLOADED_FILES,
-    ...gateNames.map(name => ({
-      local: `${READER_GATE_SOURCE_DIR}/${name}`,
-      remote: `${READER_GATE_SOURCE_DIR}/${name}`,
-      touches: ['reader-gate'] as readonly Touch[],
-    })),
-  ]
   return Promise.all(
     specs.map(async spec => ({
       path: spec.remote,
@@ -597,6 +589,40 @@ export async function loadUploadedFiles(
       kind: 'plain' as const,
     })),
   )
+}
+
+/** The uploaded files the route-critical comparison and write loop handles: every one except the reader gate's source. */
+export function loadRouteFiles(readFile: (relative: string) => Promise<string>): Promise<RemoteFile[]> {
+  return loadSpecs(readFile, UPLOADED_FILES)
+}
+
+/**
+ * The reader gate's source files: the `.ts` files of its directory that the host runs. They are compared, written and
+ * recorded inside the operator gate `reader-ready`, never in the route-critical loop, so a listing, read or write that
+ * fails costs the run and not the route.
+ */
+export async function loadReaderGateFiles(
+  readFile: (relative: string) => Promise<string>,
+  listFiles: (relative: string) => Promise<string[]>,
+): Promise<RemoteFile[]> {
+  const gateNames = (await listFiles(READER_GATE_SOURCE_DIR)).filter(name => isReaderGateSource(name)).sort()
+  if (!gateNames.includes('main.ts')) throw new Error(`${READER_GATE_SOURCE_DIR}/main.ts is missing: nothing to upload`)
+  return loadSpecs(
+    readFile,
+    gateNames.map(name => ({
+      local: `${READER_GATE_SOURCE_DIR}/${name}`,
+      remote: `${READER_GATE_SOURCE_DIR}/${name}`,
+      touches: ['reader-gate'] as readonly Touch[],
+    })),
+  )
+}
+
+/** Every uploaded file, the reader gate's source included. The deploy loads the two parts separately. */
+export async function loadUploadedFiles(
+  readFile: (relative: string) => Promise<string>,
+  listFiles: (relative: string) => Promise<string[]>,
+): Promise<RemoteFile[]> {
+  return [...(await loadRouteFiles(readFile)), ...(await loadReaderGateFiles(readFile, listFiles))]
 }
 
 // ─── Remote scripts ───────────────────────────────────────────────────────────
@@ -865,8 +891,8 @@ export const DIRS_SENTINEL = 'TRACES_DIRS_READY'
 
 /**
  * Directories and their owners. Created or corrected; nothing inside a token directory is touched. The reader token and
- * credential directories are not here: they are made by `readerDirsScript` as part of `reader-ready`, so that one that
- * cannot be made never holds ingest.
+ * credential directories and the gate's source directory are not here: they are made by `readerDirsScript` and
+ * `readerSourceDirScript` as part of `reader-ready`, so that one that cannot be made never holds ingest.
  */
 export function prepareDirsScript(id: string): string {
   const dir = (relative: string): string => remotePath(relative)
@@ -880,7 +906,6 @@ export function prepareDirsScript(id: string): string {
     'config/grafana/datasources',
     'config/prometheus',
     'health-reporter',
-    READER_GATE_SOURCE_DIR,
     'secrets',
   ].map(dir)
   const collector = [dir('secrets/collector'), dir('tokens'), ...SENDER_GROUPS.map(group => dir(`tokens/${group}`))]
@@ -894,6 +919,27 @@ install -d -o root -g ${COLLECTOR_GID} -m ${SECRET_DIR_MODE} ${collector.join(' 
 install -d -o root -g ${GRAFANA_UID} -m ${SECRET_DIR_MODE} ${dir('secrets/grafana')}
 install -d -o root -g ${REPORTER_UID} -m ${SECRET_DIR_MODE} ${dir('secrets/reporter')}
 echo ${DIRS_SENTINEL}`,
+  )
+}
+
+export const READER_SOURCE_DIR_SENTINEL = 'TRACES_READER_SOURCE_DIR_READY'
+
+/**
+ * The reader gate's source directory, `root:root` 0755 like the other plain directories. Run in the operator gate
+ * `reader-ready`, after `readerDirsScript` and before the gate source is compared and written, and not with the
+ * ingest-critical directories: a path that cannot be made (a regular file where the directory should be) exits this
+ * script non-zero and fails `reader-ready` alone, where it would otherwise hold ingest. `appDir` exists so a test can run
+ * the real script against a scratch directory.
+ */
+export function readerSourceDirScript(id: string, appDir: string = TRACES_APP_DIR): string {
+  const path = `${appDir}/${READER_GATE_SOURCE_DIR}`
+  if (!SAFE_PATH.test(path) || path.includes('..')) throw new Error(`Unsafe remote path: ${READER_GATE_SOURCE_DIR}`)
+  return guardedStep(
+    'reader-source-dir',
+    id,
+    `install -d -o root -g root -m 0755 ${path}
+echo ${READER_SOURCE_DIR_SENTINEL}`,
+    {marker: `${appDir}/${MARKER_FILE}`, lock: `${appDir}/${STEP_LOCK_FILE}`},
   )
 }
 
@@ -1338,6 +1384,48 @@ export function parseDrift(stdout: string): Service[] | undefined {
 /** The reporter's loopback listener, reached by exec exactly as `traces status` does. */
 export const REPORTER_DETAIL_SENTINEL = 'TRACES_DETAIL_END'
 export const REPORTER_DETAIL_COMMAND = `${COMPOSE} exec -T health-reporter wget -q -O - http://127.0.0.1:8081/detail && echo && echo ${REPORTER_DETAIL_SENTINEL}`
+
+export const READER_HEALTH_SENTINEL = 'TRACES_READER_HEALTH_CHECKED'
+
+/** The gate's health listener, as the container's own health check reaches it. Neither upstream needs a credential. */
+const READER_HEALTH_URL = 'http://127.0.0.1:8091/healthz'
+
+/** What the gate's `/healthz` says about its two upstreams, or `unreachable` when it did not answer with a verdict. */
+export type ReaderHealth = {langfuse: boolean; grafana: boolean} | 'unreachable'
+
+/**
+ * A short Bun program for the gate container (the image runs Bun and has no curl or wget). It reads `/healthz`, which
+ * answers 200 or 503 with the same JSON body, and prints one line: each upstream as `true` only when the body says
+ * exactly `true`, or `unreachable` when there is no answer or the body is not JSON. Nothing else is printed. `url` exists
+ * so a test can run the real program against a local server.
+ */
+export function readerHealthProgram(url: string = READER_HEALTH_URL): string {
+  return `fetch(${JSON.stringify(url)},{signal:AbortSignal.timeout(5000)}).then(r=>r.json()).then(b=>console.log('TRACES_READER_HEALTH langfuse='+(b.langfuse===true)+' grafana='+(b.grafana===true)),()=>console.log('TRACES_READER_HEALTH unreachable'))`
+}
+
+/**
+ * Asks the reader gate, through `docker compose exec` in its own container, whether it sees Langfuse and Grafana.
+ * Read only: no file is written and no credential is read or sent. A container that is not running makes `exec` fail,
+ * and the script still ends in its sentinel with no verdict line, which `parseReaderHealth` reads as no answer.
+ */
+export function readerHealthScript(): string {
+  return `set -u
+# traces-step:reader-healthz
+${COMPOSE} exec -T reader-gate bun -e ${shellQuote(readerHealthProgram())} || true
+echo ${READER_HEALTH_SENTINEL}`
+}
+
+/** The verdict from a complete answer (the line and the sentinel). Anything else is `undefined`. */
+export function parseReaderHealth(stdout: string): ReaderHealth | undefined {
+  const lines = stdout.split('\n').map(line => line.trim())
+  if (!lines.includes(READER_HEALTH_SENTINEL)) return undefined
+  if (lines.includes('TRACES_READER_HEALTH unreachable')) return 'unreachable'
+  for (const line of lines) {
+    const match = /^TRACES_READER_HEALTH langfuse=(true|false) grafana=(true|false)$/.exec(line)
+    if (match !== null) return {langfuse: match[1] === 'true', grafana: match[2] === 'true'}
+  }
+  return undefined
+}
 
 export const INGEST_PROBE_SENTINEL = 'TRACES_INGEST_PROBED'
 
@@ -2364,6 +2452,9 @@ export interface Limits {
   /** Tries for Grafana to answer the sign-in check, after the route is final (a 2xx to 4xx answer is settled and is not retried). */
   grafanaAttempts: number
   grafanaIntervalMs: number
+  /** Tries for the reader gate's own `/healthz` to report both upstreams up, inside `reader-ready`. */
+  readerHealthAttempts: number
+  readerHealthIntervalMs: number
 }
 
 export const DEFAULT_LIMITS: Limits = {
@@ -2375,6 +2466,8 @@ export const DEFAULT_LIMITS: Limits = {
   verdictIntervalMs: 5000,
   grafanaAttempts: 12,
   grafanaIntervalMs: 5000,
+  readerHealthAttempts: 6,
+  readerHealthIntervalMs: 6000,
 }
 
 export interface DeployDeps {
@@ -2650,6 +2743,32 @@ async function awaitGrafanaSignIn(exec: RemoteExec, deps: DeployDeps): Promise<G
 }
 
 /**
+ * Asks the reader gate for its own `/healthz` until both upstreams are reported up, a few attempts over about 30
+ * seconds: the gate answers as soon as it listens, and the Grafana MCP server behind it can take a moment longer. Throws,
+ * naming each upstream that was down at the last attempt, when they never are. It runs inside the operator gate
+ * `reader-ready` and only reads, so the failure it throws can never reach the route. An answer that cannot be read, or a
+ * rejected execution, counts as no answer.
+ */
+async function awaitReaderHealth(exec: RemoteExec, deps: DeployDeps): Promise<void> {
+  let last: ReaderHealth | undefined
+  for (let attempt = 1; attempt <= deps.limits.readerHealthAttempts; attempt += 1) {
+    try {
+      const result = await exec(bashCommand(readerHealthScript()))
+      last = result.exitCode === 0 ? parseReaderHealth(result.stdout) : undefined
+    } catch {
+      last = undefined
+    }
+    if (last !== undefined && last !== 'unreachable' && last.langfuse && last.grafana) return
+    if (attempt < deps.limits.readerHealthAttempts) await deps.sleep(deps.limits.readerHealthIntervalMs)
+  }
+  if (last === undefined || last === 'unreachable') {
+    throw new Error("the reader gate's own health check did not answer")
+  }
+  const down = (['langfuse', 'grafana'] as const).filter(upstream => !last?.[upstream])
+  throw new Error(`the reader gate's own health check reports ${down.join(' and ')} down`)
+}
+
+/**
  * One read of Grafana's provisioned alerting. Grafana has already answered the sign-in check, so there is no wait and
  * no retry: a refusal here is a real one, and a second try would only spend another request on the admin account. An
  * answer that cannot be read, or a rejected execution, is a failed check and never a pass. This never throws.
@@ -2795,6 +2914,10 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
   // The route as this deploy believes it to be. It is only ever a plan: after a failure the host is asked.
   let route: IngestState | 'none' = host.ingest
   let heldForUpdate = false
+  // A `reader-gate` entry in `.pending-restarts` left by older code. No deploy writes one any more: a record there blocks
+  // `traces ingest open`, and a reader failure must never do that. `reader-ready` removes it so it does not linger,
+  // unless the route-critical part clears the whole file first (it does when another entry is owed).
+  const leftoverReaderEntry = {pending: host.pendingRestarts.includes(READER_GATE_TOUCH)}
 
   const setState = async (state: IngestState): Promise<void> => {
     // An open that was attempted counts as open from before the remote call: a lost reply says nothing about the host.
@@ -2896,11 +3019,37 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       'reader-ready',
       'The reader gate and the Grafana MCP server',
       async () => {
+        // An entry for this gate left by older code goes first, so that not even a failure below can leave it behind.
+        if (leftoverReaderEntry.pending) {
+          await sh('Remove the leftover reader restart entry', removeOwnFileScript(deployId, PENDING_RESTARTS_FILE), [
+            REMOVED_SENTINEL,
+          ])
+          leftoverReaderEntry.pending = false
+        }
         // The directories first, then the reader token file and the two backend credential files: each created only
         // when absent, with a void line or a placeholder, and never compared or written again. Here and not before the
         // route is decided: a directory or file that cannot be prepared fails `reader-ready` and must not hold healthy
         // ingest.
         await sh('Prepare the reader directories', readerDirsScript(deployId), [READER_DIRS_SENTINEL])
+        // The gate's source: its directory, then each file compared and the changed ones written. Also here and not with
+        // the route-critical files: a directory that cannot be made, or a write that fails, fails `reader-ready` and must
+        // not hold healthy ingest. No pending-restart record is kept for it: the start below force-recreates the gate on
+        // every run, so a change to the source alone restarts it.
+        await sh('Prepare the reader source directory', readerSourceDirScript(deployId), [READER_SOURCE_DIR_SENTINEL])
+        const gateFiles = await loadReaderGateFiles(deps.readFile, deps.listFiles)
+        const changedGateFiles: RemoteFile[] = []
+        for (const file of gateFiles) {
+          const {sentinel} = await sh(
+            `Compare ${file.path}`,
+            compareFileScript(file.path, file.kind, file),
+            FILE_COMPARE_SENTINELS,
+            file.content,
+          )
+          if (sentinel !== 'TRACES_FILE_SAME') changedGateFiles.push(file)
+        }
+        for (const file of changedGateFiles) {
+          await sh(`Write ${file.path}`, writeFileScript(deployId, file), [FILE_WRITTEN_SENTINEL], file.content)
+        }
         for (const kind of READER_FILE_KINDS) {
           const {sentinel} = await sh(
             `Reader file ${kind}`,
@@ -2916,6 +3065,9 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
         await sh('Start the reader gate', upScript(deployId, 'up-reader', READER_SERVICES, {force: true}), [
           STEP_SENTINEL('up-reader'),
         ])
+        // Up and healthy as a container is not enough: the gate must also see Langfuse and Grafana, and the Grafana MCP
+        // server can answer later than the gate does. Read only, and an operator gate like the rest of this one.
+        await awaitReaderHealth(exec, deps)
       },
     )
     const embedder = await startPostRouteService('embedder-ready', 'The Topics embedder', async () => {
@@ -2948,7 +3100,7 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
     // `stat` fails) closes the route like any other failure, instead of leaving an open route open and unreported.
     log('==> Comparing files with the host')
     const files: RemoteFile[] = [
-      ...(await loadUploadedFiles(deps.readFile, deps.listFiles)),
+      ...(await loadRouteFiles(deps.readFile)),
       ...buildSecretFiles(inputs),
       buildEnvManagedFile(inputs),
     ]
@@ -2963,7 +3115,9 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
       comparisons.push({file, status: sentinel})
     }
 
-    const restarts = new Set<Touch>(host.pendingRestarts)
+    // A leftover `reader-gate` entry is not a restart the route-critical part owes (`reader-ready` recreates the gate on
+    // every deploy and removes the entry).
+    const restarts = new Set<Touch>(host.pendingRestarts.filter(touch => touch !== READER_GATE_TOUCH))
     for (const {file, status} of comparisons) {
       if (status !== 'TRACES_FILE_SAME') for (const touch of file.touches) restarts.add(touch)
     }
@@ -3167,8 +3321,10 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
     ])
 
     // Every restart this deploy owed has happened, Caddy's included.
-    if (changed.length > 0 || host.pendingRestarts.length > 0) {
+    if (changed.length > 0) {
       await sh('Clear the pending restarts', removeOwnFileScript(deployId, PENDING_RESTARTS_FILE), [REMOVED_SENTINEL])
+      // That removed the whole file, a leftover reader entry included.
+      leftoverReaderEntry.pending = false
     }
 
     // 9. Gates.

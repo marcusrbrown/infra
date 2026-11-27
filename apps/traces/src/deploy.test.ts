@@ -58,6 +58,8 @@ import {
   INSIGHT_SERVICES,
   isReaderGateSource,
   langfuseBasicValue,
+  loadReaderGateFiles,
+  loadRouteFiles,
   loadUploadedFiles,
   mayOpen,
   MONITORING_SERVICES,
@@ -70,6 +72,7 @@ import {
   parseGrafanaProbe,
   parseHostState,
   parseIngestProbe,
+  parseReaderHealth,
   parseReporterDetail,
   prepareDirsScript,
   probeAgentRoutesScript,
@@ -82,9 +85,14 @@ import {
   READER_DIRS_SENTINEL,
   READER_FILE_KINDS,
   READER_FILES,
+  READER_HEALTH_SENTINEL,
   READER_SERVICES,
+  READER_SOURCE_DIR_SENTINEL,
   readerDirsScript,
   readerFileScript,
+  readerHealthProgram,
+  readerHealthScript,
+  readerSourceDirScript,
   readIngestStateScript,
   readInputs,
   removeOwnFileScript,
@@ -1709,6 +1717,8 @@ describe('the Grafana sign-in check', () => {
         verdictIntervalMs: 0,
         grafanaAttempts: 3,
         grafanaIntervalMs: 7,
+        readerHealthAttempts: 1,
+        readerHealthIntervalMs: 0,
       },
     })
     expect(sleeps).toEqual([7, 7])
@@ -2567,10 +2577,12 @@ describe('the reader files', () => {
     }
     expect(dirs).not.toContain(`-g ${GATE_ID} `)
     expect(dirs).not.toContain(`-g ${GRAFANA_MCP_USER_ID} `)
-    // The gate's own source directory stays where it was: it is not a token or credential directory.
-    expect(dirs.split('\n').find(line => line.startsWith('install -d -o root -g root -m 0755'))).toContain(
-      `${TRACES_APP_DIR}/reader-gate`,
+    // Nor does it name the gate's own source directory: it is made in `reader-ready` too (`readerSourceDirScript`).
+    expect(dirs).not.toMatch(new RegExp(String.raw`${TRACES_APP_DIR}/reader-gate(\s|$)`, 'm'))
+    expect(readerSourceDirScript(ID_A).split('\n')).toContain(
+      `install -d -o root -g root -m 0755 ${TRACES_APP_DIR}/reader-gate`,
     )
+    expect(readerSourceDirScript(ID_A)).toContain(READER_SOURCE_DIR_SENTINEL)
   })
 
   it('creates a void token file and both placeholders on a host with none, with the owner and mode each reader needs', async () => {
@@ -2904,7 +2916,7 @@ describe('the reader gate source upload', () => {
     }
   })
 
-  it('writes the sources on a first deploy, without the tests, and restarts only the gate when one changes', async () => {
+  it('writes the sources on a first deploy, without the tests, and restarts only the gate (by its forced recreate, with no pending record) when one changes', async () => {
     const host = new FakeHost()
     await run(host)
     expect(host.writes().filter(path => path.startsWith('reader-gate/'))).toEqual([
@@ -2920,11 +2932,7 @@ describe('the reader gate source upload', () => {
     await run(host, baseEnv(), {
       readFile: async relative => (relative === 'reader-gate/main.ts' ? '# changed\n' : `# ${relative}\n`),
     })
-    expect(host.steps.slice(start).filter(step => step.startsWith('write:'))).toEqual([
-      'write:.pending-restarts',
-      'write:reader-gate/main.ts',
-    ])
-    expect(host.calls.slice(start).find(call => call.step === 'write:.pending-restarts')?.stdin).toBe('reader-gate\n')
+    expect(host.steps.slice(start).filter(step => step.startsWith('write:'))).toEqual(['write:reader-gate/main.ts'])
     expect(host.pendingRestarts).toEqual([])
     expect(host.setStates()).toEqual(['open'])
     expect(host.steps.slice(start)).toContain('up-reader')
@@ -3158,6 +3166,449 @@ describe('the reader services start after the route is decided', () => {
   it('adds no deploy input and no secret for any of it', () => {
     const everything = [...TRACES_DEPLOY_SECRETS, ...TRACES_DEPLOY_VARS, ...TRACES_DEPLOY_BUILD_INPUTS].join(' ')
     expect(everything).not.toMatch(/AGENT|MCP|GATE|TOKEN/i)
+  })
+})
+
+describe('the reader source directory script', () => {
+  const runDir = (root: string, shim: string, id = ID_A) =>
+    Bun.spawnSync(['bash', '-o', 'pipefail', '-c', readerSourceDirScript(id, root)], {
+      env: {PATH: `${shim}:${process.env.PATH ?? ''}`},
+    })
+  // `install -d -o root -g root` needs root: the shim makes the directory the way `install -d` does, which refuses a path
+  // that exists and is not a directory, and ignores the owner.
+  const shimInstall = (shim: string): void => {
+    writeFileSync(
+      join(shim, 'install'),
+      '#!/bin/sh\nwhile [ "$1" = -d ] || [ "$1" = -o ] || [ "$1" = -g ] || [ "$1" = -m ]; do case "$1" in -d) shift ;; *) shift 2 ;; esac; done\nfor d in "$@"; do if [ -e "$d" ] && [ ! -d "$d" ]; then echo "install: cannot create directory $d: File exists" >&2; exit 1; fi; mkdir -p "$d"; done\n',
+    )
+    chmodSync(join(shim, 'install'), 0o755)
+  }
+
+  it('is guarded, makes the source directory root-owned 0755, and ends in its own sentinel', () => {
+    const script = readerSourceDirScript(ID_A)
+    expect(script).toContain('# traces-step:reader-source-dir')
+    expect(script).toContain(ownershipPrelude(ID_A))
+    expect(script).toContain(`install -d -o root -g root -m 0755 ${TRACES_APP_DIR}/reader-gate`)
+    expect(script.trimEnd().split('\n').at(-1)).toBe(`echo ${READER_SOURCE_DIR_SENTINEL}`)
+    expect(Bun.spawnSync(['bash', '-n', '-c', script]).exitCode).toBe(0)
+  })
+
+  it('creates the directory when the host owns it, and only then says so', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      shimInstall(shim)
+      writeFileSync(join(root, '.deploy-in-progress'), `${ID_A} 2023-11-14T22:13:20.000Z\n`)
+      const result = runDir(root, shim)
+      expect(result.exitCode).toBe(0)
+      expect(result.stdout.toString()).toContain(READER_SOURCE_DIR_SENTINEL)
+      expect(statSync(join(root, 'reader-gate')).isDirectory()).toBe(true)
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('a regular file where the source directory should be fails it, with no sentinel', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      shimInstall(shim)
+      writeFileSync(join(root, '.deploy-in-progress'), `${ID_A} 2023-11-14T22:13:20.000Z\n`)
+      writeFileSync(join(root, 'reader-gate'), 'not a directory')
+      const result = runDir(root, shim)
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout.toString()).not.toContain(READER_SOURCE_DIR_SENTINEL)
+      expect(readFileSync(join(root, 'reader-gate'), 'utf8')).toBe('not a directory')
+    } finally {
+      cleanup()
+    }
+  })
+
+  it('refuses to run for a deploy that does not own the host, changing nothing', () => {
+    const {root, shim, cleanup} = scratchHost()
+    try {
+      shimInstall(shim)
+      writeFileSync(join(root, '.deploy-in-progress'), `${ID_B} 2023-11-14T22:13:20.000Z\n`)
+      const result = runDir(root, shim)
+      expect(result.exitCode).not.toBe(0)
+      expect(result.stdout.toString()).toContain(DEPLOY_OVERTAKEN_SENTINEL)
+      expect(() => statSync(join(root, 'reader-gate'))).toThrow()
+    } finally {
+      cleanup()
+    }
+  })
+})
+
+describe('the reader gate source is staged inside reader-ready', () => {
+  const gateOf = (error: Error, id: string) => (error as OperatorSurfaceError).result.gates.find(gate => gate.id === id)
+  const ranSince = (host: FakeHost, mark: number, step: string): number =>
+    host.steps.slice(mark).filter(entry => entry === step).length
+  const gateSteps = (host: FakeHost, from = 0): string[] =>
+    host.steps.slice(from).filter(step => /^(?:compare|write):reader-gate\//.test(step))
+  /** A deploy whose gate source differs from what the host holds, on an open stack. */
+  const changedGate = {
+    readFile: async (relative: string) =>
+      relative.startsWith('reader-gate/') ? `# changed ${relative}\n` : `# ${relative}\n`,
+  }
+
+  it('splits the file set: the route-critical files carry no gate source, and the gate loader carries only it', async () => {
+    const real = defaultDeps({})
+    const route = await loadRouteFiles(real.readFile)
+    expect(route.map(file => file.path)).toEqual(UPLOADED_FILES.map(file => file.remote))
+    expect(route.filter(file => file.path.startsWith('reader-gate/'))).toEqual([])
+    const gate = await loadReaderGateFiles(real.readFile, real.listFiles)
+    expect(gate.length).toBeGreaterThan(0)
+    for (const file of gate) expect(file.path.startsWith('reader-gate/')).toBe(true)
+    expect([...route, ...gate].map(file => file.path)).toEqual(
+      (await loadUploadedFiles(real.readFile, real.listFiles)).map(file => file.path),
+    )
+  })
+
+  it('compares and writes the gate source only after the route is decided, after reader-dirs and the source directory, and before any reader file', async () => {
+    const host = new FakeHost()
+    await run(host)
+    const sourceSteps = gateSteps(host)
+    expect(sourceSteps).toEqual([
+      'compare:reader-gate/main.ts',
+      'compare:reader-gate/server.ts',
+      'write:reader-gate/main.ts',
+      'write:reader-gate/server.ts',
+    ])
+    expect(host.count('reader-source-dir')).toBe(1)
+    expect(host.indexOf('reader-source-dir')).toBeGreaterThan(host.indexOf('reader-dirs'))
+    for (const step of sourceSteps) {
+      expect({step, afterRoute: host.indexOf(step) > host.indexOf('raw:set-state:open')}).toEqual({
+        step,
+        afterRoute: true,
+      })
+      expect({step, afterDirs: host.indexOf(step) > host.indexOf('reader-source-dir')}).toEqual({step, afterDirs: true})
+      for (const kind of READER_FILE_KINDS) {
+        expect({step, kind, before: host.indexOf(step) < host.indexOf(`reader-file:${kind}`)}).toEqual({
+          step,
+          kind,
+          before: true,
+        })
+      }
+      expect(host.indexOf(step)).toBeLessThan(host.indexOf('pull-reader'))
+    }
+    // Nothing of the gate source is in the main compare or write loop: the first compare is the compose file.
+    expect(host.steps.find(step => step.startsWith('compare:'))).toBe('compare:docker-compose.yaml')
+    expect(host.unguarded).toEqual([])
+    expect(host.unlocked).toEqual([])
+  })
+
+  it('a regular file where the source directory should be fails reader-ready only: no hold, the route stays open', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.override = failAt('reader-source-dir')
+    const error = await failure(host, baseEnv(), changedGate)
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(failedOperatorGates((error as OperatorSurfaceError).result.gates).map(gate => gate.id)).toEqual([
+      'reader-ready',
+    ])
+    expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+    expect((error as OperatorSurfaceError).ingest).toBe('open')
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.marker).toBeUndefined()
+    // Nothing of the gate source or the rest of the reader group ran, and the rest of the post-route group did.
+    expect(gateSteps(host, mark)).toEqual([])
+    for (const kind of READER_FILE_KINDS) expect(ranSince(host, mark, `reader-file:${kind}`)).toBe(0)
+    expect(ranSince(host, mark, 'pull-reader')).toBe(0)
+    expect(ranSince(host, mark, 'up-reader')).toBe(0)
+    expect(ranSince(host, mark, 'up-grafana')).toBe(1)
+    expect(ranSince(host, mark, 'up-embedder')).toBe(1)
+  })
+
+  it('a failed source write fails reader-ready only, leaves no pending restart, and leaves an open route open', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.override = failAt('write:reader-gate/main.ts')
+    const error = await failure(host, baseEnv(), changedGate)
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(failedOperatorGates((error as OperatorSurfaceError).result.gates).map(gate => gate.id)).toEqual([
+      'reader-ready',
+    ])
+    expect((error as OperatorSurfaceError).ingest).toBe('open')
+    expect(host.served).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.marker).toBeUndefined()
+    expect(ranSince(host, mark, 'pull-reader')).toBe(0)
+    expect(ranSince(host, mark, 'up-reader')).toBe(0)
+    expect(ranSince(host, mark, 'up-grafana')).toBe(1)
+    expect(ranSince(host, mark, 'up-embedder')).toBe(1)
+    // No record is kept for the gate: `traces ingest open` refuses while `.pending-restarts` exists, and a reader failure
+    // must never block it. The gate is recreated on every successful `reader-ready` run anyway.
+    expect(host.steps.slice(mark)).not.toContain('write:.pending-restarts')
+    expect(host.pendingRestarts).toEqual([])
+    expect(host.manualOpen()).toBe(true)
+  })
+
+  it('a source file that cannot even be compared fails reader-ready only', async () => {
+    const host = await openStack()
+    host.options.override = failAt('compare:reader-gate/server.ts')
+    const error = await failure(host)
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+    expect(host.setStates()).toEqual(['open'])
+    expect(host.served).toBe('open')
+  })
+
+  it('a gate directory that cannot be listed (no entrypoint) fails reader-ready only, and holds nothing', async () => {
+    const host = await openStack()
+    const error = await failure(host, baseEnv(), {listFiles: async () => ['server.ts']})
+    expect(error).toBeInstanceOf(OperatorSurfaceError)
+    expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+    expect(gateOf(error, 'reader-ready')?.detail).toContain('main.ts is missing')
+    expect((error as OperatorSurfaceError).ingest).toBe('open')
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('a change to the gate source alone still restarts reader-gate and never holds an open route, with no pending-restart record', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    await run(host, baseEnv(), changedGate)
+    const after = host.steps.slice(mark)
+    expect(after.filter(step => step.startsWith('write:'))).toEqual([
+      'write:reader-gate/main.ts',
+      'write:reader-gate/server.ts',
+    ])
+    expect(after).not.toContain('remove:.pending-restarts')
+    expect(host.setStates()).toEqual(['open'])
+    // The gate is force-recreated by the reader start, so it runs the new source.
+    expect(after.indexOf('up-reader')).toBeGreaterThan(after.indexOf('write:reader-gate/server.ts'))
+    expect(host.calls.find((call, index) => index >= mark && call.step === 'up-reader')?.command).toContain(
+      '--force-recreate --no-deps reader-gate grafana-mcp',
+    )
+    expect(host.pendingRestarts).toEqual([])
+    expect(host.files.get('reader-gate/main.ts')).toBe('# changed reader-gate/main.ts\n')
+  })
+
+  it('writes nothing and records nothing when the gate source is unchanged', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    await run(host)
+    expect(host.steps.slice(mark).filter(step => step.startsWith('write:'))).toEqual([])
+    expect(host.steps.slice(mark)).not.toContain('remove:.pending-restarts')
+    expect(host.steps.slice(mark)).toContain('up-reader')
+  })
+
+  describe('a leftover `reader-gate` pending-restart entry from older code', () => {
+    it('is removed inside reader-ready, guarded, and not by the route-critical part', async () => {
+      const host = await openStack()
+      host.pendingRestarts = ['reader-gate']
+      const mark = host.calls.length
+      await run(host)
+      const after = host.steps.slice(mark)
+      expect(after.filter(step => step === 'remove:.pending-restarts')).toHaveLength(1)
+      expect(after).not.toContain('write:.pending-restarts')
+      // Nothing before the route is decided touched it; the removal is the first step of the reader group.
+      expect(after.indexOf('remove:.pending-restarts')).toBeGreaterThan(after.indexOf('up-caddy'))
+      expect(after.indexOf('remove:.pending-restarts')).toBeLessThan(after.indexOf('reader-dirs'))
+      expect(host.pendingRestarts).toEqual([])
+      expect(host.setStates()).toEqual(['open'])
+      expect(host.unguarded).toEqual([])
+      expect(host.unlocked).toEqual([])
+    })
+
+    it('is removed even when reader-ready then fails, so it never blocks `traces ingest open`', async () => {
+      const host = await openStack()
+      host.pendingRestarts = ['reader-gate']
+      host.options.override = failAt('reader-dirs')
+      const error = await failure(host)
+      expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+      expect(host.pendingRestarts).toEqual([])
+      expect(host.manualOpen()).toBe(true)
+    })
+
+    it('leaves other entries to the route-critical part: they are restarted, then cleared, as before', async () => {
+      const host = await openStack()
+      host.pendingRestarts = ['reader-gate', 'prometheus']
+      const mark = host.calls.length
+      await run(host)
+      expect(host.steps.slice(mark).filter(step => step === 'remove:.pending-restarts')).toHaveLength(1)
+      expect(host.pendingRestarts).toEqual([])
+    })
+  })
+})
+
+describe('reader-ready also requires the gate to see both upstreams', () => {
+  const gateOf = (error: Error, id: string) => (error as OperatorSurfaceError).result.gates.find(gate => gate.id === id)
+
+  it('reads /healthz through the gate container with `bun -e`, read only, and prints nothing but a verdict line', () => {
+    const script = readerHealthScript()
+    expect(script).toContain('# traces-step:reader-healthz')
+    expect(script).toContain(`${deployModule.COMPOSE} exec -T reader-gate bun -e `)
+    expect(script).toContain('http://127.0.0.1:8091/healthz')
+    expect(script.trimEnd().split('\n').at(-1)).toBe(`echo ${READER_HEALTH_SENTINEL}`)
+    expect(script).not.toMatch(/\b(?:curl|wget|cat|\.env|secrets)\b/)
+    expect(script).not.toMatch(/Authorization|Bearer|Basic/i)
+    expect(Bun.spawnSync(['bash', '-n', '-c', script]).exitCode).toBe(0)
+  })
+
+  it('parses the verdict line, and only with the sentinel', () => {
+    const done = `${READER_HEALTH_SENTINEL}\n`
+    expect(parseReaderHealth(`TRACES_READER_HEALTH langfuse=true grafana=true\n${done}`)).toEqual({
+      langfuse: true,
+      grafana: true,
+    })
+    expect(parseReaderHealth(`TRACES_READER_HEALTH langfuse=true grafana=false\n${done}`)).toEqual({
+      langfuse: true,
+      grafana: false,
+    })
+    expect(parseReaderHealth(`TRACES_READER_HEALTH unreachable\n${done}`)).toBe('unreachable')
+    for (const bad of [
+      '',
+      done,
+      'TRACES_READER_HEALTH langfuse=true grafana=true\n',
+      `TRACES_READER_HEALTH langfuse=yes grafana=true\n${done}`,
+      `TRACES_READER_HEALTH langfuse=true\n${done}`,
+    ]) {
+      expect({bad, parsed: parseReaderHealth(bad)}).toEqual({bad, parsed: undefined})
+    }
+  })
+
+  // The program really runs here, under Bun, against a local server that answers as the gate does.
+  it.each([
+    [200, {ok: true, langfuse: true, grafana: true}, 'langfuse=true grafana=true'],
+    [503, {ok: false, langfuse: true, grafana: false}, 'langfuse=true grafana=false'],
+    [503, {ok: false, langfuse: false, grafana: false}, 'langfuse=false grafana=false'],
+    [200, {ok: true}, 'langfuse=false grafana=false'],
+  ])('the program reports a %i answer %j as %s', async (status, body, line) => {
+    const server = Bun.serve({port: 0, fetch: () => Response.json(body, {status})})
+    try {
+      const proc = Bun.spawn(['bun', '-e', readerHealthProgram(`http://127.0.0.1:${server.port}/healthz`)], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: {PATH: process.env.PATH ?? ''},
+      })
+      expect((await new Response(proc.stdout).text()).trim()).toBe(`TRACES_READER_HEALTH ${line}`)
+    } finally {
+      await server.stop(true)
+    }
+  })
+
+  it.each([
+    ['nothing listens', () => Response.error()],
+    ['the answer is not JSON', () => new Response('<html>bad gateway</html>', {status: 502})],
+  ])('the program says unreachable when %s', async (_name, respond) => {
+    const server = Bun.serve({port: 0, fetch: respond})
+    const url = `http://127.0.0.1:${server.port}/healthz`
+    if (_name === 'nothing listens') await server.stop(true)
+    try {
+      const proc = Bun.spawn(['bun', '-e', readerHealthProgram(url)], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: {PATH: process.env.PATH ?? ''},
+      })
+      expect((await new Response(proc.stdout).text()).trim()).toBe('TRACES_READER_HEALTH unreachable')
+    } finally {
+      await server.stop(true)
+    }
+  })
+
+  it('passes when both upstreams answer: one read, after the gate started and before the embedder, with no credential', async () => {
+    const host = new FakeHost()
+    const {result} = await run(host)
+    expect(result.gates.find(gate => gate.id === 'reader-ready')).toMatchObject({status: 'pass', kind: 'operator'})
+    expect(host.count('reader-healthz')).toBe(1)
+    expect(host.indexOf('reader-healthz')).toBeGreaterThan(host.indexOf('up-reader'))
+    expect(host.indexOf('reader-healthz')).toBeLessThan(host.indexOf('up-embedder'))
+    const call = host.calls.find(entry => entry.step === 'reader-healthz')
+    expect(call?.stdin).toBeUndefined()
+    expect(call?.command).not.toMatch(/secrets|\.env|token|password/i)
+  })
+
+  it('retries within a window and passes when the upstreams come up', async () => {
+    const host = new FakeHost({
+      readerHealth: attempt => (attempt < 3 ? {langfuse: true, grafana: false} : {langfuse: true, grafana: true}),
+    })
+    const {result} = await run(host)
+    expect(host.count('reader-healthz')).toBe(3)
+    expect(result.gates.find(gate => gate.id === 'reader-ready')).toMatchObject({status: 'pass'})
+  })
+
+  it('sleeps between attempts, not after the last, over a window of about 30 seconds by default', async () => {
+    expect(deployModule.DEFAULT_LIMITS.readerHealthAttempts).toBeGreaterThanOrEqual(4)
+    const window =
+      (deployModule.DEFAULT_LIMITS.readerHealthAttempts - 1) * deployModule.DEFAULT_LIMITS.readerHealthIntervalMs
+    expect(window).toBeGreaterThanOrEqual(25_000)
+    expect(window).toBeLessThanOrEqual(40_000)
+    const sleeps: number[] = []
+    const host = new FakeHost({readerHealth: {langfuse: true, grafana: false}})
+    await failure(host, baseEnv(), {
+      sleep: async ms => {
+        sleeps.push(ms)
+      },
+      limits: {
+        proofAttempts: 2,
+        proofIntervalMs: 0,
+        retentionAttempts: 2,
+        retentionIntervalMs: 0,
+        verdictAttempts: 2,
+        verdictIntervalMs: 0,
+        grafanaAttempts: 3,
+        grafanaIntervalMs: 0,
+        readerHealthAttempts: 4,
+        readerHealthIntervalMs: 11,
+      },
+    })
+    // Four attempts, so three waits and none after the last.
+    expect(host.count('reader-healthz')).toBe(4)
+    expect(sleeps).toEqual([11, 11, 11])
+  })
+
+  it.each([
+    ['grafana', {langfuse: true, grafana: false}],
+    ['langfuse', {langfuse: false, grafana: true}],
+    ['langfuse and grafana', {langfuse: false, grafana: false}],
+  ] as const)(
+    'names %s in the gate detail when it stays down, fails the run and never touches an open route',
+    async (down, answer) => {
+      const host = await openStack()
+      host.options.readerHealth = answer
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect(failedOperatorGates((error as OperatorSurfaceError).result.gates).map(gate => gate.id)).toEqual([
+        'reader-ready',
+      ])
+      const gate = gateOf(error, 'reader-ready')
+      expect(gate).toMatchObject({status: 'fail', kind: 'operator'})
+      expect(gate?.detail).toContain(`${down} down`)
+      for (const up of ['langfuse', 'grafana'].filter(name => !down.includes(name)))
+        expect(gate?.detail).not.toContain(up)
+      expect(gate?.detail).toContain('Ingest is not affected')
+      expect((error as OperatorSurfaceError).ingest).toBe('open')
+      expect(host.served).toBe('open')
+      expect(host.setStates()).toEqual(['open'])
+      expect(host.marker).toBeUndefined()
+    },
+  )
+
+  it('fails reader-ready, and says the gate did not answer, when the gate cannot be read', async () => {
+    const host = await openStack()
+    host.options.readerHealth = 'unreachable'
+    const error = await failure(host)
+    expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+    expect(gateOf(error, 'reader-ready')?.detail).toContain('did not answer')
+    expect(host.setStates()).toEqual(['open'])
+    // The agent-route proof is not run for a gate that is not up.
+    expect(gateOf(error, 'agent-routes')).toMatchObject({status: 'skipped'})
+  })
+
+  it('treats a failing exec as no answer', async () => {
+    const host = await openStack()
+    host.options.override = failAt('reader-healthz')
+    const error = await failure(host)
+    expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+    expect(host.count('reader-healthz')).toBeGreaterThanOrEqual(3)
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('is not asked when the gate did not start', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.override = failAt('up-reader')
+    await failure(host)
+    expect(host.steps.slice(mark)).not.toContain('reader-healthz')
   })
 })
 
@@ -5584,6 +6035,8 @@ describe('overlapping deploys: the newest one owns the host', () => {
       'reader-file:token',
       'reader-file:langfuse',
       'reader-file:grafana',
+      'reader-source-dir',
+      'write:reader-gate/main.ts',
       'pull-reader',
       'up-reader',
       'up-private',
@@ -5612,6 +6065,7 @@ const ENV_FILE = {path: '.env', owner: 'root:root', mode: '0600', kind: 'env'} a
 const MUTATING_SCRIPTS: Record<string, string[]> = {
   prepareDirsScript: [prepareDirsScript(ID_A)],
   readerDirsScript: [readerDirsScript(ID_A)],
+  readerSourceDirScript: [readerSourceDirScript(ID_A)],
   tokenFileScript: SENDER_GROUPS.map(group => tokenFileScript(group, ID_A)),
   writeFileScript: [writeFileScript(ID_A, PLAIN_FILE), writeFileScript(ID_A, ENV_FILE, 'held')],
   removeOwnFileScript: ['.pending-restarts', 'secrets/bootstrap-pending'].map(path => removeOwnFileScript(ID_A, path)),
@@ -5639,6 +6093,7 @@ const READ_ONLY_SCRIPTS: readonly string[] = [
   'driftScript',
   'probeIngestScript',
   'probeAgentRoutesScript',
+  'readerHealthScript',
   'diskScript',
   'runningDigestScript',
   'bootstrapProbeScript',

@@ -61,6 +61,7 @@ const READ_ONLY_STEPS: readonly RegExp[] = [
   /^grafana-alerting$/,
   /^probe-ingest$/,
   /^probe-agent-routes$/,
+  /^reader-healthz$/,
   /^retention-read-/,
   /^raw:reporter-detail$/,
 ]
@@ -133,7 +134,14 @@ export interface FakeOptions {
    * What the two agent routes answer to a request without a token, instead of 401 on both. `0` is no answer in time.
    */
   agentRoutes?: Partial<Record<'langfuse' | 'grafana', number>>
+  /**
+   * What the reader gate's own `/healthz` reports through `docker compose exec`, or a function of the attempt (1 for the
+   * first). Default: both upstreams up. `unreachable` is a gate that does not answer.
+   */
+  readerHealth?: ReaderHealthAnswer | ((attempt: number) => ReaderHealthAnswer)
 }
+
+export type ReaderHealthAnswer = {langfuse: boolean; grafana: boolean} | 'unreachable'
 
 export class FakeHost {
   calls: Call[] = []
@@ -393,6 +401,19 @@ export class FakeHost {
       }
       case step === 'reader-dirs': {
         return ok('TRACES_READER_DIRS_READY\n')
+      }
+      case step === 'reader-source-dir': {
+        return ok('TRACES_READER_SOURCE_DIR_READY\n')
+      }
+      case step === 'reader-healthz': {
+        const attempt = this.count('reader-healthz')
+        const configured = this.options.readerHealth ?? {langfuse: true, grafana: true}
+        const answer = typeof configured === 'function' ? configured(attempt) : configured
+        const line =
+          answer === 'unreachable'
+            ? 'TRACES_READER_HEALTH unreachable'
+            : `TRACES_READER_HEALTH langfuse=${answer.langfuse} grafana=${answer.grafana}`
+        return ok(`${line}\nTRACES_READER_HEALTH_CHECKED\n`)
       }
       case step.startsWith('reader-file:'): {
         const kind = step.slice('reader-file:'.length)
@@ -869,6 +890,8 @@ export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): T
       verdictIntervalMs: 0,
       grafanaAttempts: 3,
       grafanaIntervalMs: 0,
+      readerHealthAttempts: 3,
+      readerHealthIntervalMs: 0,
     },
     ...overrides,
   }

@@ -2,8 +2,6 @@ import type {goke} from 'goke'
 import type {ActionCtx} from '../../lib/action-ctx'
 import type {RemoteDeps, RemoteResult} from './remote'
 
-import {createHash} from 'node:crypto'
-
 import * as clack from '@clack/prompts'
 import {z} from 'zod'
 
@@ -109,6 +107,7 @@ const KEPT_PREFIX = 'TRACES_READER_BACKEND_PREVIOUS='
 const CREDENTIAL_PREFIX = 'TRACES_READER_CREDENTIAL '
 const UNDO_PREFIX = 'TRACES_READER_BACKEND_UNDO='
 const KEY_SHA_PREFIX = 'TRACES_GRAFANA_KEY_SHA='
+const STAGED_SHA_PREFIX = 'TRACES_READER_BACKEND_STAGED_SHA='
 const LIVE_PREFIX = 'TRACES_GRAFANA_LIVE='
 const SETTLED_PREFIX = 'TRACES_READER_BACKEND_SETTLED='
 
@@ -196,6 +195,7 @@ export const READER_BACKEND_REMOTE = {
     OWN_LIKE_DIRECTORY,
     'chmod 0440 "$t"',
     `mv -f "$t" "$f${STAGED_SUFFIX}"`,
+    String.raw`printf '%s%s\n' '${STAGED_SHA_PREFIX}' ${SHA_OF(`$f${STAGED_SUFFIX}`)}`,
     `echo ${sentinels.stage}`,
   ),
   /**
@@ -495,6 +495,16 @@ async function langfuseInstall(host: string, pair: string, out: Out, deps: Backe
     return false
   }
 
+  // The hash of the file the host wrote, computed on the host: the pair is hashed nowhere on this side.
+  const stagedSha = new RegExp(`^${STAGED_SHA_PREFIX}([0-9a-f]{64})$`, 'm').exec(staged.stdout)?.[1]
+  if (stagedSha === undefined) {
+    await discard(host, 'langfuse', out, deps)
+    out.error(
+      'The host did not report a hash of the staged pair. It was not switched in and was removed; the live pair is unchanged.',
+    )
+    return false
+  }
+
   const verdict = await gateCheck(host, {kind: 'langfuse', credentialFile: gateFile(STAGED_SUFFIX)}, deps)
   if (!verdict.ok) {
     await discard(host, 'langfuse', out, deps)
@@ -505,8 +515,7 @@ async function langfuseInstall(host: string, pair: string, out: Out, deps: Backe
   }
   out.log('The staged pair reads Langfuse, and Langfuse refuses both a REST write and an MCP write by role.')
 
-  // The file's hash is the one of the pair this run wrote: a staged file swapped since is not the one that was checked.
-  const stagedSha = createHash('sha256').update(pair).digest('hex')
+  // The staged file's hash is the one the host reported when it wrote it: a file swapped since is not the one checked.
   const switched = await runOn(host, READER_BACKEND_REMOTE.switchLangfuse, deps, `${stagedSha}\n`)
   logSettled(switched, out)
   if (hasLine(switched, SWITCH_INCOMPLETE_SENTINEL)) {

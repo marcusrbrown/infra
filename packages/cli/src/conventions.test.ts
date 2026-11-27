@@ -41,6 +41,7 @@ const AGENT_MUTATING_COMMANDS = ['agent setup', 'agent storage', 'agent storage 
 //   traces open          — sensitive: tunnel to the UIs that hold full trace content
 //   traces ingest *      — mutating / host-reading: holds or opens the public ingest route
 //   traces sender *      — secret-bearing: mints, lists and revokes live sender tokens
+//   traces reader *      — secret-bearing: mints, lists and revokes reader tokens; installs the gate's backend credentials
 //
 // Defense-in-depth (secondary layer — opencode.jsonc `permission: deny`):
 // Even if MCP_ALLOWLIST were mistakenly re-expanded, opencode's native tool
@@ -76,6 +77,12 @@ const SENSITIVE_MCP_COMMANDS: readonly string[] = [
   'traces sender add',
   'traces sender list',
   'traces sender revoke',
+  'traces reader add',
+  'traces reader list',
+  'traces reader revoke',
+  'traces reader backend langfuse',
+  'traces reader backend grafana',
+  'traces reader backend status',
   'cliproxy monitor',
   'cliproxy reset-quota',
 ]

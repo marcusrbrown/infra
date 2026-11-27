@@ -1,0 +1,855 @@
+import type {goke} from 'goke'
+import type {ActionCtx} from '../../lib/action-ctx'
+import type {RemoteDeps, RemoteResult} from './remote'
+
+import * as clack from '@clack/prompts'
+import {z} from 'zod'
+
+import {
+  READER_GRAFANA_PLACEHOLDER,
+  READER_LANGFUSE_PLACEHOLDER,
+  TRACES_APP_DIR,
+  TRACES_GRAFANA_MCP_TOKEN_FILE,
+  TRACES_READER_LANGFUSE_FILE,
+} from './host'
+import {hasSentinel, runRemote, withRemoteSession} from './remote'
+import {guarded, keyOption, resolveTargets, script, type Out} from './token-common'
+
+declare const process: {
+  env: Record<string, string | undefined>
+  stdin: {isTTY?: boolean}
+}
+
+// ─── Reader backend credentials ───────────────────────────────────────────────
+//
+// The gate reads Langfuse with a Viewer key pair and Grafana MCP reads Grafana with a Viewer service-account token.
+// Both live in files on the host. These commands install, rotate and check them, and no credential ever reaches
+// this terminal, an argv, a log or a GitHub secret:
+//
+//   - Langfuse: the operator creates a Viewer key in the UI (the one manual step) and pastes it at a hidden prompt.
+//     It goes to the host on ssh stdin into a staged file, the gate's own check entrypoint proves it reads and that
+//     Langfuse refuses a REST write and an MCP write by role, and only then is it switched in. The old pair stays as
+//     `.previous` until the operator has deleted it in the UI and `--confirm-old-revoked` proves Langfuse refuses it.
+//   - Grafana: the service account and its token are made on the host, with the admin password the host holds,
+//     through Grafana's loopback API. The token is written by the host script straight into the staged file; only
+//     numeric ids come back. The commit point is a Grafana MCP read through the gate after the switch.
+//
+// Every check goes through the gate container (`docker compose exec -T reader-gate bun /app/check.ts`), which talks
+// to the upstream directly, so no reader token is needed and `reader add` has no bootstrap cycle with these.
+
+const STAGED_SUFFIX = '.staged'
+const PREVIOUS_SUFFIX = '.previous'
+
+/** The Langfuse pair as the gate container sees it; `check.ts` accepts the live, staged and previous names only. */
+const GATE_LANGFUSE_FILE = '/run/secrets/reader-gate/langfuse-basic'
+
+const COMPOSE = `docker compose --project-directory ${TRACES_APP_DIR}`
+
+const GRAFANA_ADMIN_PASSWORD_FILE = `${TRACES_APP_DIR}/secrets/grafana/admin-password`
+const GRAFANA_BASE = 'http://127.0.0.1:3001'
+
+/** The service account the token belongs to, matched by exact name. */
+export const GRAFANA_ACCOUNT_NAME = 'agent-reader'
+
+const CREDENTIALS = {
+  langfuse: {file: TRACES_READER_LANGFUSE_FILE, placeholder: READER_LANGFUSE_PLACEHOLDER},
+  grafana: {file: TRACES_GRAFANA_MCP_TOKEN_FILE, placeholder: READER_GRAFANA_PLACEHOLDER},
+} as const
+
+type Credential = keyof typeof CREDENTIALS
+
+const dirOf = (file: string): string => file.slice(0, file.lastIndexOf('/'))
+
+// ─── Remote commands ──────────────────────────────────────────────────────────
+
+const sentinels = {
+  stage: 'TRACES_READER_BACKEND_STAGED',
+  discard: 'TRACES_READER_BACKEND_DISCARDED',
+  switched: 'TRACES_READER_BACKEND_SWITCHED',
+  restore: 'TRACES_READER_BACKEND_RESTORED',
+  drop: 'TRACES_READER_BACKEND_PREVIOUS_DROPPED',
+  status: 'TRACES_READER_BACKEND_STATUS_DONE',
+  api: 'TRACES_GRAFANA_API_DONE',
+  createToken: 'TRACES_GRAFANA_CREATE_TOKEN_DONE',
+  tokenCheck: 'TRACES_GRAFANA_TOKEN_CHECK_DONE',
+} as const
+
+/** Printed, with exit 1 and nothing changed, when a previous pair is still waiting to be confirmed revoked. */
+export const PREVIOUS_PENDING_SENTINEL = 'TRACES_READER_BACKEND_PREVIOUS_PENDING'
+
+const HTTP_PREFIX = 'TRACES_GRAFANA_HTTP='
+const BODY_PREFIX = 'TRACES_GRAFANA_BODY='
+const TOKEN_ID_PREFIX = 'TRACES_GRAFANA_TOKEN_ID='
+const STAGED_PREFIX = 'TRACES_GRAFANA_STAGED='
+const KEPT_PREFIX = 'TRACES_READER_BACKEND_PREVIOUS='
+const CREDENTIAL_PREFIX = 'TRACES_READER_CREDENTIAL '
+const UNDO_PREFIX = 'TRACES_READER_BACKEND_UNDO='
+
+const langfuse = CREDENTIALS.langfuse
+const grafana = CREDENTIALS.grafana
+
+/** Give the staged file the directory's group, which deploy sets to the uid of the service that reads it. */
+const OWN_LIKE_DIRECTORY = `chown "$(ls -ld "$d" | awk '{print $3":"$4}')" "$t"`
+
+/**
+ * Curl through `-K -` with the admin password read from its secret file inside the script: the password is in a
+ * curl config on stdin through the shell's own `printf` (a builtin), so it is in no argv. The probe stays on
+ * loopback whatever the host's environment holds: `-q` skips `.curlrc`, `--noproxy '*'` ignores proxy variables.
+ * The password alphabet is URL-safe (`requireUrlSafe` in deploy), so it needs no quoting inside the config.
+ */
+const CURL = `curl -q -s --noproxy '*' --max-time 15 -K -`
+
+const STATUS_LINE = String.raw`code=$(printf '%s' "$out" | sed -n 's/.*TRACES_HTTP=\([0-9]*\)$/\1/p' | tail -n 1)`
+
+/** The only requests the host script makes for the operator CLI: method and path together, nothing else. */
+const API_ALLOWED = [
+  'GET /api/user',
+  'POST /api/serviceaccounts',
+  String.raw`GET /api/serviceaccounts/search\?perpage=100&query=${GRAFANA_ACCOUNT_NAME}`,
+  'GET /api/serviceaccounts/[0-9]+',
+  'GET /api/serviceaccounts/[0-9]+/tokens',
+  'DELETE /api/serviceaccounts/[0-9]+/tokens/[0-9]+',
+].join('|')
+
+export const READER_BACKEND_REMOTE = {
+  /**
+   * Write the pair on stdin to `langfuse-basic.staged`: a new file in the credential directory, owned like it, mode
+   * 0440, renamed into place. The shape is checked first; the placeholder is refused. A previous pair that has not
+   * been confirmed revoked stops it, so one old pair is never lost track of.
+   */
+  stageLangfuse: script(
+    'set -e',
+    'read -r pair',
+    'case "$pair" in pk-lf-*:sk-lf-*) ;; *) exit 1 ;; esac',
+    'case "$pair" in *[!A-Za-z0-9:_-]*) exit 1 ;; esac',
+    `case "\${pair#*:}" in *:*) exit 1 ;; esac`,
+    `[ "$pair" != '${READER_LANGFUSE_PLACEHOLDER}' ]`,
+    `d=${dirOf(langfuse.file)}`,
+    `f=${langfuse.file}`,
+    'test -d "$d"',
+    `if [ -e "$f${PREVIOUS_SUFFIX}" ]; then echo ${PREVIOUS_PENDING_SENTINEL}; exit 1; fi`,
+    'umask 077',
+    't=$(mktemp "$d/.langfuse-basic.XXXXXX")',
+    `trap 'rm -f "$t"' EXIT`,
+    'printf %s "$pair" > "$t"',
+    OWN_LIKE_DIRECTORY,
+    'chmod 0440 "$t"',
+    `mv -f "$t" "$f${STAGED_SUFFIX}"`,
+    `echo ${sentinels.stage}`,
+  ),
+  /**
+   * Make the staged Langfuse pair live. The live pair, unless it is the placeholder, is first copied to `.previous`.
+   * Prints whether a previous pair was kept. A previous pair already waiting stops it with nothing changed.
+   */
+  switchLangfuse: script(
+    'set -e',
+    `f=${langfuse.file}`,
+    `test -f "$f${STAGED_SUFFIX}"`,
+    `if [ -e "$f${PREVIOUS_SUFFIX}" ]; then echo ${PREVIOUS_PENDING_SENTINEL}; exit 1; fi`,
+    `kept=none`,
+    `if [ -f "$f" ] && [ "$(cat "$f")" != '${READER_LANGFUSE_PLACEHOLDER}' ]; then cp -p "$f" "$f${PREVIOUS_SUFFIX}"; kept=kept; fi`,
+    `mv -f "$f${STAGED_SUFFIX}" "$f"`,
+    `echo ${KEPT_PREFIX}$kept`,
+    `echo ${sentinels.switched}`,
+  ),
+  /** Remove a staged file that was not switched in. The only deletion besides the previous file. */
+  discardStaged: (credential: Credential): string =>
+    script('set -e', `f=${CREDENTIALS[credential].file}`, `rm -f "$f${STAGED_SUFFIX}"`, `echo ${sentinels.discard}`),
+  /** Remove the previous file, once its credential is proven refused. */
+  dropPrevious: (credential: Credential): string =>
+    script('set -e', `f=${CREDENTIALS[credential].file}`, `rm -f "$f${PREVIOUS_SUFFIX}"`, `echo ${sentinels.drop}`),
+  /**
+   * Make the staged Grafana token live. The live token is first copied to `.previous` (a placeholder counts: the
+   * proof that it is refused is then trivial). Without a live file there is nothing to keep.
+   */
+  switchGrafana: script(
+    'set -e',
+    `f=${grafana.file}`,
+    `test -f "$f${STAGED_SUFFIX}"`,
+    `rm -f "$f${PREVIOUS_SUFFIX}"`,
+    `if [ -f "$f" ]; then cp -p "$f" "$f${PREVIOUS_SUFFIX}"; fi`,
+    `mv -f "$f${STAGED_SUFFIX}" "$f"`,
+    `echo ${sentinels.switched}`,
+  ),
+  /**
+   * Undo a Grafana switch whose outcome is not known. A staged file still there means the switch never happened: it
+   * is removed and the live file was never touched (`unchanged`). Otherwise the previous token is put back as the
+   * live one (`restored`). Fails, changing nothing, when neither is possible.
+   */
+  undoGrafanaSwitch: script(
+    'set -e',
+    `f=${grafana.file}`,
+    `if [ -e "$f${STAGED_SUFFIX}" ]; then rm -f "$f${STAGED_SUFFIX}"; r=unchanged; else test -f "$f${PREVIOUS_SUFFIX}"; mv -f "$f${PREVIOUS_SUFFIX}" "$f"; r=restored; fi`,
+    `echo ${UNDO_PREFIX}$r`,
+    `echo ${sentinels.restore}`,
+  ),
+  /** The gate's check entrypoint, with its JSON on stdin. It prints one sentinel line and listens on no port. */
+  gateCheck: `${COMPOSE} exec -T reader-gate bun /app/check.ts`,
+  /**
+   * One Grafana API request from the host, as admin, on loopback. Stdin: the method, the path, then the body. Only
+   * the requests in the allowlist run, and never a token creation: that response holds the key, and its script
+   * writes it to a file instead of printing it. Prints the status and the body on one line.
+   */
+  grafanaApi: script(
+    'set -u',
+    'read -r method',
+    'read -r path',
+    'body=$(cat)',
+    `pw=${GRAFANA_ADMIN_PASSWORD_FILE}`,
+    `printf '%s %s' "$method" "$path" | grep -Eq '^(${API_ALLOWED})$' || exit 1`,
+    String.raw`case "$body" in *[!A-Za-z0-9:,{}\"_\ -]*) exit 1 ;; esac`,
+    'code=000',
+    'resp=',
+    `if [ -s "$pw" ]; then ${[
+      String.raw`esc=$(printf '%s' "$body" | sed 's/"/\\"/g')`,
+      String.raw`if [ -n "$body" ]; then data=$(printf 'data = "%s"\n' "$esc"); else data=; fi`,
+      String.raw`out=$({ printf 'user = "admin:%s"\n' "$(cat "$pw")"; [ -n "$data" ] && printf '%s\n' "$data"; } | ${CURL} -X "$method" -H 'content-type: application/json' -H 'accept: application/json' -w '\nTRACES_HTTP=%{http_code}' "${GRAFANA_BASE}$path") || true`,
+      STATUS_LINE,
+      String.raw`resp=$(printf '%s' "$out" | sed 's/TRACES_HTTP=[0-9]*$//' | tr -d '\n' | cut -c1-20000)`,
+    ].join('; ')}; fi`,
+    `echo ${HTTP_PREFIX}\${code:-000}`,
+    String.raw`printf '%s%s\n' '${BODY_PREFIX}' "$resp"`,
+    `echo ${sentinels.api}`,
+  ),
+  /**
+   * Create a token on the service account and write its key straight into `token.staged`. Stdin: the account id and
+   * the token name. Prints the status and the new token's id only: the key is never printed. A token made but not
+   * staged (no key in the answer) is reported by id so the caller can delete it.
+   */
+  createGrafanaToken: script(
+    'set -u',
+    'read -r id',
+    'read -r name',
+    `case "$id" in ''|*[!0-9]*) exit 1 ;; esac`,
+    `case "$name" in ''|*[!A-Za-z0-9-]*) exit 1 ;; esac`,
+    `pw=${GRAFANA_ADMIN_PASSWORD_FILE}`,
+    `f=${grafana.file}`,
+    `d=${dirOf(grafana.file)}`,
+    'test -d "$d"',
+    'umask 077',
+    't=$(mktemp "$d/.token.XXXXXX")',
+    `trap 'rm -f "$t"' EXIT`,
+    'code=000',
+    'out=',
+    `if [ -s "$pw" ]; then ${[
+      String.raw`out=$(printf 'user = "admin:%s"\ndata = "{\\"name\\":\\"%s\\",\\"secondsToLive\\":0}"\n' "$(cat "$pw")" "$name" | ${CURL} -X POST -H 'content-type: application/json' -H 'accept: application/json' -w '\nTRACES_HTTP=%{http_code}' "${GRAFANA_BASE}/api/serviceaccounts/$id/tokens") || true`,
+      STATUS_LINE,
+    ].join('; ')}; fi`,
+    String.raw`tid=$(printf '%s' "$out" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p' | head -n 1)`,
+    String.raw`key=$(printf '%s' "$out" | sed -n 's|.*"key":"\([A-Za-z0-9_=+/.-]*\)".*|\1|p' | head -n 1)`,
+    `echo ${HTTP_PREFIX}\${code:-000}`,
+    `if [ -n "$tid" ]; then echo ${TOKEN_ID_PREFIX}$tid; fi`,
+    `if [ "\${code:-000}" = 200 ] && [ -n "$key" ] && [ -n "$tid" ]; then printf %s "$key" > "$t"; ${OWN_LIKE_DIRECTORY}; chmod 0440 "$t"; mv -f "$t" "$f${STAGED_SUFFIX}"; echo ${STAGED_PREFIX}1; fi`,
+    `echo ${sentinels.createToken}`,
+  ),
+  /**
+   * Ask Grafana, with the token in one of the credential files, who it is signed in as: 200 for a live token, 401
+   * for a deleted one. Stdin: `staged`, `live` or `previous`. The token is read from the file and handed to curl as a
+   * config on stdin, so it is in no argv, and nothing of it is printed.
+   */
+  checkGrafanaToken: script(
+    'set -u',
+    'read -r which',
+    `f=${grafana.file}`,
+    `case "$which" in staged) file="$f${STAGED_SUFFIX}" ;; previous) file="$f${PREVIOUS_SUFFIX}" ;; live) file="$f" ;; *) exit 1 ;; esac`,
+    'code=000',
+    `if [ -s "$file" ]; then ${[
+      'tok=$(cat "$file")',
+      'case "$tok" in *[!A-Za-z0-9_=+/.-]*) tok= ;; esac',
+      String.raw`if [ -n "$tok" ]; then out=$(printf 'header = "Authorization: Bearer %s"\n' "$tok" | ${CURL} -w '\nTRACES_HTTP=%{http_code}' "${GRAFANA_BASE}/api/user") || true; ${STATUS_LINE}; fi`,
+    ].join('; ')}; fi`,
+    `echo ${HTTP_PREFIX}\${code:-000}`,
+    `echo ${sentinels.tokenCheck}`,
+  ),
+  /** Each credential as `placeholder`, `installed` or `pending-old-revocation`, by comparing files on the host. */
+  status: script(
+    'set -e',
+    ...(Object.keys(CREDENTIALS) as Credential[]).flatMap(name => {
+      const {file, placeholder} = CREDENTIALS[name]
+      return [
+        `f=${file}`,
+        `if [ ! -f "$f" ]; then s=missing; elif [ "$(cat "$f")" = '${placeholder}' ]; then s=placeholder; elif [ -f "$f${PREVIOUS_SUFFIX}" ]; then s=pending-old-revocation; else s=installed; fi`,
+        `echo ${CREDENTIAL_PREFIX}${name} $s`,
+        `if [ -f "$f${STAGED_SUFFIX}" ]; then echo ${CREDENTIAL_PREFIX}${name} staged-file-left-over; fi`,
+      ]
+    }),
+    `echo ${sentinels.status}`,
+  ),
+} as const
+
+// ─── The gate's check ─────────────────────────────────────────────────────────
+
+/** The check kinds `check.ts` takes: JSON on stdin, one sentinel line out. */
+type CheckInput = {kind: 'langfuse' | 'langfuse-refused'; credentialFile: string} | {kind: 'grafana-mcp'}
+
+type CheckVerdict = {ok: true} | {ok: false; reason: string}
+
+const SENTINEL_LINE = /^READER_CHECK_(OK|FAIL) ([a-z-]+)(?: ([a-z-]{1,40}))?$/
+
+/**
+ * Exactly one sentinel line, for the kind that was asked, or a failure. The exit code is not the verdict: the check
+ * exits 0 either way. An answer with no line, two lines, another kind or an unexpected reason is a failure.
+ */
+export function parseCheck(result: RemoteResult, kind: CheckInput['kind']): CheckVerdict {
+  const lines = result.stdout
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.startsWith('READER_CHECK_'))
+  if (lines.length !== 1) return {ok: false, reason: lines.length === 0 ? 'no-answer' : 'ambiguous-answer'}
+  const match = SENTINEL_LINE.exec(lines[0] ?? '')
+  if (match === null || match[2] !== kind) return {ok: false, reason: 'unrecognised-answer'}
+  if (match[1] === 'OK') return match[3] === undefined ? {ok: true} : {ok: false, reason: 'unrecognised-answer'}
+  return {ok: false, reason: match[3] ?? 'unspecified'}
+}
+
+async function gateCheck(host: string, input: CheckInput, deps: BackendDeps): Promise<CheckVerdict> {
+  const result = await runRemote(host, READER_BACKEND_REMOTE.gateCheck, {
+    spawn: deps.spawn,
+    session: deps.session,
+    stdin: `${JSON.stringify(input)}\n`,
+  })
+  return parseCheck(result, input.kind)
+}
+
+const gateFile = (suffix: '' | typeof STAGED_SUFFIX | typeof PREVIOUS_SUFFIX): string =>
+  `${GATE_LANGFUSE_FILE}${suffix}`
+
+// ─── Dependencies ─────────────────────────────────────────────────────────────
+
+export interface BackendDeps extends RemoteDeps {
+  /** Asks for a secret without echo. `undefined` is a cancelled prompt. The default reads the terminal. */
+  prompt?: ((message: string) => Promise<string | undefined>) | undefined
+  now?: (() => Date) | undefined
+}
+
+/** A hidden prompt on the terminal. A cancel (Ctrl-C) is `undefined`, never an exit: the ssh session closes first. */
+async function promptHidden(message: string): Promise<string | undefined> {
+  if (process.stdin.isTTY !== true) return undefined
+  const value = await clack.password({message, mask: ''})
+  return clack.isCancel(value) ? undefined : value
+}
+
+async function runOn(host: string, command: string, deps: BackendDeps, stdin?: string): Promise<RemoteResult> {
+  return runRemote(host, command, {spawn: deps.spawn, session: deps.session, ...(stdin === undefined ? {} : {stdin})})
+}
+
+const confirmed = (result: RemoteResult, sentinel: string): boolean => hasSentinel(result, sentinel)
+
+const describeFailure = (result: RemoteResult): string =>
+  `exit ${result.exitCode}: ${result.stderr || 'no confirmation'}`
+
+// ─── backend langfuse ─────────────────────────────────────────────────────────
+
+const PUBLIC_KEY_SHAPE = /^pk-lf-[A-Za-z\d-]{8,}$/
+const SECRET_KEY_SHAPE = /^sk-lf-[A-Za-z\d-]{8,}$/
+
+export interface LangfuseOptions {
+  key?: string | undefined
+  /** Prove Langfuse refuses the previous pair, then delete it. Prompts for nothing. */
+  confirmOldRevoked?: boolean | undefined
+}
+
+const PREVIOUS_PENDING_MESSAGE =
+  'A previous Langfuse pair is still waiting to be confirmed revoked. Delete it in the Langfuse UI (Settings, API keys) and run `infra traces reader backend langfuse --confirm-old-revoked` first. Nothing was changed.'
+
+async function langfuseInstall(host: string, pair: string, out: Out, deps: BackendDeps): Promise<boolean> {
+  const staged = await runOn(host, READER_BACKEND_REMOTE.stageLangfuse, deps, `${pair}\n`)
+  if (staged.stdout.split('\n').some(line => line.trim() === PREVIOUS_PENDING_SENTINEL)) {
+    out.error(PREVIOUS_PENDING_MESSAGE)
+    return false
+  }
+  if (!confirmed(staged, sentinels.stage)) {
+    out.error(`The host did not stage the pair (${describeFailure(staged)}). Nothing was changed.`)
+    return false
+  }
+
+  const verdict = await gateCheck(host, {kind: 'langfuse', credentialFile: gateFile(STAGED_SUFFIX)}, deps)
+  if (!verdict.ok) {
+    await discard(host, 'langfuse', out, deps)
+    out.error(
+      `The staged Langfuse pair failed the gate's check (${verdict.reason}). It was not switched in; the live pair is unchanged. A key that reads but is not refused a write has the wrong role: create a Viewer key.`,
+    )
+    return false
+  }
+  out.log('The staged pair reads Langfuse, and Langfuse refuses both a REST write and an MCP write by role.')
+
+  const switched = await runOn(host, READER_BACKEND_REMOTE.switchLangfuse, deps)
+  if (switched.stdout.split('\n').some(line => line.trim() === PREVIOUS_PENDING_SENTINEL)) {
+    await discard(host, 'langfuse', out, deps)
+    out.error(PREVIOUS_PENDING_MESSAGE)
+    return false
+  }
+  if (!confirmed(switched, sentinels.switched)) {
+    await discard(host, 'langfuse', out, deps)
+    out.error(
+      `The host did not confirm the switch (${describeFailure(switched)}). The staged pair was removed; check \`infra traces reader backend status\`.`,
+    )
+    return false
+  }
+  out.log('The new pair is live.')
+  const kept = /^TRACES_READER_BACKEND_PREVIOUS=(kept|none)$/m.exec(switched.stdout)?.[1]
+  out.log(
+    kept === 'kept'
+      ? 'The old pair is kept on the host as `.previous`. Delete that key in the Langfuse UI, then run `infra traces reader backend langfuse --confirm-old-revoked`.'
+      : 'There was no previous pair to revoke.',
+  )
+  return true
+}
+
+async function discard(host: string, credential: Credential, out: Out, deps: BackendDeps): Promise<void> {
+  const result = await runOn(host, READER_BACKEND_REMOTE.discardStaged(credential), deps)
+  if (!confirmed(result, sentinels.discard)) {
+    out.error(`The staged ${credential} file could not be removed (${describeFailure(result)}). Remove it by hand.`)
+  }
+}
+
+async function langfuseConfirm(host: string, out: Out, deps: BackendDeps): Promise<boolean> {
+  const verdict = await gateCheck(host, {kind: 'langfuse-refused', credentialFile: gateFile(PREVIOUS_SUFFIX)}, deps)
+  if (!verdict.ok) {
+    out.error(
+      verdict.reason === 'credential-missing'
+        ? 'There is no previous Langfuse pair waiting. Nothing was changed.'
+        : verdict.reason === 'still-accepted'
+          ? 'Langfuse still accepts the previous pair. Delete that key in the Langfuse UI, then run this again. Nothing was changed.'
+          : `Could not prove Langfuse refuses the previous pair (${verdict.reason}). The previous file was kept.`,
+    )
+    return false
+  }
+  out.log('Langfuse refuses the previous pair.')
+  const dropped = await runOn(host, READER_BACKEND_REMOTE.dropPrevious('langfuse'), deps)
+  if (!confirmed(dropped, sentinels.drop)) {
+    out.error(`The previous file could not be removed (${describeFailure(dropped)}). Remove it by hand.`)
+    return false
+  }
+  out.log('The previous pair was deleted from the host.')
+  return true
+}
+
+export async function tracesReaderBackendLangfuseAction(
+  options: LangfuseOptions,
+  ctx: ActionCtx,
+  deps: BackendDeps = {},
+): Promise<void> {
+  const secrets: string[] = []
+  // The prompt comes before any connection: a cancel or a bad paste costs no ssh session, and a long wait cannot
+  // outlive the multiplexed connection.
+  let pair: string | undefined
+  let promptFailure: string | undefined
+  if (options.confirmOldRevoked !== true) {
+    const ask = deps.prompt ?? promptHidden
+    const publicKey = await ask('Langfuse Viewer public key (pk-lf-...)')
+    if (publicKey !== undefined) secrets.push(publicKey)
+    const secretKey = publicKey === undefined ? undefined : await ask('Langfuse Viewer secret key (sk-lf-...)')
+    if (secretKey !== undefined) secrets.push(secretKey)
+    if (publicKey === undefined || secretKey === undefined) {
+      promptFailure =
+        'No key pair was entered (the prompt needs a terminal and was cancelled or unavailable). Nothing was changed.'
+    } else if (!PUBLIC_KEY_SHAPE.test(publicKey.trim()) || !SECRET_KEY_SHAPE.test(secretKey.trim())) {
+      promptFailure = 'That is not a Langfuse key pair: expected pk-lf-... and sk-lf-.... Nothing was changed.'
+    } else {
+      pair = `${publicKey.trim()}:${secretKey.trim()}`
+      secrets.push(pair)
+    }
+  }
+
+  const ok = await withRemoteSession(deps.spawn, session =>
+    guarded(ctx, secrets, async out => {
+      if (promptFailure !== undefined) {
+        out.error(promptFailure)
+        return false
+      }
+      const targets = resolveTargets(options.key, false)
+      if (!targets.ok) {
+        out.error(targets.error)
+        return false
+      }
+      const withSession = {...deps, session}
+      if (options.confirmOldRevoked === true) return langfuseConfirm(targets.host, out, withSession)
+      return langfuseInstall(targets.host, pair ?? '', out, withSession)
+    }),
+  )
+  if (!ok) ctx.process.exit(1)
+}
+
+// ─── backend grafana ──────────────────────────────────────────────────────────
+
+const serviceAccountSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string(),
+  role: z.string().optional(),
+  isDisabled: z.boolean().optional(),
+})
+const searchSchema = z.object({serviceAccounts: z.array(serviceAccountSchema)})
+const tokenListSchema = z.array(z.object({id: z.number().int().positive()}))
+
+interface ApiAnswer {
+  code: number | 'none'
+  body: unknown
+}
+
+/** One Grafana API request through the host. The sign-in is a request like any other: Grafana has no session here. */
+async function grafanaApi(
+  host: string,
+  method: 'GET' | 'POST' | 'DELETE',
+  path: string,
+  body: unknown,
+  deps: BackendDeps,
+): Promise<ApiAnswer> {
+  const result = await runOn(
+    host,
+    READER_BACKEND_REMOTE.grafanaApi,
+    deps,
+    `${method}\n${path}\n${body === undefined ? '' : JSON.stringify(body)}`,
+  )
+  if (!confirmed(result, sentinels.api)) return {code: 'none', body: undefined}
+  const code = /^TRACES_GRAFANA_HTTP=(\d{3})$/m.exec(result.stdout)?.[1]
+  const text = /^TRACES_GRAFANA_BODY=(.*)$/m.exec(result.stdout)?.[1] ?? ''
+  let parsed: unknown
+  try {
+    parsed = text === '' ? undefined : JSON.parse(text)
+  } catch {
+    parsed = undefined
+  }
+  return {code: code === undefined || code === '000' ? 'none' : Number(code), body: parsed}
+}
+
+const isOk = (answer: ApiAnswer): boolean => typeof answer.code === 'number' && answer.code >= 200 && answer.code < 300
+const describeCode = (answer: ApiAnswer): string => (answer.code === 'none' ? 'no answer' : String(answer.code))
+
+async function tokenCheck(
+  host: string,
+  which: 'staged' | 'previous' | 'live',
+  deps: BackendDeps,
+): Promise<number | 'none'> {
+  const result = await runOn(host, READER_BACKEND_REMOTE.checkGrafanaToken, deps, `${which}\n`)
+  if (!confirmed(result, sentinels.tokenCheck)) return 'none'
+  const code = /^TRACES_GRAFANA_HTTP=(\d{3})$/m.exec(result.stdout)?.[1]
+  return code === undefined || code === '000' ? 'none' : Number(code)
+}
+
+type Step =
+  | 'sign-in'
+  | 'find-service-account'
+  | 'create-service-account'
+  | 'create-token'
+  | 'check-staged-token'
+  | 'switch'
+  | 'check-mcp-read'
+
+/** What a run that failed before the commit point must undo, and what it could not. */
+async function rollBack(
+  host: string,
+  accountId: number,
+  tokenId: number,
+  switched: boolean,
+  out: Out,
+  deps: BackendDeps,
+): Promise<void> {
+  if (switched) {
+    const restored = await runOn(host, READER_BACKEND_REMOTE.undoGrafanaSwitch, deps)
+    if (!confirmed(restored, sentinels.restore)) {
+      // The live file may still point at the new token, so it is not deleted: that would take reads down.
+      out.error(
+        `The previous token could not be put back (${describeFailure(restored)}). Token ${tokenId} was NOT deleted, because the live file may still use it. Fix the file by hand or run this command again.`,
+      )
+      return
+    }
+    out.log(
+      restored.stdout.includes(`${UNDO_PREFIX}unchanged`)
+        ? 'The live token file was never changed; the previous token keeps serving reads.'
+        : 'The previous token was put back; it keeps serving reads.',
+    )
+  } else {
+    await discard(host, 'grafana', out, deps)
+  }
+  const deleted = await grafanaApi(
+    host,
+    'DELETE',
+    `/api/serviceaccounts/${accountId}/tokens/${tokenId}`,
+    undefined,
+    deps,
+  )
+  if (isOk(deleted) || deleted.code === 404) out.log(`The new token ${tokenId} was deleted.`)
+  else {
+    out.error(
+      `The new token ${tokenId} could not be deleted (Grafana answered ${describeCode(deleted)}). It is not in use: the next run deletes it.`,
+    )
+  }
+}
+
+async function grafanaInstall(host: string, out: Out, deps: BackendDeps): Promise<boolean> {
+  const fail = (step: Step, why: string): false => {
+    out.error(`Step ${step} failed: ${why}`)
+    return false
+  }
+
+  // One sign-in, and no second try: Grafana counts failed logins per user, and a wrong password must cost one.
+  const signIn = await grafanaApi(host, 'GET', '/api/user', undefined, deps)
+  if (!isOk(signIn)) {
+    return fail(
+      'sign-in',
+      `Grafana answered ${describeCode(signIn)} to the admin sign-in. Nothing was changed, and it was not tried again. See "Grafana sign-in check fails" in docs/runbooks/trace-collection.md.`,
+    )
+  }
+
+  const found = await grafanaApi(
+    host,
+    'GET',
+    `/api/serviceaccounts/search?perpage=100&query=${GRAFANA_ACCOUNT_NAME}`,
+    undefined,
+    deps,
+  )
+  const search = isOk(found) ? searchSchema.safeParse(found.body) : undefined
+  if (search === undefined || !search.success) {
+    return fail('find-service-account', `Grafana answered ${describeCode(found)}. Nothing was changed.`)
+  }
+  // The search matches by substring; only the exact name is the account.
+  const exact = search.data.serviceAccounts.filter(account => account.name === GRAFANA_ACCOUNT_NAME)
+  if (exact.length > 1) {
+    return fail(
+      'find-service-account',
+      `${exact.length} service accounts are named ${GRAFANA_ACCOUNT_NAME}. Nothing was changed.`,
+    )
+  }
+  let accountId: number
+  const existing = exact[0]
+  if (existing === undefined) {
+    const created = await grafanaApi(
+      host,
+      'POST',
+      '/api/serviceaccounts',
+      {name: GRAFANA_ACCOUNT_NAME, role: 'Viewer', isDisabled: false},
+      deps,
+    )
+    const account = isOk(created) ? serviceAccountSchema.safeParse(created.body) : undefined
+    if (account === undefined || !account.success) {
+      return fail('create-service-account', `Grafana answered ${describeCode(created)}. Nothing was changed.`)
+    }
+    accountId = account.data.id
+    out.log(`Created service account ${accountId} (${GRAFANA_ACCOUNT_NAME}, Viewer).`)
+  } else {
+    if (existing.role !== 'Viewer' || existing.isDisabled === true) {
+      return fail(
+        'find-service-account',
+        `service account ${existing.id} (${GRAFANA_ACCOUNT_NAME}) is ${existing.isDisabled === true ? 'disabled' : `${existing.role ?? 'unknown'}, not Viewer`}. Fix it in Grafana. Nothing was changed.`,
+      )
+    }
+    accountId = existing.id
+    out.log(`Using service account ${accountId} (${GRAFANA_ACCOUNT_NAME}, Viewer).`)
+  }
+
+  const stamp = (deps.now?.() ?? new Date()).toISOString().replaceAll(/\D/g, '').slice(0, 14)
+  const made = await runOn(
+    host,
+    READER_BACKEND_REMOTE.createGrafanaToken,
+    deps,
+    `${accountId}\n${GRAFANA_ACCOUNT_NAME}-${stamp}\n`,
+  )
+  const tokenId = Number(/^TRACES_GRAFANA_TOKEN_ID=(\d+)$/m.exec(made.stdout)?.[1])
+  const madeCode = /^TRACES_GRAFANA_HTTP=(\d{3})$/m.exec(made.stdout)?.[1]
+  const staged = made.stdout.split('\n').some(line => line.trim() === `${STAGED_PREFIX}1`)
+  if (!confirmed(made, sentinels.createToken) || madeCode !== '200' || !staged || Number.isNaN(tokenId)) {
+    if (Number.isNaN(tokenId)) {
+      out.error(
+        `Step create-token failed: no token was created (${madeCode === undefined ? describeFailure(made) : `Grafana answered ${madeCode}`}). Nothing was changed.`,
+      )
+      await discard(host, 'grafana', out, deps)
+    } else {
+      out.error(
+        `Step create-token failed: token ${tokenId} exists but was not staged (Grafana answered ${madeCode ?? 'nothing'}).`,
+      )
+      await rollBack(host, accountId, tokenId, false, out, deps)
+    }
+    return false
+  }
+  out.log(`Created token ${tokenId} on service account ${accountId}. Its key stays on the host.`)
+
+  // From here until the MCP read passes, any failure undoes the new token and leaves the previous one serving.
+  const direct = await tokenCheck(host, 'staged', deps)
+  if (direct !== 200) {
+    out.error(
+      `Step check-staged-token failed: Grafana answered ${direct === 'none' ? 'no answer' : direct} to the new token. The live file is unchanged.`,
+    )
+    await rollBack(host, accountId, tokenId, false, out, deps)
+    return false
+  }
+
+  const switched = await runOn(host, READER_BACKEND_REMOTE.switchGrafana, deps)
+  if (!confirmed(switched, sentinels.switched)) {
+    out.error(`Step switch failed: ${describeFailure(switched)}. Checking whether the live file changed.`)
+    // The mv may have landed with only the reply lost: put the previous token back if the file moved.
+    await rollBack(host, accountId, tokenId, true, out, deps)
+    return false
+  }
+
+  const mcp = await gateCheck(host, {kind: 'grafana-mcp'}, deps)
+  if (!mcp.ok) {
+    out.error(`Step check-mcp-read failed: the gate's Grafana MCP read answered ${mcp.reason}.`)
+    await rollBack(host, accountId, tokenId, true, out, deps)
+    return false
+  }
+  out.log('The gate reads Grafana through the new token: it is live, and is never rolled back from here.')
+  return grafanaCleanup(host, accountId, tokenId, out, deps)
+}
+
+/** Delete every other token on the account, prove each gone, prove the previous token refused, then drop it. */
+async function grafanaCleanup(
+  host: string,
+  accountId: number,
+  keep: number,
+  out: Out,
+  deps: BackendDeps,
+): Promise<boolean> {
+  const tokensPath = `/api/serviceaccounts/${accountId}/tokens`
+  const listing = await grafanaApi(host, 'GET', tokensPath, undefined, deps)
+  const parsed = isOk(listing) ? tokenListSchema.safeParse(listing.body) : undefined
+  if (parsed === undefined || !parsed.success) {
+    out.error(
+      `Cleanup could not list the account's tokens (Grafana answered ${describeCode(listing)}). The new token ${keep} is live. Run this command again to delete the others.`,
+    )
+    return false
+  }
+  const others = parsed.data.map(token => token.id).filter(id => id !== keep)
+  const failedDeletes: number[] = []
+  for (const id of others) {
+    const deleted = await grafanaApi(host, 'DELETE', `${tokensPath}/${id}`, undefined, deps)
+    if (!isOk(deleted) && deleted.code !== 404) failedDeletes.push(id)
+  }
+
+  // Read back by id: a token whose value this host never held can only be proven gone by its absence from the list.
+  const readBack = await grafanaApi(host, 'GET', tokensPath, undefined, deps)
+  const after = isOk(readBack) ? tokenListSchema.safeParse(readBack.body) : undefined
+  const remaining =
+    after === undefined || !after.success ? others : after.data.map(token => token.id).filter(id => id !== keep)
+  if (after === undefined || !after.success) {
+    out.error(
+      `Cleanup could not read the token list back (Grafana answered ${describeCode(readBack)}), so deletions are unproven.`,
+    )
+  }
+
+  const previous = await tokenCheck(host, 'previous', deps)
+  const previousRefused = previous === 401
+  if (!previousRefused) {
+    out.error(
+      previous === 200
+        ? 'Grafana still accepts the previous token. It is kept as `.previous`; run this command again.'
+        : 'Could not prove Grafana refuses the previous token. It is kept as `.previous`; run this command again.',
+    )
+  }
+
+  const clean = remaining.length === 0 && failedDeletes.length === 0 && previousRefused && after?.success === true
+  if (!clean) {
+    if (remaining.length > 0 || failedDeletes.length > 0) {
+      out.error(
+        `Token ids still to delete on service account ${accountId}: ${[...new Set([...remaining, ...failedDeletes])].sort((a, b) => a - b).join(', ')}. Token ${keep} stays live. Run this command again: it deletes them and converges.`,
+      )
+    }
+    return false
+  }
+
+  const dropped = await runOn(host, READER_BACKEND_REMOTE.dropPrevious('grafana'), deps)
+  if (!confirmed(dropped, sentinels.drop)) {
+    out.error(`The previous file could not be removed (${describeFailure(dropped)}). Remove it by hand.`)
+    return false
+  }
+  out.log(
+    others.length === 0
+      ? `Service account ${accountId} holds token ${keep} only.`
+      : `Deleted tokens ${others.join(', ')}; service account ${accountId} holds token ${keep} only. Grafana refuses the previous token.`,
+  )
+  return true
+}
+
+export async function tracesReaderBackendGrafanaAction(
+  options: {key?: string | undefined},
+  ctx: ActionCtx,
+  deps: BackendDeps = {},
+): Promise<void> {
+  const ok = await withRemoteSession(deps.spawn, session =>
+    guarded(ctx, [], async out => {
+      const targets = resolveTargets(options.key, false)
+      if (!targets.ok) {
+        out.error(targets.error)
+        return false
+      }
+      return grafanaInstall(targets.host, out, {...deps, session})
+    }),
+  )
+  if (!ok) ctx.process.exit(1)
+}
+
+// ─── backend status ───────────────────────────────────────────────────────────
+
+const STATE_TEXT: Record<string, string> = {
+  placeholder: 'placeholder (no credential installed: the route answers 502)',
+  installed: 'installed',
+  'pending-old-revocation': 'installed; the old credential is not yet confirmed revoked',
+  missing: 'missing (run a deploy)',
+  'staged-file-left-over': 'a staged file is left over from an interrupted run',
+}
+
+export async function tracesReaderBackendStatusAction(
+  options: {key?: string | undefined},
+  ctx: ActionCtx,
+  deps: BackendDeps = {},
+): Promise<void> {
+  const ok = await withRemoteSession(deps.spawn, session =>
+    guarded(ctx, [], async out => {
+      const targets = resolveTargets(options.key, false)
+      if (!targets.ok) {
+        out.error(targets.error)
+        return false
+      }
+      const result = await runOn(targets.host, READER_BACKEND_REMOTE.status, {...deps, session})
+      if (!confirmed(result, sentinels.status)) {
+        out.error(`Could not read the credential state (${describeFailure(result)}).`)
+        return false
+      }
+      const seen = new Set<string>()
+      for (const match of result.stdout.matchAll(/^TRACES_READER_CREDENTIAL (langfuse|grafana) ([a-z-]+)$/gm)) {
+        const [, name, state] = match
+        if (name === undefined || state === undefined) continue
+        seen.add(name)
+        out.log(`${name}: ${STATE_TEXT[state] ?? 'unknown state'}`)
+      }
+      if (seen.size !== 2) {
+        out.error('The host did not report both credentials.')
+        return false
+      }
+      return true
+    }),
+  )
+  if (!ok) ctx.process.exit(1)
+}
+
+// ─── Command registration ─────────────────────────────────────────────────────
+
+export function registerTracesReaderBackend(cli: ReturnType<typeof goke>): void {
+  cli
+    .command(
+      'traces reader backend langfuse',
+      'Install or rotate the Langfuse Viewer key the reader gate reads with. Prompts for the pair without echo, proves it on the host (reads; REST and MCP writes refused by role), then switches it in and keeps the old pair until --confirm-old-revoked.',
+    )
+    .option(
+      '--confirm-old-revoked',
+      'Prove Langfuse refuses the previous pair (delete it in the UI first), then delete it from the host.',
+    )
+    .option('--key [key]', keyOption)
+    .action((options, ctx) => tracesReaderBackendLangfuseAction(options, ctx))
+
+  cli
+    .command(
+      'traces reader backend grafana',
+      'Create or rotate the Grafana service-account token (agent-reader, Viewer) on the host. The key never leaves the host: only ids are printed. Proves a Grafana MCP read through the gate, then deletes every other token.',
+    )
+    .option('--key [key]', keyOption)
+    .action((options, ctx) => tracesReaderBackendGrafanaAction(options, ctx))
+
+  cli
+    .command(
+      'traces reader backend status',
+      'Report each reader backend credential as placeholder, installed or pending old-key revocation. Never prints a value.',
+    )
+    .option('--key [key]', keyOption)
+    .action((options, ctx) => tracesReaderBackendStatusAction(options, ctx))
+}

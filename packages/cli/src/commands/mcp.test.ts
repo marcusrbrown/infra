@@ -111,6 +111,12 @@ const CLI_ONLY_TOOLS = [
   'traces_sender_add',
   'traces_sender_list',
   'traces_sender_revoke',
+  'traces_reader_add',
+  'traces_reader_list',
+  'traces_reader_revoke',
+  'traces_reader_backend_langfuse',
+  'traces_reader_backend_grafana',
+  'traces_reader_backend_status',
   // Snapshot writes the public history directory: CLI-only, run by the status-snapshot workflow
   'status_snapshot',
 ].sort()

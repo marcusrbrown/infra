@@ -167,6 +167,23 @@ const FLOCK_SHIM = [
   '',
 ].join('\n')
 
+/**
+ * Put the host tools the token scripts use into `shimDir`, where the machine running the tests lacks them: GNU
+ * `sha256sum` (a `shasum` wrapper) and util-linux `flock` (the perl shim above). Returns the directory to put first on PATH.
+ */
+export function installHostShims(shimDir: string): string {
+  mkdirSync(shimDir, {recursive: true})
+  if (Bun.which('sha256sum') === null) {
+    writeFileSync(join(shimDir, 'sha256sum'), '#!/bin/sh\nexec shasum -a 256 "$@"\n')
+    chmodSync(join(shimDir, 'sha256sum'), 0o755)
+  }
+  if (!HAS_REAL_FLOCK && CAN_LOCK) {
+    writeFileSync(join(shimDir, 'flock'), FLOCK_SHIM)
+    chmodSync(join(shimDir, 'flock'), 0o755)
+  }
+  return shimDir
+}
+
 export interface ScratchHost {
   /** The directory standing in for the app directory. */
   dir: string

@@ -51,7 +51,8 @@ interface Reply {
   headers: Headers
 }
 
-const ROLE_DENIAL = /do not have permission/i
+// Langfuse v4.86.0 `deniedError` (web/src/features/rbac/authorize.ts): the text names the missing action, for REST and MCP alike.
+const ROLE_DENIAL = /^Access denied\. The "scores:save" permission is required to access this resource\.$/
 const WRITE_NAME =
   /(?:^|_)(?:create|update|delete|remove|write|patch|add|set|import|upload|send|trigger|restore)(?:_|$)/
 const ACCEPT = 'application/json, text/event-stream'

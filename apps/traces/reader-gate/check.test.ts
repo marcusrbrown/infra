@@ -8,7 +8,7 @@ import {GRAFANA_PLACEHOLDER, LANGFUSE_PLACEHOLDER} from './constants'
 const PAIR = 'pk-lf-viewer1:sk-lf-viewer1'
 const AUTH = `Basic ${Buffer.from(PAIR).toString('base64')}`
 const STAGED = '/run/secrets/reader-gate/langfuse-basic.staged'
-const DENIAL = 'Access denied. You do not have permission to access this resource.'
+const DENIAL = 'Access denied. The "scores:save" permission is required to access this resource.'
 
 interface Recorded {
   url: string
@@ -220,6 +220,10 @@ describe('langfuse check', () => {
     [
       'a 403 for a key that is not project-scoped',
       () => json({message: 'Access denied: MCP requires project-scoped API keys with BasicAuth'}, 403),
+    ],
+    [
+      'a 403 for a different missing action',
+      () => json({message: 'Access denied. The "scores:read" permission is required to access this resource.'}, 403),
     ],
     ['rejected as unauthenticated (401)', () => json({message: 'Unauthorized'}, 401)],
     ['a server error (500)', () => json({message: DENIAL}, 500)],

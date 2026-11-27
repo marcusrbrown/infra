@@ -7,16 +7,15 @@ Commands run from a checkout whose `bun install` is current. CLI commands reach 
 A few steps use plain `ssh`. Raw `ssh` does not read `TRACES_SSH_KEY` from the environment as the CLI does. Define this helper in the shell (bash or zsh), from the repository root. Each call writes the key that `TRACES_SSH_KEY` holds in the root `.env` to a fresh mode-0600 temporary file and removes it afterwards:
 
 ```bash
-traces_ssh() {
-  local key rc
-  key=$(mktemp) || return 1
-  chmod 600 "$key"
-  bun --env-file=.env -e 'process.stdout.write(process.env.TRACES_SSH_KEY + "\n")' > "$key"
+traces_ssh() (
+  set +e
+  key=$(mktemp) || exit 1
+  trap 'rm -f "$key"' EXIT
+  chmod 600 "$key" || exit 1
+  bun --env-file=.env -e 'process.stdout.write((process.env.TRACES_SSH_KEY ?? "") + "\n")' > "$key" || exit 1
+  grep -q 'PRIVATE KEY' "$key" || { echo 'traces_ssh: TRACES_SSH_KEY is not set in .env' >&2; exit 1; }
   ssh -i "$key" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=.github/known_hosts root@traces.fro.bot "$@"
-  rc=$?
-  rm -f "$key"
-  return $rc
-}
+)
 ```
 
 The trailing newline matters: a key without one is refused. `IdentitiesOnly=yes` offers only the key given with `-i`. `StrictHostKeyChecking=yes` with the pinned file refuses an unknown or changed host key. Later steps call `traces_ssh '<command>'`.
@@ -469,16 +468,19 @@ Run these in order the first time. A failure at any step stops the rollout befor
    done
    ```
 
-   Prove the rate limit. The limit is a fixed 60-second window, so a request sent after the burst can land in a fresh window; the loop reads the headers of each answer and stops at the first `429`, which must carry a `Retry-After`. It sends at most 250 reads:
+   Prove the rate limit. The limit is a fixed 60-second window, so a request sent after the burst can land in a fresh window; the loop reads each answer and stops at the first `429`, which must be the gate's own rate refusal with a `Retry-After`. It sends at most 250 reads:
 
    ```bash
-   for i in $(seq 1 250); do
-     h=$(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$F")" | curl -sS -K - -D - -o /dev/null "$O/agent/langfuse/api/public/health")
-     if printf '%s' "$h" | grep -q '^HTTP/[0-9.]* 429'; then echo "429 at request $i"; printf '%s' "$h" | grep -i '^retry-after'; break; fi
-   done
+   ok=; for i in $(seq 1 250); do
+     r=$(printf 'header = "Authorization: Bearer %s"\n' "$(cat "$F")" | curl -sS -K - -D - "$O/agent/langfuse/api/public/health") || { ok=fail; echo "request $i failed: the probe is broken, not the limit"; break; }
+     printf '%s' "$r" | grep -q '^HTTP/[0-9.]* 429' || continue
+     printf '%s' "$r" | grep -q '"reason":"rate"' || { ok=fail; echo "429 at request $i was not the gate's rate refusal"; break; }
+     printf '%s' "$r" | grep -iq '^retry-after: [0-9]' || { ok=fail; echo "429 at request $i had no Retry-After"; break; }
+     ok=1; echo "rate refusal at request $i"; printf '%s' "$r" | grep -i '^retry-after'; break
+   done; [ -n "$ok" ] || echo 'no rate refusal'
    ```
 
-   It prints `429 at request <n>` and a `retry-after: <seconds>` line. No output means no request was refused: the limit does not hold.
+   It must print `rate refusal at request <n>` and a `retry-after: <seconds>` line. The gate's own refusal carries `"reason":"rate"` in its body; a `429` that Langfuse sends through does not. Any other line stops the rollout. `no rate refusal` after 250 requests within a minute means the limit does not hold; if the loop took more than a minute, the burst was too slow to fill one 60-second window, so run it again before concluding.
 
    Every answer above must match its comment. A failure stops the rollout: go to step 5, then fix the cause.
 

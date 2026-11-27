@@ -4,7 +4,8 @@
 // the verdict):
 //
 //   {"kind":"langfuse","credentialFile":"/run/secrets/reader-gate/langfuse-basic.staged"}
-//       The pair in that file reads from Langfuse over REST and MCP, and Langfuse refuses a REST write and an MCP
+//       The pair in that file reads from Langfuse over REST (`GET /api/public/projects`, a route that events-only mode
+//       serves, unlike the v1 trace routes) and MCP, and Langfuse refuses a REST write and an MCP
 //       write tool call because of the key's role. A success, a network error, a validation error or any other
 //       denial is a failure: only an authorisation denial proves a Viewer key.
 //   {"kind":"langfuse-refused","credentialFile":"/run/secrets/reader-gate/langfuse-basic.previous"}
@@ -14,10 +15,12 @@
 //       service-account token file, so the check sends no credential.
 //
 //   READER_CHECK_OK <kind>
-//   READER_CHECK_FAIL <kind> <reason>        <reason> is one of a fixed set of words
+//   READER_CHECK_FAIL <kind> <reason>        <reason> is one of a fixed set of words; a reason for an unexpected
+//                                            Langfuse reply ends in `:<status>`, for example `read-failed:404`
 //
 // The check goes straight to the upstream, with no reader token and no gate. Nothing it prints can carry a credential:
-// the sentinel is built from fixed words only. The credential file must be one of the Langfuse credential files.
+// the sentinel is built from fixed words and a three-digit status code only. The credential file must be one of the
+// Langfuse credential files.
 // The write probes send empty bodies and arguments, so they change nothing even if a backend wrongly accepted them.
 
 import type {Env} from './config'
@@ -183,8 +186,14 @@ function result(reply: Reply): Record<string, unknown> | null {
 
 // ─── Langfuse ─────────────────────────────────────────────────────────────────
 
+/** A reason that carries the HTTP status of the reply that failed it, so a failure is diagnosable without logs. */
+function withStatus(reason: string, reply: Reply): string {
+  return `${reason}:${reply.status}`
+}
+
+/** `/api/public/projects` needs only `project:read`, and Langfuse answers it in events-only mode: `{data: [...]}`. */
 async function readLangfuse(base: string, authorization: string, deps: CheckDeps): Promise<Reply> {
-  return send(deps, `${base}/api/public/traces?limit=1`, {
+  return send(deps, `${base}/api/public/projects`, {
     method: 'GET',
     headers: {authorization, accept: 'application/json'},
   })
@@ -193,7 +202,9 @@ async function readLangfuse(base: string, authorization: string, deps: CheckDeps
 async function checkLangfuse(base: string, authorization: string, deps: CheckDeps): Promise<void> {
   const read = await readLangfuse(base, authorization, deps)
   if (read.status === 401) throw new CheckFailure('credential-refused')
-  if (read.status !== 200) throw new CheckFailure('read-failed')
+  if (read.status !== 200 || !isRecord(read.body) || !Array.isArray(read.body.data)) {
+    throw new CheckFailure(withStatus('read-failed', read))
+  }
 
   const mcp = `${base}/api/public/mcp`
   const mcpHeaders = {authorization}
@@ -209,21 +220,22 @@ async function checkLangfuse(base: string, authorization: string, deps: CheckDep
       }),
     ),
   )
-  if (result(initialize) === null) throw new CheckFailure('mcp-read-failed')
-  const list = result(await send(deps, mcp, post(mcpHeaders, rpc('tools/list'))))
-  if (list === null || !Array.isArray(list.tools)) throw new CheckFailure('mcp-read-failed')
+  if (result(initialize) === null) throw new CheckFailure(withStatus('mcp-read-failed', initialize))
+  const listReply = await send(deps, mcp, post(mcpHeaders, rpc('tools/list')))
+  const list = result(listReply)
+  if (list === null || !Array.isArray(list.tools)) throw new CheckFailure(withStatus('mcp-read-failed', listReply))
 
   const restWrite = await send(deps, `${base}/api/public/scores`, post({authorization}, '{}'))
-  if (!isRoleDenial(restWrite, 403)) throw new CheckFailure('rest-write-not-denied')
+  if (!isRoleDenial(restWrite, 403)) throw new CheckFailure(withStatus('rest-write-not-denied', restWrite))
 
   const mcpWrite = await send(deps, mcp, post(mcpHeaders, rpc('tools/call', {name: 'createScore', arguments: {}})))
-  if (!isMcpRoleDenial(mcpWrite)) throw new CheckFailure('mcp-write-not-denied')
+  if (!isMcpRoleDenial(mcpWrite)) throw new CheckFailure(withStatus('mcp-write-not-denied', mcpWrite))
 }
 
 async function checkRefused(base: string, authorization: string, deps: CheckDeps): Promise<void> {
   const read = await readLangfuse(base, authorization, deps)
   if (read.status === 401) return
-  throw new CheckFailure(read.status === 200 ? 'still-accepted' : 'unexpected-status')
+  throw new CheckFailure(read.status === 200 ? 'still-accepted' : withStatus('unexpected-status', read))
 }
 
 /** The text a Langfuse error body carries: `message`, `error` as a string, or `error.message`. */

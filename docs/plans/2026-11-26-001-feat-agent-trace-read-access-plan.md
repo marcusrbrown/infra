@@ -243,7 +243,7 @@ These are out of scope, carried over from the origin:
 - **Grafana MCP placement and credential custody:** a backend-only container, with its service-account token created on the host.
 - **Hold switch:** `revoke --all`.
 - **Reads while ingest is held:** they stay open.
-- **REST surface:** GET on traces, traces/{id}, sessions, sessions/{id}, observations (v2 and the legacy {id}), scores (v2/v3), metrics (v1/v2), and health. The Langfuse MCP endpoint also allows POST, plus GET and DELETE only if its transport answers them. Exact paths are pinned in the gate's allowlist test.
+- **REST surface:** GET on traces, traces/{id}, sessions, sessions/{id}, observations (v2 and the legacy {id}), scores (v2/v3), metrics (v1/v2), and health. The Langfuse MCP endpoint also allows POST, plus GET and DELETE only if its transport answers them. Exact paths are pinned in the gate's allowlist test. **Superseded by the first rollout:** Langfuse v4.86.0 runs in events-only mode, where `traces`, `traces/{id}`, `sessions`, `sessions/{id}`, `observations/{id}`, `v2/scores` and `metrics` answer 404 before auth. The allowlist now holds `v2/observations`, `v3/scores`, `v2/metrics`, `projects` and `health`; see `docs/runbooks/trace-collection.md`.
 - **Per-consumer use visibility:** gate logs (`traces logs reader-gate`). There are no counters.
 
 ### Deferred to Implementation

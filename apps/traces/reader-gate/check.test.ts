@@ -27,6 +27,8 @@ interface LangfuseFake {
   mcpWrite?: (id: unknown) => Response
   mcpRead?: (id: unknown) => Response
   readStatus?: number
+  /** The body of the REST read; the default is the real `{data: [...]}` shape. */
+  readBody?: unknown
   throwOn?: string
 }
 
@@ -40,7 +42,14 @@ function langfuse(options: LangfuseFake) {
     const path = new URL(url).pathname
     if (options.throwOn === `${method} ${path}`) throw new Error('connect ECONNREFUSED')
     if (options.role === 'refused') return json({message: 'Invalid credentials'}, 401)
-    if (method === 'GET' && path === '/api/public/traces') return json({data: [], meta: {}}, options.readStatus ?? 200)
+    if (method === 'GET' && path === '/api/public/projects') {
+      const body = 'readBody' in options ? options.readBody : {data: [{id: 'p1', name: 'traces'}]}
+      return json(body, options.readStatus ?? 200)
+    }
+    // Langfuse runs in events-only mode: the v1 read routes (traces, sessions, ...) answer 404 before auth.
+    if (method === 'GET' && path.startsWith('/api/public/')) {
+      return json({message: 'Not found'}, 404)
+    }
     if (method === 'POST' && path === '/api/public/scores') {
       if (options.restWrite) return options.restWrite(options.role)
       return options.role === 'viewer'
@@ -155,10 +164,44 @@ describe('langfuse check', () => {
     )
   })
 
-  test('a read that answers anything but 200 fails as read-failed', async () => {
-    const {fetchFn} = langfuse({role: 'viewer', readStatus: 500})
+  test('the REST read is GET /api/public/projects, which events-only mode serves', async () => {
+    const {fetchFn, recorded} = langfuse({role: 'viewer'})
+    await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))
+    const read = recorded.find(call => call.method === 'GET')
+    expect(new URL(read?.url ?? '').pathname).toBe('/api/public/projects')
+    expect(recorded.filter(call => call.method === 'GET')).toHaveLength(1)
+  })
+
+  test.each([404, 500, 503])('a read that answers %i fails as read-failed with the status', async status => {
+    const {fetchFn} = langfuse({role: 'viewer', readStatus: status})
     expect(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))).toBe(
-      'READER_CHECK_FAIL langfuse read-failed',
+      `READER_CHECK_FAIL langfuse read-failed:${status}`,
+    )
+  })
+
+  test.each([
+    ['an object with no data', {meta: {}}],
+    ['a data field that is not an array', {data: {}}],
+    ['an array at the top', []],
+    ['null', null],
+  ])('a 200 read with %s fails as read-failed:200', async (_name, readBody) => {
+    const {fetchFn} = langfuse({role: 'viewer', readBody})
+    expect(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))).toBe(
+      'READER_CHECK_FAIL langfuse read-failed:200',
+    )
+  })
+
+  test('a 200 read with a body that is not JSON fails as read-failed:200', async () => {
+    const fetchFn: CheckDeps['fetch'] = async () => new Response('<html>ok</html>', {status: 200})
+    expect(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))).toBe(
+      'READER_CHECK_FAIL langfuse read-failed:200',
+    )
+  })
+
+  test('an empty data array is a good read', async () => {
+    const {fetchFn} = langfuse({role: 'viewer', readBody: {data: []}})
+    expect(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))).toBe(
+      'READER_CHECK_OK langfuse',
     )
   })
 
@@ -185,7 +228,7 @@ describe('langfuse check', () => {
   ])('a REST write that is %s fails as rest-write-not-denied', async (_name, restWrite) => {
     const {fetchFn} = langfuse({role: 'viewer', restWrite})
     expect(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))).toBe(
-      'READER_CHECK_FAIL langfuse rest-write-not-denied',
+      `READER_CHECK_FAIL langfuse rest-write-not-denied:${restWrite().status}`,
     )
   })
 
@@ -218,14 +261,14 @@ describe('langfuse check', () => {
   ])('an MCP write that is %s fails as mcp-write-not-denied', async (_name, mcpWrite) => {
     const {fetchFn} = langfuse({role: 'viewer', mcpWrite})
     expect(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))).toBe(
-      'READER_CHECK_FAIL langfuse mcp-write-not-denied',
+      `READER_CHECK_FAIL langfuse mcp-write-not-denied:${mcpWrite(1).status}`,
     )
   })
 
   test('an Editor-role key fails both probes (REST first)', async () => {
     const {fetchFn} = langfuse({role: 'editor'})
     expect(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))).toBe(
-      'READER_CHECK_FAIL langfuse rest-write-not-denied',
+      'READER_CHECK_FAIL langfuse rest-write-not-denied:400',
     )
   })
 
@@ -235,11 +278,11 @@ describe('langfuse check', () => {
       mcpRead: id => json({jsonrpc: '2.0', id, error: {code: -32603, message: 'x'}}),
     })
     expect(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn))).toBe(
-      'READER_CHECK_FAIL langfuse mcp-read-failed',
+      'READER_CHECK_FAIL langfuse mcp-read-failed:200',
     )
   })
 
-  test.each(['GET /api/public/traces', 'POST /api/public/scores', 'POST /api/public/mcp'])(
+  test.each(['GET /api/public/projects', 'POST /api/public/scores', 'POST /api/public/mcp'])(
     'a network error on %s is network-error, never success',
     async throwOn => {
       const {fetchFn} = langfuse({role: 'viewer', throwOn})
@@ -309,7 +352,7 @@ describe('langfuse check', () => {
       {role: 'viewer'},
       {role: 'refused'},
       {role: 'editor'},
-      {role: 'viewer', throwOn: 'GET /api/public/traces'},
+      {role: 'viewer', throwOn: 'GET /api/public/projects'},
     ] as const) {
       const {fetchFn} = langfuse(options)
       outputs.push(await runCheck(input({kind: 'langfuse', credentialFile: STAGED}), deps(fetchFn)))
@@ -348,7 +391,7 @@ describe('langfuse-refused check', () => {
   test.each([403, 500, 503])('a %i is not proof of refusal', async status => {
     const fetchFn: CheckDeps['fetch'] = async () => json({message: 'x'}, status)
     expect(await runCheck(input({kind: 'langfuse-refused', credentialFile: STAGED}), deps(fetchFn))).toBe(
-      'READER_CHECK_FAIL langfuse-refused unexpected-status',
+      `READER_CHECK_FAIL langfuse-refused unexpected-status:${status}`,
     )
   })
 

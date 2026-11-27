@@ -391,7 +391,8 @@ type CheckInput = {kind: 'langfuse' | 'langfuse-refused'; credentialFile: string
 
 type CheckVerdict = {ok: true} | {ok: false; reason: string}
 
-const SENTINEL_LINE = /^READER_CHECK_(OK|FAIL) ([a-z-]+)(?: ([a-z-]{1,40}))?$/
+// The reason is words, optionally followed by `:` and a three-digit HTTP status (`read-failed:404`).
+const SENTINEL_LINE = /^READER_CHECK_(OK|FAIL) ([a-z-]+)(?: ([a-z-]{1,40}(?::\d{3})?))?$/
 
 /**
  * Exactly one sentinel line, for the kind that was asked, or a failure. The exit code is not the verdict: the check

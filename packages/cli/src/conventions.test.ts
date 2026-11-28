@@ -3901,34 +3901,52 @@ describe('fro-bot.yaml: progressive autoheal U2 contract', () => {
     })
   })
 
-  describe('Deploy Pipeline Health: deploy job conclusion is the last-deploy evidence', () => {
-    it('treats the deploy job conclusion, not the run conclusion, as the evidence', async () => {
+  describe('Deploy Pipeline Health: environment deployment records are the last-deploy evidence', () => {
+    const RECORD_APPS = ['keeweb', 'cliproxy', 'gateway', 'umami', 'dashboard', 'vpn', 'broker', 'traces'] as const
+
+    it('treats the environment deployment records, not a run listing, as the evidence', async () => {
       const {strandedCheck} = await loadHealthCategory()
       expect(strandedCheck).toContain('LAST DEPLOY EVIDENCE (applies to every app below)')
-      expect(strandedCheck).toMatch(/the deploy JOB conclusion is the evidence, never the run conclusion/i)
-      expect(strandedCheck).toMatch(/job named `deploy-<app>`[^.]*whose conclusion is `success`/i)
+      expect(strandedCheck).toMatch(/deployment records are the evidence for the app's "Last deploy" row/i)
+      expect(strandedCheck).toMatch(/Never use a workflow run listing to find an app's last deploy/i)
+      expect(strandedCheck).not.toContain('gh run list')
     })
 
-    it('does not count skipped or cancelled deploy jobs, even inside a successful run', async () => {
+    it('reads each environment by the exact deployments and statuses commands, main only', async () => {
       const {strandedCheck} = await loadHealthCategory()
-      expect(strandedCheck).toMatch(
-        /deploy job that is `skipped` or `cancelled` is NOT a deploy, even when the run concluded `success`/i,
-      )
-      expect(strandedCheck).toMatch(/router runs where `detect-changes` skipped the app/i)
-      expect(strandedCheck).toMatch(
-        /AT-GATE rules below still apply to a waiting job or one cancelled before any step ran/i,
-      )
-    })
-
-    it('includes router deploy-<app> / deploy-<app> jobs alongside standalone runs, newest wins', async () => {
-      const {strandedCheck} = await loadHealthCategory()
-      expect(strandedCheck).toContain('`deploy-<app> / deploy-<app>`')
-      expect(strandedCheck).toMatch(/Check both sources and take whichever is newer/i)
-      expect(strandedCheck).toContain('gh run list --workflow deploy.yaml -L 20 --json databaseId,createdAt,conclusion')
       expect(strandedCheck).toContain(
-        'gh run list --workflow deploy-<app>.yaml -L 20 --json databaseId,createdAt,conclusion',
+        'gh api "repos/{owner}/{repo}/deployments?environment=<app>&ref=main&per_page=20"',
       )
-      expect(strandedCheck).toContain('gh run view <run-id> --json jobs')
+      expect(strandedCheck).toContain("gh api repos/{owner}/{repo}/deployments/<id>/statuses --jq '.[0]'")
+      expect(strandedCheck).toMatch(/consider only deployments whose `ref` is `main`/)
+      expect(strandedCheck).toMatch(/`log_url` \(or `target_url`\) is the deploy job URL, which is the row's link/)
+    })
+
+    it('maps deployment states the way readDeployStates does', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toContain('`success` = pass')
+      expect(strandedCheck).toContain('`failure` or `error` = failed')
+      expect(strandedCheck).toContain('`waiting`, `queued`, `in_progress`, or `pending` = at gate or running')
+      expect(strandedCheck).toContain('`inactive` = superseded')
+      expect(strandedCheck).toMatch(/unrecognized state is never a pass/)
+    })
+
+    it('looks behind a waiting deployment for the newest settled one', async () => {
+      const {strandedCheck} = await loadHealthCategory()
+      expect(strandedCheck).toMatch(/When the newest `main` deployment is `waiting`, look behind it/)
+      expect(strandedCheck).toMatch(/newest `success`, `failure`, or `error`/)
+      expect(strandedCheck).toMatch(/newer deploy is waiting at its gate/)
+    })
+
+    it('points every per-app section at the shared deployment-record rule, not at a workflow run', async () => {
+      const {sections} = await loadHealthCategory()
+      for (const app of RECORD_APPS) {
+        const section = sections[app] ?? ''
+        expect(section, `${app} section`).toContain('LAST DEPLOY EVIDENCE')
+        expect(section, `${app} section`).toContain(`environment \`${app}\``)
+        expect(section, `${app} section`).not.toMatch(/most recent[^.]*workflow run/i)
+        expect(section, `${app} section`).not.toContain('gh run list --workflow=deploy.yaml')
+      }
     })
   })
 

@@ -199,7 +199,7 @@ services:
     logging: *logging
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.3.71.3@sha256:232a7ff4126e858736e54ad25541decda3afe68e28ea45853bd5d1b6248ce6dc
+    image: clickhouse/clickhouse-server:26.3.73.9@sha256:8af86c531947da69d304b0e372313538401e20d384578404986e4ff993f7e671
     restart: unless-stopped
     user: '101:101'
     environment:

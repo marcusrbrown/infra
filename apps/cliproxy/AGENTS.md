@@ -94,7 +94,15 @@ v8 keeps every `/v0/management` path above and adds a separate `/v8/management` 
 
 ### Major-version rollback
 
-Before a major bump, take a `cp -p` backup of `config/config.yaml`. If the old version can still read the live file, roll back by reverting the image pin and deploying. If the new version migrated the file to a layout the old one cannot read, restore the backup first: stop `cli-proxy-api` and `cp` the backup over `config/config.yaml`. Then revert the pin and deploy. The deploy keeps the existing `config.yaml`, so the old image starts on the restored file. Then check `cliproxy status` and management access. Any change made to the file after the backup is lost, including runtime API keys, so re-add those keys afterwards. Leave the `cliproxy_auth` volume alone.
+Before a major bump, take a `cp -p` backup of `config/config.yaml`. If the old version can still read the live file, roll back by reverting the image pin and deploying. If the new version migrated the file to a layout the old one cannot read, do the rollback on the droplet, because the deploy's management preflight fails (Caddy answers 502) once the backend is stopped. In `/opt/cliproxy`:
+
+1. Stop `cli-proxy-api`.
+2. `cp` the backup over `config/config.yaml`.
+3. Set the old `image:` pin in `docker-compose.yaml`.
+4. Run `docker compose pull && docker compose up -d --wait`.
+5. Check `cliproxy status` and management access.
+
+Then merge the matching pin revert. Its deploy keeps the existing `config.yaml` and finds the stack already on that image. Any change made to the file after the backup is lost, including runtime API keys, so re-add those keys afterwards. Leave the `cliproxy_auth` volume alone.
 
 ## OPENCODE GO UPSTREAM
 

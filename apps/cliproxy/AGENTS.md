@@ -90,11 +90,11 @@ Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/s
 | `/v0/management/latest-version` | GET | — | Returns `{"latest-version": "vX.Y.Z"}` |
 | `/healthz` | GET | — | Liveness endpoint, no auth; returns `{"status":"ok"}` |
 
-v8 keeps every `/v0/management` path above and adds a separate `/v8/management` API. Stay on `/v0`: a v0 write re-saves `config.yaml` in the legacy layout. A v8-layout write migrates the file (nested `server.*`, `access.api-keys`, `config-version: 8`), and v7 cannot read the result.
+v8 keeps every `/v0/management` path above and adds a separate `/v8/management` API. The deploy uses `/v0` only, and its field-scoped calls cover everything it writes. A `/v8/management` write migrates `config.yaml` to the nested v8 layout (`server.*`, `access.api-keys`, `config-version: 8`). The migration is one-way. Rolling back to v7 is not supported.
 
-### v7 rollback
+### Major-version rollback
 
-Before a major bump, take a `cp -p` backup of `config/config.yaml`. To roll back, revert the image pin, deploy, then confirm the live file has no `config-version: 8`. If it does, stop `cli-proxy-api`, `cp` the backup over `config/config.yaml`, and start it again. Leave the `cliproxy_auth` volume alone.
+Before a major bump, take a `cp -p` backup of `config/config.yaml`. To roll back, revert the image pin and deploy. If the new version migrated the file to a layout the old one cannot read, stop `cli-proxy-api`, `cp` the backup over `config/config.yaml`, and start it again. Leave the `cliproxy_auth` volume alone.
 
 ## OPENCODE GO UPSTREAM
 

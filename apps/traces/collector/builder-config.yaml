@@ -33,4 +33,4 @@ extensions:
 processors:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/redactionprocessor v0.166.0
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourceprocessor v0.166.0
-  - gomod: github.com/elastic/opentelemetry-collector-components/processor/ratelimitprocessor v0.81.0
+  - gomod: github.com/elastic/opentelemetry-collector-components/processor/ratelimitprocessor v0.83.0

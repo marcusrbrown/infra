@@ -300,10 +300,11 @@ env:
          STRANDED-DEPLOY CHECK), diagnose from logs and open an issue. If
          the deploy job never ran a step (at gate), report a table row
          only — no issue.
-         Note: if the last cliproxy deploy succeeded, the post-deploy
-         management-key health gate (PUT /v0/management/config) passed,
-         which means the management API and the OAuth token were both
-         healthy at deploy time.
+         Note: if the last cliproxy deploy succeeded, its post-deploy
+         health check (an authenticated GET /v0/management/config)
+         passed, which proves only that the management API answered at
+         deploy time. It says nothing about OAuth health; the auth
+         monitor below is the signal for that.
        - Verify cliproxy.fro.bot is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://cliproxy.fro.bot/v1/models` should
          return 401 (auth required) or 200 — NOT a 5xx, a connection

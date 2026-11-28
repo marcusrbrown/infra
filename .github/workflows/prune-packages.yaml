@@ -2,7 +2,6 @@ name: Prune Untagged Packages
 
 permissions:
   contents: read
-  packages: write
 
 on:
   workflow_dispatch:
@@ -18,8 +17,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prune:
+  # The dry-run only lists versions, so it gets read access; only an explicit apply gets write.
+  preview:
+    if: ${{ !inputs.apply }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,14 +34,30 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
 
-      - name: Prune untagged GHCR versions
+      - name: List untagged GHCR versions (dry-run)
         working-directory: packages/cli
-        run: |
-          if [[ "${APPLY}" == "true" ]]; then
-            bun run scripts/prune-untagged-packages.ts --apply
-          else
-            bun run scripts/prune-untagged-packages.ts
-          fi
+        run: bun run scripts/prune-untagged-packages.ts
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLY: ${{ inputs.apply }}
+
+  apply:
+    if: ${{ inputs.apply }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Delete untagged GHCR versions
+        working-directory: packages/cli
+        run: bun run scripts/prune-untagged-packages.ts --apply
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

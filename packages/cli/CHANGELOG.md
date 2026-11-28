@@ -1,5 +1,11 @@
 # @marcusrbrown/infra
 
+## 0.30.7
+
+### Patch Changes
+
+- `traces reader backend` now accepts a reader-gate check failure that names the HTTP status Langfuse answered (`read-failed:404`), so a failed key check is diagnosable without host logs. ([#2121](https://github.com/marcusrbrown/infra/pull/2121))
+
 ## 0.30.6
 
 ### Patch Changes

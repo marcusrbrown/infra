@@ -368,7 +368,11 @@ env:
          DISCORD_GUILD_ID, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
          S3_BUCKET, and S3_REGION configured.
        - Check .github/known_hosts contains host keys for gateway.fro.bot
-         (both domain and droplet IP entries).
+         (both domain and droplet IP entries) with a static read of the
+         file. Do not resolve any hostname from the runner: egress is
+         blocked, and harden-runner answers a blocked name with its own
+         sinkhole address, so a runner-side DNS answer that matches no pin
+         is not evidence and is never a reason to open an issue.
 
        Umami:
        - Check the most recent Deploy Umami workflow run (deploy-umami

@@ -602,7 +602,8 @@ export const TEMPO_DROPPED_PLACES: readonly CanaryPlace[] = CANARY_PLACES.filter
 //   2. the raw batch holds all nine markers. It proves nothing was cut on the way in, including the places the
 //      projection drops.
 //
-// Derived from langfuse/langfuse at tag v4.83.0. Re-read these when the pinned Langfuse tag changes:
+// Derived from these langfuse/langfuse sources; re-read them when the pinned Langfuse tag changes (the deploy's canary gate
+// fails if a marker stops landing):
 //   - packages/shared/src/server/otel/OtelIngestionProcessor.ts, `processToEvent()` and `extractInputAndOutput()`
 //     (the direct-write path: the worker's defaults LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only and
 //     LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR=direct send every batch down it; the compose sets neither);

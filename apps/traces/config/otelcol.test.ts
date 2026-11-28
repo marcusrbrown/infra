@@ -270,9 +270,15 @@ describe('collector Tempo branch', () => {
     'fro_bot.gate',
     'fro_bot.result',
     'fro_bot.subagent.session_id',
+    // Tool-call outcome and whether the tool was offered; request kind and tool definition count
+    'fro_bot.tool.outcome',
+    'fro_bot.tool.offered',
+    'fro_bot.request.kind',
+    'fro_bot.tool_definitions.count',
     // Resource attributes
     'sender.group',
     'service.name',
+    'service.version',
   ]
 
   it('allows exactly the approved keys: no extras, none missing, no duplicates', () => {

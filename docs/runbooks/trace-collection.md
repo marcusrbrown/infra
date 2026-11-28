@@ -778,6 +778,8 @@ gh workflow run "Traces Backup" --repo marcusrbrown/infra
 
 Success: the run's summary reads `snapshot created, <n> pruned, newest daily snapshot 0 h old`. Confirm with `doctl compute snapshot list --resource volume`. The workflow runs on `main` only.
 
+Before dispatching one as a pre-upgrade rollback point, list the snapshots. If the daily snapshot was taken after the last change, use it. A manual run minutes after the daily one can be refused by DigitalOcean with `do-api:create-snapshot:http-429`, and that opens the backup alert even though no backup is missing.
+
 ### When the backup alert opens
 
 One issue labelled `traces-backup-failure`, titled "Trace data backup is failing", opens on the first failed or cancelled run, with one Discord message. Each further failing day adds a comment. The next successful run comments, closes the issue and posts one recovery message. There is no flap control: one failed daily run alerts. The reason is in the backup job's log and summary:
@@ -787,6 +789,7 @@ One issue labelled `traces-backup-failure`, titled "Trace data backup is failing
 | `snapshot-token-missing` | set the repository secret `TRACES_SNAPSHOT_DO_TOKEN` |
 | `do-api:<stage>:http-401` or `http-403` | the token is invalid or lacks a scope for that stage (`list-droplets`, `list-volumes`, `create-snapshot`, `list-snapshots`, `delete-snapshot`) |
 | `do-api:<stage>:timeout`, `:network`, `:http-5xx`, `:malformed:*` | transient API trouble: dispatch a backup by hand |
+| `do-api:create-snapshot:http-429` | DigitalOcean refused the snapshot, usually because another snapshot of the volume was taken minutes before. List the snapshots. If the newest daily one is recent, nothing is missing: close the issue with a note. Otherwise dispatch again later |
 | `droplet-not-found`, `droplet-ambiguous` | no droplet, or more than one, is named `traces` |
 | `volume-not-found`, `volume-ambiguous` | no `traces-data*` volume, or more than one, is attached to the droplet: see [Interrupted restore](#interrupted-restore) |
 | `created-snapshot-not-listed`, `created-snapshot-not-newest` | the listing did not show the new snapshot within about 2 minutes (12 attempts, 10 seconds apart): dispatch a backup by hand |

@@ -191,9 +191,17 @@ processors:
       - fro_bot.gate
       - fro_bot.result
       - fro_bot.subagent.session_id
-      # Resource attributes
+      # Tool-call outcome (success, error, rejected, interrupted) and whether the tool was offered (plugin 0.3.6+)
+      # on execute_tool spans; request kind (primary, title, compaction, generate) and tool definition count
+      # (plugin 0.3.6+) on chat spans. Fixed codes and counts only.
+      - fro_bot.tool.outcome
+      - fro_bot.tool.offered
+      - fro_bot.request.kind
+      - fro_bot.tool_definitions.count
+      # Resource attributes; service.version is the sender plugin version
       - sender.group
       - service.name
+      - service.version
 
 connectors:
   forward/tempo: {}

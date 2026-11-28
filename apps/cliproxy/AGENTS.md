@@ -94,7 +94,7 @@ v8 keeps every `/v0/management` path above and adds a separate `/v8/management` 
 
 ### Major-version rollback
 
-Before a major bump, take a `cp -p` backup of `config/config.yaml`. To roll back, revert the image pin and deploy. If the new version migrated the file to a layout the old one cannot read, stop `cli-proxy-api`, `cp` the backup over `config/config.yaml`, and start it again. Leave the `cliproxy_auth` volume alone.
+Before a major bump, take a `cp -p` backup of `config/config.yaml`. If the old version can still read the live file, roll back by reverting the image pin and deploying. If the new version migrated the file to a layout the old one cannot read, restore the backup first: stop `cli-proxy-api` and `cp` the backup over `config/config.yaml`. Then revert the pin and deploy. The deploy keeps the existing `config.yaml`, so the old image starts on the restored file. Then check `cliproxy status` and management access. Any change made to the file after the backup is lost, including runtime API keys, so re-add those keys afterwards. Leave the `cliproxy_auth` volume alone.
 
 ## OPENCODE GO UPSTREAM
 

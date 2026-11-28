@@ -16,7 +16,11 @@ The decision record is `docs/plans/2026-11-20-001-feat-trace-collection-stack-pl
 │   ├── tempo.yaml            Monolithic, local disk, 720 h retention, 20 MB trace limit
 │   ├── clickhouse/           System-log TTLs (config.d). No memory settings
 │   ├── clickhouse-users/     The read-only `traces_reader` user for the health reporter
-│   ├── prometheus/           prometheus.yml: four scrape jobs, 30 s, no rules, no Alertmanager
+│   ├── prometheus/
+│   │   ├── prometheus.yml     Deployed scrape config: four jobs, 30 s, no loaded rules or Alertmanager
+│   │   ├── loss-rules.yml     Test-only mirror of the Grafana loss alert queries
+│   │   ├── loss-rules.test.yml  promtool scenarios for the mirrored queries
+│   │   └── loss-rules.test.ts   Checks query parity and runs the promtool scenarios
 │   └── grafana/              datasources/ (Tempo, Prometheus) and alerting/ (contact point, policy, alert rules)
 ├── collector/                Builder manifest and Dockerfile for the collector image
 ├── server/provision.ts       Droplet, volume, firewall; exports `checkTracesStorage`, `createRemoteExec`, `Runner`, `RemoteExec`
@@ -297,7 +301,7 @@ So "no tokens" is one **void line**: `trc_void_<43 base64url characters> void <t
 - **Never route anything but `/agent/langfuse/*` and `/agent/grafana/*` to the reader gate, and never route to the gate's health port or to a store, Grafana or the Grafana MCP server.** The gate decides what reaches Langfuse and Grafana; Caddy names no upstream but the gate for these routes.
 - **Never forward a caller's credential, cookie or `X-Grafana-*` header through the gate, never add a method or path to its allowlist without a test, and never give a consumer a Langfuse or Grafana credential.** The Viewer credentials stay in files on the host. A Langfuse or Grafana MCP upgrade needs the write-refusal re-proof (`traces reader backend langfuse`) and a diff of the MCP tool list.
 - **Never route `/metrics`, `8082` or Prometheus through Caddy, and never add `/metrics` to the public `8080` listener.** A test refuses it on `8080` and in every Caddy state.
-- **Never turn on Prometheus's lifecycle endpoint, admin API or remote-write receiver, and never add Alertmanager or rule files.** The rules are Grafana's; a test pins the flags.
+- **Never turn on Prometheus's lifecycle endpoint, admin API or remote-write receiver, add Alertmanager, or load rule files in the deployed Prometheus.** Grafana owns the live rules; the loss-rule mirrors are test fixtures only. A test pins the flags.
 - **Never put the Discord webhook address in a tracked file, an argv or a log, and never give it to a service but Grafana.** It travels in the host `.env` and Grafana's environment; the contact point reads `$TRACES_DISCORD_WEBHOOK_URL`.
 - **Never make an alert message read trace content.** A message is fixed text, the rule's own labels and numbers; a test rejects any other template variable.
 - **Never put the embedder on the edge network, route it through Caddy, publish it, make anything wait for it, or pull or start it before the route is set.** It is optional: a test pins its network, its absence from `ports` and every Caddy state, from `INGEST_SERVICES`, from the route-critical pull and start and from every `depends_on`.

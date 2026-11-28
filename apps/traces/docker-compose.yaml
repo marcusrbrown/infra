@@ -143,7 +143,7 @@ services:
     logging: *logging
 
   langfuse-web:
-    image: docker.langfuse.com/langfuse/langfuse:4.86.0@sha256:514f9851ce7c8c8288a12620f99911f80aecc5aa49a43fe07eecf02cfc96546e
+    image: docker.langfuse.com/langfuse/langfuse:4.88.0@sha256:272161cfd9e46934c693fbcd9ef160b1b7499a38bc4f836fac78cfa77eb46ccc
     restart: unless-stopped
     depends_on: *langfuse-depends-on
     ports:
@@ -178,7 +178,7 @@ services:
     logging: *logging
 
   langfuse-worker:
-    image: docker.langfuse.com/langfuse/langfuse-worker:4.86.0@sha256:cc6a5dbdcf0e164f94f3a78bcee97e971f7f22ed3ac374ea9c40e64455903811
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.88.0@sha256:952869378c3fbb322be31d3aeec85034125ff02e3ab26fbb30b3c38d4b25a944
     restart: unless-stopped
     depends_on: *langfuse-depends-on
     environment:

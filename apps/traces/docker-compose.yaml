@@ -189,6 +189,9 @@ services:
       # Each Topics job makes one summary call (the proxy) and one embedding call (the embedder). The default is 20 jobs
       # at once; four keeps a backfill from flooding the proxy or starving the CPU the stores share.
       LANGFUSE_TOPICS_TRACE_QUEUE_PROCESSING_CONCURRENCY: '4'
+      # Rendered transcript characters per summary call (default 500,000). mimo-v2.6-flash has a 1M-token context, and at
+      # 800,000 characters a cold call took about 30 s, half of Langfuse's fixed 60 s summary timeout.
+      LANGFUSE_TOPICS_MAX_INPUT_CHARACTERS: '800000'
     networks: [backend]
     healthcheck:
       test: [CMD-SHELL, 'wget -q --spider http://127.0.0.1:3030/api/health || exit 1']

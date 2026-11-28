@@ -860,7 +860,7 @@ Design and the exact checks are in [Restore](../../apps/traces/AGENTS.md#restore
 
    Success: `Ports 80 and 443 are open at the cloud firewall (confirmed from the read-back)`.
 
-8. Reissue all three sender tokens ([Issue a token](#issue-a-token)) and update the senders. Rotate the two agent backend credentials first, then reissue the reader tokens ([After a restore](#after-a-restore)): the reopen in step 7 refuses while the reader file holds a real token, so do not issue one before it.
+8. Before any sender token is reissued, check the Topics rule: an older snapshot can bring back a rule without the `repository is set` filter, with automatic processing on, and the first workstation trace would then reach the summary model. Read `topics.maps` with the helper in [Topics](#set-it-up), step 9. If `rules` is empty, the snapshot predates Topics and nothing runs; go on. If the rule lacks either filter or the Run issues facet, run steps 9.1 to 9.3 (9.1 finds or 9.2 creates the facet, 9.3 saves the rule) and read it back. Then reissue all three sender tokens ([Issue a token](#issue-a-token)) and update the senders. Rotate the two agent backend credentials first, then reissue the reader tokens ([After a restore](#after-a-restore)): the reopen in step 7 refuses while the reader file holds a real token, so do not issue one before it.
 
 9. Prove the restore. Every part must pass:
 
@@ -1046,7 +1046,54 @@ Settings the stack already sets: Langfuse's LLM connections may reach `embedder`
    5. **Delete the key in the UI** (API keys, delete) as soon as the check passes, or as soon as you stop after an error, even though it expires on its own. An Admin key can read and write everything in the project.
 
 7. **Select the models in the Topics settings, before you create a map.** On the Topics page, open the **⋮ menu at the top right → Settings**, and fill the three slots: facet summaries (connection `cliproxy`, a Go model that does not reason, such as `opencode-go/mimo-v2.6-flash`), embeddings (connection `embedder`, `BAAI/bge-small-en-v1.5`) with **384** in the number box next to it, and topic clustering, which names topics (connection `cliproxy`, the same `opencode-go/mimo-v2.6-flash` works; add it to the connection's custom models first). During map processing, Langfuse v4.86.0 gives every summary and clustering call a fixed 60-second timeout (`packages/shared/src/server/topics/text.ts:29`, no setting changes it). The save tests in this dialog use a longer one (`LANGFUSE_FETCH_LLM_COMPLETION_TIMEOUT_MS`, at most 95 seconds, `model-config.ts:704-715`), so a model can pass its save test and still time out on a map. On real agent transcripts, reasoning models such as `opencode-go/qwen3.8-flash` took 30 to 60 seconds per call and many hit the limit, and `opencode-go/qwen3.8-max` timed out the clustering step outright, so the map's setup failed with no topics. `opencode-go/minimax-m3.1-flash` fails the clustering save test with "No object generated: could not parse the response." Each slot's save test is a structured-output call capped at 512 output tokens, and a reasoning model such as `opencode-go/glm-5.3-flash` can spend all of them before it writes the JSON, which fails the clustering test with "No output generated." The dialog also has a trace readiness field, in seconds; use 600. Save. Settings stores the models but creates no map, and a project with no map stays unconfigured, which keeps **New live map** disabled, so the first map comes from **Set up topics** in step 8. Do not choose the models in that wizard: it has no embedding-dimensions field and stores the default of 1024 (`packages/shared/src/server/topics/model-config.ts:431`), so its embedding test fails with "Unprocessable Entity". Topics accepts 64 to 2048, and the embedder answers 422 to anything above its model's 384 (Topics retries without a size only on a 400, `packages/shared/src/server/topics/embeddings.ts:20-43`, so the 422 fails the test). Saving runs a real call for each changed slot (`model-config.ts:679-773`, the embedding branch at `:720-735`): the summary and naming slots return structured output, and the embedding slot embeds two texts in one request and requires both vectors to be exactly 384 long. A failed test names the slot and the reason. The embedding model and dimensions lock once embedded summaries exist, so choose them once.
-8. **Create the first map with Set up topics.** On the Topics page, choose **Set up topics**. Step 1 shows the models saved in step 7; leave them, and pick the **Intent** and **Issues** facets. In step 2, filter to the agent's own conversations, not the Action's lifecycle traces: the senders set no trace name yet, so a `traceName` filter matches nothing, and a `sessionId` filter (`owner/repo:<trigger>`) matches both sources of a run. Use a metadata filter on `resourceAttributes.service.name` equal to `fro-bot-opencode-plugin` where the filter builder offers one; otherwise filter by `sessionId` and accept that lifecycle traces are summarized too. At our volume (around ten agent traces a day), sample **100 percent**: Topics needs about 100 traces to form topics, and a low rate never gets there. Check the cost estimate in step 3, then start it. Watch `traces logs langfuse-worker` for the first summaries. **Start analyzing** queues the first fit, which names the topics. Later refits run on a schedule. If a fit fails (ours did once, when the clustering model timed out), choose **Refresh** next to the Topics title to run it again after fixing the cause; saving the map does not.
+8. **Create the first map with Set up topics.** On the Topics page, choose **Set up topics**. Step 1 shows the models saved in step 7; leave them, and pick the **Intent** facet only (step 9 adds Run issues). In step 2, add both metadata filters before anything is summarized: `resourceAttributes.service.name` equal to `fro-bot-opencode-plugin`, and `repository` is set. Only Action runs carry `repository`, and a rule filter takes positive operators only (`TOPICS_RULE_FILTER_HINT`, `packages/shared/src/topics/index.ts`), so this pair is how workstation traces, and the other plugins' background sessions that come with them, are kept out. A filter changed later stops further summaries but cannot recall transcripts already sent. Sample **100 percent**: a map needs about 100 complete summaries per facet. Check the cost estimate in step 3, then start it, and wait until the setup is done before step 9. **Start analyzing** queues the first fit, which names the topics; later refits run on a schedule. If the setup fails, fix the cause and retry the setup. If summaries exist and only the fit failed, choose **Refresh** next to the Topics title; saving the map does not refit.
+9. **Add the Run issues facet.** The built-in Issues facet reports the defects a review run found as the run's own problem, and built-in prompts cannot be edited (v4.88.0, `packages/shared/src/server/topics/postgres.ts:121-122`). Run issues is a custom facet with a corrected prompt. Only Langfuse's tRPC calls create a facet, so run these in the devtools console of the signed-in tab, as a member with `topics:CUD`:
+
+   ```js
+   const PROJECT_ID = "<projectId>" // from the page URL, /project/<projectId>/topics
+   async function call(proc, input, method = "POST") {
+     const q = new URLSearchParams({input: JSON.stringify({json: input})})
+     const res = await fetch(method === "GET" ? `/api/trpc/${proc}?${q}` : `/api/trpc/${proc}`, {
+       method,
+       credentials: "same-origin",
+       ...(method === "GET"
+         ? {}
+         : {headers: {"content-type": "application/json"}, body: JSON.stringify({json: input})}),
+     })
+     const body = await res.json()
+     if (!res.ok || body.error) throw new Error(`${proc} ${res.status}: ${JSON.stringify(body.error ?? body)}`)
+     return body.result.data.json
+   }
+   ```
+
+   1. **Look before creating.** Set `PROMPT` to the text in [`apps/traces/topics/run-issues-facet-prompt.md`](../../apps/traces/topics/run-issues-facet-prompt.md) with `.trim()` applied: Langfuse trims a prompt on save, so an untrimmed copy never matches. `const facets = await call('topics.facets', {projectId: PROJECT_ID}, 'GET')`. If a facet named `Run issues` with `isBuiltIn: false` exists (a restore, or a lost answer) with the tracked prompt, set `const facet = facets.find((f) => f.name === 'Run issues' && !f.isBuiltIn && f.versions[0]?.prompt === PROMPT)` and skip the next step: `saveFacet` has no name check, and a second call makes a second facet. Also set `const intent = facets.find((f) => f.name === 'Intent' && f.isBuiltIn)`.
+   2. **Create it once.** `const facet = await call('topics.saveFacet', {projectId: PROJECT_ID, name: 'Run issues', prompt: PROMPT})`. Leave out `facetId`: with it, the call adds a version to that facet.
+   3. **Save the rule.** `const {rules} = await call('topics.maps', {projectId: PROJECT_ID}, 'GET')`; there must be exactly one rule, `const rule = rules[0]`. Set the filter and the facets in full rather than copying them, because a rule restored from an older snapshot can still hold the service-name filter alone and the built-in Issues facet:
+
+      ```js
+      await call("topics.saveRule", {
+        projectId: PROJECT_ID,
+        id: rule.id,
+        name: rule.name,
+        sampling: rule.sampling,
+        filter: [
+          {
+            type: "stringObject",
+            column: "metadata",
+            key: "resourceAttributes.service.name",
+            operator: "=",
+            value: "fro-bot-opencode-plugin",
+          },
+          {type: "stringObject", column: "metadata", key: "repository", operator: "is set", value: ""},
+        ],
+        facetIds: [intent.id, facet.id],
+      })
+      ```
+
+      `saveRule` replaces the filter and the facet list, and keeps `enabled`. Read `topics.maps` again and check both before the backfill.
+
+   4. **Backfill it.** `const setup = await call('topics.startRuleSetup', {projectId: PROJECT_ID, ruleId: rule.id})` summarizes up to 500 matching traces from the last 7, 14 or 30 days for every facet on the rule, Intent included. A `null` answer means the rule is paused or automatic processing is off: turn it on and call again. A setup that was already running is returned as it is; wait for it to finish, and start again if its `facets` lacks `facet.id`. Poll `await call('topics.ruleSetupStatus', {projectId: PROJECT_ID, ruleId: rule.id}, 'GET')` until `phase` is `done` or `failed`, then read the entry for `facet.id` in `facets`; a `phase` of `done` means every scheduled fit ended, not that each one succeeded. `runStatus` `completed` or `state` `has_map` means Run issues fitted. `skipped` means too few complete summaries for the fit it tried, under 10 for a small-sample fit and under 100 for a standard one: wait for more, then choose **Refresh**. A `runStatus` or `phase` of `failed` means it did not: read the reason, fix it and run `topics.startRuleSetup` again; **Refresh** only refits summaries that already exist.
+   5. **Read it back.** `topics.maps` shows the rule with both filters and exactly the Intent and Run issues facet ids.
 
 ### What it costs
 
@@ -1076,7 +1123,8 @@ The checked items were run on the real host on 2026-11-26. The unchecked ones ha
 - [ ] `traces status` shows `embedder` running and `embedder-health` passing, and the deploy's `embedder-ready` gate passed (the first start read the model from `huggingface.co`).
 - [x] The `cliproxy` connection (step 5, with the `x-opencode-session` header) and the embedder connection (step 6, through the API; the key deleted afterwards) exist. Checked 2026-11-26.
 - [x] The Topics settings saved with all three slots (step 7), and the embedding test passed at 384 dimensions (two texts, two vectors of 384). Checked 2026-11-26.
-- [x] The first map (agent traces only, 100 percent sampling, Intent and Issues) ran: 71 traces summarized and, after a Refresh, five Intent topics named. Checked 2026-11-26. Issues topics wait for about 100 traces.
+- [x] The first map (agent traces only, 100 percent sampling, Intent and Issues) ran: 71 traces summarized and, after a Refresh, five Intent topics named. Checked 2026-11-26.
+- [x] Run issues replaced the built-in Issues facet, and the rule filter `repository is set` keeps workstation traces out: Action traces started after the change were summarized for both facets, and a workstation trace was not. A Refresh fitted a small-sample Run issues map from 26 summaries. Checked 2026-11-28.
 - [ ] `traces logs embedder` and `traces logs langfuse-worker` show no refused host and no 4xx from the proxy or the embedder.
 - [ ] On the next deploy, retention read back the TTL on `topic_facet_summaries` (and on the assignment tables once they exist) from the real table definitions.
 

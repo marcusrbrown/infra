@@ -90,11 +90,19 @@ Verified endpoint surface (see `apps/cliproxy/src/deploy.ts` and `packages/cli/s
 | `/v0/management/latest-version` | GET | — | Returns `{"latest-version": "vX.Y.Z"}` |
 | `/healthz` | GET | — | Liveness endpoint, no auth; returns `{"status":"ok"}` |
 
-v8 keeps every `/v0/management` path above and adds a separate `/v8/management` API. Stay on `/v0`: a v0 write re-saves `config.yaml` in the legacy layout. A v8-layout write migrates the file (nested `server.*`, `access.api-keys`, `config-version: 8`), and v7 cannot read the result.
+v8 keeps every `/v0/management` path above and adds a separate `/v8/management` API. The deploy uses `/v0` only, and its field-scoped calls cover everything it writes. A `/v8/management` write migrates `config.yaml` to the nested v8 layout (`server.*`, `access.api-keys`, `config-version: 8`). The migration is one-way. Rolling back to v7 is not supported.
 
-### v7 rollback
+### Major-version rollback
 
-Before a major bump, take a `cp -p` backup of `config/config.yaml`. To roll back, revert the image pin, deploy, then confirm the live file has no `config-version: 8`. If it does, stop `cli-proxy-api`, `cp` the backup over `config/config.yaml`, and start it again. Leave the `cliproxy_auth` volume alone.
+Before a major bump, take a `cp -p` backup of `config/config.yaml`. If the old version can still read the live file, roll back by reverting the image pin and deploying. If the new version migrated the file to a layout the old one cannot read, do the rollback on the droplet, because the deploy's management preflight fails (Caddy answers 502) once the backend is stopped. In `/opt/cliproxy`:
+
+1. Stop `cli-proxy-api`.
+2. `cp` the backup over `config/config.yaml`.
+3. Set the old `image:` pin in `docker-compose.yaml`.
+4. Run `docker compose pull && docker compose up -d --wait`.
+5. Check `cliproxy status` and management access.
+
+Then merge the matching pin revert. Its deploy keeps the existing `config.yaml` and finds the stack already on that image. Any change made to the file after the backup is lost, including runtime API keys, so re-add those keys afterwards. Leave the `cliproxy_auth` volume alone.
 
 ## OPENCODE GO UPSTREAM
 

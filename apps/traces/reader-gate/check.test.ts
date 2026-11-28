@@ -4,12 +4,12 @@ import {Buffer} from 'node:buffer'
 import {describe, expect, test} from 'bun:test'
 import {runCheck} from './check'
 import {GRAFANA_MCP_CALLER_HEADER, GRAFANA_PLACEHOLDER, LANGFUSE_PLACEHOLDER} from './constants'
+import {CALLER_TOKEN, OTHER_CALLER_TOKEN} from './testing'
 
 const PAIR = 'pk-lf-viewer1:sk-lf-viewer1'
 const AUTH = `Basic ${Buffer.from(PAIR).toString('base64')}`
 const STAGED = '/run/secrets/reader-gate/langfuse-basic.staged'
 const CALLER_FILE = '/run/secrets/mcp-caller/token'
-const CALLER_TOKEN = 'caller-token-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 const DENIAL = 'Access denied. The "scores:save" permission is required to access this resource.'
 
 interface Recorded {
@@ -462,6 +462,7 @@ function grafana(options: {
 
 const grafanaInput = input({kind: 'grafana-mcp'})
 const unauthenticatedInput = input({kind: 'grafana-mcp-unauthenticated'})
+const callerInput = input({kind: 'grafana-mcp-caller'})
 
 /** The gate's check reads the caller token from its file, as the gate does. */
 function grafanaDeps(
@@ -486,6 +487,12 @@ describe('grafana-mcp check', () => {
     ['missing', undefined, 'caller-token-missing'],
     ['unreadable', 'EACCES', 'caller-token-unreadable'],
     ['empty', '', 'caller-token-malformed'],
+    ['two words', 'abc def', 'caller-token-malformed'],
+    [
+      'two words that join to a valid token',
+      `${CALLER_TOKEN.slice(0, 20)} ${CALLER_TOKEN.slice(20)}`,
+      'caller-token-malformed',
+    ],
   ] as const)('a %s caller token file fails as %s and makes no request', async (_name, state, reason) => {
     const {fetchFn, recorded} = grafana({})
     const readText: CheckDeps['readText'] = async () => {
@@ -509,7 +516,7 @@ describe('grafana-mcp check', () => {
 
   test('a caller token the server does not know fails as caller-token-refused, not as a broken handshake', async () => {
     const {fetchFn} = grafana({})
-    const files = {[CALLER_FILE]: 'some-other-token'}
+    const files = {[CALLER_FILE]: OTHER_CALLER_TOKEN}
     expect(await runCheck(grafanaInput, grafanaDeps(fetchFn, files))).toBe(
       'READER_CHECK_FAIL grafana-mcp caller-token-refused',
     )
@@ -701,6 +708,103 @@ describe('grafana-mcp-unauthenticated check', () => {
   })
 })
 
+describe('grafana-mcp-caller check', () => {
+  /** A server that knows one caller token, answers `initialize` with it, and records every request. */
+  function server(options: {known?: string; status?: number; body?: unknown; throws?: boolean} = {}) {
+    const recorded: Recorded[] = []
+    const fetchFn: CheckDeps['fetch'] = async (url, init) => {
+      const headers = new Headers(init.headers)
+      recorded.push({
+        url,
+        method: init.method ?? 'GET',
+        headers,
+        body: typeof init.body === 'string' ? init.body : '',
+      })
+      if (options.throws) throw new Error('connect ECONNREFUSED')
+      if (headers.get(GRAFANA_MCP_CALLER_HEADER) !== (options.known ?? CALLER_TOKEN)) {
+        return new Response('unauthorized: invalid bearer token', {status: 401})
+      }
+      const rpc = JSON.parse(typeof init.body === 'string' ? init.body : '{}') as {id?: unknown}
+      return json(
+        options.body ?? {jsonrpc: '2.0', id: rpc.id, result: {protocolVersion: '2025-06-18', capabilities: {}}},
+        options.status ?? 200,
+      )
+    }
+    return {fetchFn, recorded}
+  }
+
+  test('an initialize that carries the configured token and succeeds: OK, and it needs no Grafana credential', async () => {
+    const {fetchFn, recorded} = server()
+    expect(await runCheck(callerInput, grafanaDeps(fetchFn))).toBe('READER_CHECK_OK grafana-mcp-caller')
+    expect(recorded).toHaveLength(1)
+    expect(recorded[0]?.url).toBe('http://grafana-mcp:8000/mcp')
+    expect(recorded[0]?.method).toBe('POST')
+    expect(recorded[0]?.headers.get(GRAFANA_MCP_CALLER_HEADER)).toBe(CALLER_TOKEN)
+    expect(recorded[0]?.headers.has('authorization')).toBe(false)
+    expect((JSON.parse(recorded[0]?.body ?? '{}') as {method: string}).method).toBe('initialize')
+  })
+
+  test('a token the server does not know is caller-token-refused, not a generic failure', async () => {
+    const {fetchFn} = server({known: OTHER_CALLER_TOKEN})
+    expect(await runCheck(callerInput, grafanaDeps(fetchFn))).toBe(
+      'READER_CHECK_FAIL grafana-mcp-caller caller-token-refused',
+    )
+  })
+
+  test.each([
+    ['a 403', 403, {message: 'forbidden'}, 'not-initialised:403'],
+    ['a 500', 500, {}, 'not-initialised:500'],
+    ['a 200 with no JSON-RPC result', 200, {jsonrpc: '2.0', id: 1}, 'not-initialised:200'],
+    [
+      'a 200 with a JSON-RPC error',
+      200,
+      {jsonrpc: '2.0', id: 1, error: {code: -32603, message: 'x'}},
+      'not-initialised:200',
+    ],
+    ['a 200 that is not JSON-RPC', 200, {result: {}}, 'not-initialised:200'],
+    ['a 202', 202, {jsonrpc: '2.0', id: 1, result: {}}, 'not-initialised:202'],
+  ])('%s is not an initialised session, and the status is recorded: %s', async (_name, status, body, reason) => {
+    const {fetchFn} = server({status, body})
+    expect(await runCheck(callerInput, grafanaDeps(fetchFn))).toBe(`READER_CHECK_FAIL grafana-mcp-caller ${reason}`)
+  })
+
+  test('a network error is a failure', async () => {
+    const {fetchFn} = server({throws: true})
+    expect(await runCheck(callerInput, grafanaDeps(fetchFn))).toBe('READER_CHECK_FAIL grafana-mcp-caller network-error')
+  })
+
+  test.each([
+    ['missing', undefined, 'caller-token-missing'],
+    ['unreadable', 'EACCES', 'caller-token-unreadable'],
+    ['empty', '', 'caller-token-malformed'],
+    ['two words', 'abc def', 'caller-token-malformed'],
+    [
+      'two words that join to a valid token',
+      `${CALLER_TOKEN.slice(0, 20)} ${CALLER_TOKEN.slice(20)}`,
+      'caller-token-malformed',
+    ],
+    ['too short', CALLER_TOKEN.slice(1), 'caller-token-malformed'],
+  ] as const)('a %s caller token file fails as %s and makes no request', async (_name, state, reason) => {
+    const {fetchFn, recorded} = server()
+    const readText: CheckDeps['readText'] = async () => {
+      if (state === undefined) throw Object.assign(new Error('ENOENT'), {code: 'ENOENT'})
+      if (state === 'EACCES') throw Object.assign(new Error('EACCES'), {code: 'EACCES'})
+      return state
+    }
+    expect(await runCheck(callerInput, {fetch: fetchFn, readText, env: {}})).toBe(
+      `READER_CHECK_FAIL grafana-mcp-caller ${reason}`,
+    )
+    expect(recorded).toHaveLength(0)
+  })
+
+  test('the token is never in the sentinel', async () => {
+    const {fetchFn} = server({known: OTHER_CALLER_TOKEN})
+    const line = await runCheck(callerInput, grafanaDeps(fetchFn))
+    expect(line).not.toContain(CALLER_TOKEN)
+    expect(line).not.toContain(OTHER_CALLER_TOKEN)
+  })
+})
+
 describe('input handling', () => {
   test.each([
     ['empty stdin', ''],
@@ -719,7 +823,7 @@ describe('input handling', () => {
     }
     const line = await runCheck(stdin, deps(fetchFn))
     expect(line).toMatch(
-      /^READER_CHECK_FAIL (unknown|langfuse|langfuse-refused|grafana-mcp|grafana-mcp-unauthenticated) invalid-input$/,
+      /^READER_CHECK_FAIL (unknown|langfuse|langfuse-refused|grafana-mcp|grafana-mcp-unauthenticated|grafana-mcp-caller) invalid-input$/,
     )
     expect(calls).toBe(0)
   })

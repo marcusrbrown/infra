@@ -9,7 +9,7 @@ import {Buffer} from 'node:buffer'
 // Each store re-reads its file by path so a rotation is picked up without a restart. The caller token is not a Grafana
 // credential: Grafana MCP reads its own service-account token file, so the gate holds no Grafana credential.
 
-import {LANGFUSE_PLACEHOLDER} from './constants'
+import {CALLER_TOKEN_ALPHABET, CALLER_TOKEN_LENGTH, LANGFUSE_PLACEHOLDER} from './constants'
 import {errorCode} from './io'
 
 export type CredentialReason = 'missing' | 'unreadable' | 'placeholder' | 'malformed'
@@ -36,10 +36,16 @@ export function parseLangfuseBasic(text: string): LangfuseCredential {
   return {ok: true, authorization: `Basic ${Buffer.from(pair).toString('base64')}`}
 }
 
-/** The caller token is the file's one printable word. Empty, blank, several words or control characters are malformed. */
+const CALLER_TOKEN_SHAPE = new RegExp(`^[${CALLER_TOKEN_ALPHABET}]{${CALLER_TOKEN_LENGTH}}$`)
+
+/**
+ * The caller token is the file's one token: `CALLER_TOKEN_LENGTH` characters of `CALLER_TOKEN_ALPHABET`, and at most one
+ * trailing newline. Nothing is trimmed, so a file with a space, a second word, a second line or a carriage return is
+ * malformed, and the Grafana MCP entrypoint refuses the same files.
+ */
 export function parseCallerToken(text: string): CallerToken {
-  const token = text.trim()
-  return PRINTABLE.test(token) ? {ok: true, token} : {ok: false, reason: 'malformed'}
+  const token = text.endsWith('\n') ? text.slice(0, -1) : text
+  return CALLER_TOKEN_SHAPE.test(token) ? {ok: true, token} : {ok: false, reason: 'malformed'}
 }
 
 export interface CredentialStoreDeps {

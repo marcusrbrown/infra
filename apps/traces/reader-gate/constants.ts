@@ -18,6 +18,16 @@ export const GRAFANA_PLACEHOLDER = 'glsa_unset'
  */
 export const GRAFANA_MCP_CALLER_HEADER = 'x-reader-gate-token'
 
+/**
+ * What a Grafana MCP caller token is: exactly this many characters of this alphabet (a character class body), with at most
+ * one trailing newline in its file. Both sides apply it: the gate's `parseCallerToken` and the Grafana MCP entrypoint in
+ * the compose file, which writes the same class and length into a shell `case`. Neither may be looser than the other, or
+ * the server starts on a token the gate refuses to send. The deploy generates 32 random bytes as base64url, which is this
+ * shape; `constants.test.ts` and `docker-compose.test.ts` pin the generator and the entrypoint to these two values.
+ */
+export const CALLER_TOKEN_ALPHABET = 'A-Za-z0-9_-'
+export const CALLER_TOKEN_LENGTH = 43
+
 export const CONSUMER_PATTERN = /^[a-z][a-z0-9-]{0,30}$/
 
 /** How often the token file and the credential files are read again. A revoked token is refused within about this long. */

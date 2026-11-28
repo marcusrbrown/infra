@@ -1,7 +1,10 @@
 import {describe, expect, test} from 'bun:test'
 
+import {generateMcpCallerToken} from '../src/deploy'
 import {TRACES_VOID_TOKEN_PREFIX} from '../src/host'
 import {
+  CALLER_TOKEN_ALPHABET,
+  CALLER_TOKEN_LENGTH,
   CONSUMER_PATTERN,
   DEADLINE_MS,
   DEFAULTS,
@@ -55,6 +58,13 @@ describe('constants', () => {
     expect(GRAFANA_MCP_CALLER_HEADER).toBe('x-reader-gate-token')
     expect(GRAFANA_MCP_CALLER_HEADER).toBe(GRAFANA_MCP_CALLER_HEADER.toLowerCase())
     expect(DEFAULTS.grafanaMcpCallerFile).toBe('/run/secrets/mcp-caller/token')
+  })
+
+  test('the caller token shape is the one the deploy generates, and the one the entrypoint accepts', () => {
+    expect(CALLER_TOKEN_ALPHABET).toBe('A-Za-z0-9_-')
+    expect(CALLER_TOKEN_LENGTH).toBe(43)
+    const shape = new RegExp(`^[${CALLER_TOKEN_ALPHABET}]{${CALLER_TOKEN_LENGTH}}$`)
+    for (let attempt = 0; attempt < 50; attempt += 1) expect(generateMcpCallerToken()).toMatch(shape)
   })
 
   test('consumer names follow the kebab pattern', () => {

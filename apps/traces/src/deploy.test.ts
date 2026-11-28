@@ -3677,48 +3677,80 @@ describe('reader-ready also requires the gate to see both upstreams', () => {
   })
 })
 
-describe('reader-ready also proves the Grafana MCP server refuses a call with no caller token', () => {
+describe('reader-ready also proves the Grafana MCP caller policy, both ways', () => {
   const gateOf = (error: Error, id: string) => (error as OperatorSurfaceError).result.gates.find(gate => gate.id === id)
+  const done = `${READER_GUARD_SENTINEL}\n`
+  const refused = 'READER_CHECK_OK grafana-mcp-unauthenticated\n'
+  const accepted = 'READER_CHECK_OK grafana-mcp-caller\n'
 
-  it('runs the private check in the gate container, read only, with no credential and no token in the script', () => {
+  it('runs both private checks in the gate container, read only, with no credential and no token in the script', () => {
     const script = readerGuardScript()
     expect(script).toContain('# traces-step:reader-guard')
-    expect(script).toContain(`${deployModule.COMPOSE} exec -T reader-gate bun /app/check.ts`)
-    expect(script).toContain('"kind":"grafana-mcp-unauthenticated"')
+    for (const kind of ['grafana-mcp-unauthenticated', 'grafana-mcp-caller']) {
+      expect(script).toContain(`"kind":"${kind}"`)
+    }
+    expect(script.match(new RegExp(`${deployModule.COMPOSE} exec -T reader-gate bun /app/check.ts`, 'g'))).toHaveLength(
+      2,
+    )
     expect(script.trimEnd().split('\n').at(-1)).toBe(`echo ${READER_GUARD_SENTINEL}`)
     expect(script).not.toMatch(/\b(?:curl|wget|cat|\.env|secrets)\b/)
     expect(script).not.toMatch(/Authorization|Bearer|Basic|x-reader-gate-token/i)
     expect(Bun.spawnSync(['bash', '-n', '-c', script]).exitCode).toBe(0)
   })
 
-  it('parses the sentinel line of the guard kind, and only with the end sentinel', () => {
-    const done = `${READER_GUARD_SENTINEL}\n`
-    expect(parseReaderGuard(`READER_CHECK_OK grafana-mcp-unauthenticated\n${done}`)).toEqual({ok: true})
-    expect(parseReaderGuard(`READER_CHECK_FAIL grafana-mcp-unauthenticated not-refused:200\n${done}`)).toEqual({
+  it('passes only when both verdicts are present and both pass', () => {
+    expect(parseReaderGuard(`${refused}${accepted}${done}`)).toEqual({ok: true})
+    // Order does not matter, noise is ignored.
+    expect(parseReaderGuard(`noise\n${accepted}${refused}${done}`)).toEqual({ok: true})
+  })
+
+  it('names the check and the reason of a failure, and reports the unauthenticated one first', () => {
+    expect(
+      parseReaderGuard(`READER_CHECK_FAIL grafana-mcp-unauthenticated not-refused:200\n${accepted}${done}`),
+    ).toEqual({ok: false, check: 'unauthenticated', reason: 'not-refused:200'})
+    expect(parseReaderGuard(`${refused}READER_CHECK_FAIL grafana-mcp-caller caller-token-refused\n${done}`)).toEqual({
       ok: false,
-      reason: 'not-refused:200',
+      check: 'caller',
+      reason: 'caller-token-refused',
     })
-    expect(parseReaderGuard(`noise\nREADER_CHECK_FAIL grafana-mcp-unauthenticated network-error\n${done}`)).toEqual({
+    expect(parseReaderGuard(`${refused}READER_CHECK_FAIL grafana-mcp-caller not-initialised:500\n${done}`)).toEqual({
       ok: false,
-      reason: 'network-error',
+      check: 'caller',
+      reason: 'not-initialised:500',
     })
+    expect(
+      parseReaderGuard(
+        `READER_CHECK_FAIL grafana-mcp-unauthenticated network-error\nREADER_CHECK_FAIL grafana-mcp-caller caller-token-malformed\n${done}`,
+      ),
+    ).toEqual({ok: false, check: 'unauthenticated', reason: 'network-error'})
+  })
+
+  it('reads anything incomplete or ambiguous as no answer, never as a pass', () => {
     for (const bad of [
       '',
       done,
-      'READER_CHECK_OK grafana-mcp-unauthenticated\n',
+      `${refused}${accepted}`,
+      // One check is not both.
+      `${refused}${done}`,
+      `${accepted}${done}`,
       // Another kind's verdict is never this proof.
-      `READER_CHECK_OK grafana-mcp\n${done}`,
-      `READER_CHECK_OK langfuse\n${done}`,
-      `READER_CHECK_OK grafana-mcp-unauthenticated extra\n${done}`,
-      `READER_CHECK_MAYBE grafana-mcp-unauthenticated\n${done}`,
-      // Two verdicts are ambiguous, and a pass next to a failure is not a pass.
-      `READER_CHECK_FAIL grafana-mcp-unauthenticated not-refused:200\nREADER_CHECK_OK grafana-mcp-unauthenticated\n${done}`,
+      `READER_CHECK_OK grafana-mcp\n${refused}${done}`,
+      `READER_CHECK_OK grafana-mcp\n${accepted}${done}`,
+      `READER_CHECK_OK langfuse\nREADER_CHECK_OK grafana-mcp\n${done}`,
+      // A verdict that does not fit its shape.
+      `READER_CHECK_OK grafana-mcp-unauthenticated extra\n${accepted}${done}`,
+      `${refused}READER_CHECK_OK grafana-mcp-caller extra\n${done}`,
+      `READER_CHECK_FAIL grafana-mcp-unauthenticated\n${accepted}${done}`,
+      `READER_CHECK_MAYBE grafana-mcp-unauthenticated\n${accepted}${done}`,
+      // Two verdicts of one kind are ambiguous, and a pass next to a failure is not a pass.
+      `${refused}${refused}${accepted}${done}`,
+      `READER_CHECK_FAIL grafana-mcp-caller caller-token-refused\n${refused}${accepted}${done}`,
     ]) {
       expect({bad, parsed: parseReaderGuard(bad)}).toEqual({bad, parsed: undefined})
     }
   })
 
-  it('passes when the server refuses: one check, after the health read and before the embedder, with nothing on stdin', async () => {
+  it('passes when the server refuses a call with no token and accepts one with it: one run, after the health read and before the embedder, with nothing on stdin', async () => {
     const host = new FakeHost()
     const {result} = await run(host)
     expect(result.gates.find(gate => gate.id === 'reader-ready')).toMatchObject({status: 'pass', kind: 'operator'})
@@ -3730,15 +3762,56 @@ describe('reader-ready also proves the Grafana MCP server refuses a call with no
     expect(call?.command).not.toMatch(/secrets|\.env|token|password/i)
   })
 
-  it.each([
-    ['answers 200: the policy is not active', {status: 200}, 'not-refused:200'],
-    ['answers 403: not what the policy answers', {status: 403}, 'not-refused:403'],
-    ['cannot be reached', 'network-error', 'network-error'],
-  ] as const)(
-    'fails reader-ready alone when the server %s, names the reason, and leaves an open route open',
-    async (_name, answer, reason) => {
+  const FAILS = [
+    [
+      'the server answers a call with no token with 200',
+      {readerGuard: {status: 200}},
+      'did not refuse a call with no caller token',
+      'not-refused:200',
+    ],
+    [
+      'the server answers a call with no token with 403',
+      {readerGuard: {status: 403}},
+      'did not refuse a call with no caller token',
+      'not-refused:403',
+    ],
+    [
+      'the server cannot be reached for the unauthenticated call',
+      {readerGuard: 'network-error'},
+      'did not refuse a call with no caller token',
+      'network-error',
+    ],
+    [
+      'the server answers 401 even with the configured token',
+      {readerGuardCaller: 'caller-token-refused'},
+      "did not accept the gate's caller token",
+      'caller-token-refused',
+    ],
+    [
+      'an existing token file is malformed',
+      {readerGuardCaller: 'caller-token-malformed'},
+      "did not accept the gate's caller token",
+      'caller-token-malformed',
+    ],
+    [
+      'the token file is missing',
+      {readerGuardCaller: 'caller-token-missing'},
+      "did not accept the gate's caller token",
+      'caller-token-missing',
+    ],
+    [
+      'the server does not initialise a session',
+      {readerGuardCaller: 'not-initialised:500'},
+      "did not accept the gate's caller token",
+      'not-initialised:500',
+    ],
+  ] as const
+
+  it.each(FAILS)(
+    'fails reader-ready alone when %s, names the check and the reason, and leaves an open route open',
+    async (_name, options, message, reason) => {
       const host = await openStack()
-      host.options.readerGuard = answer
+      Object.assign(host.options, options)
       const error = await failure(host)
       expect(error).toBeInstanceOf(OperatorSurfaceError)
       expect(failedOperatorGates((error as OperatorSurfaceError).result.gates).map(gate => gate.id)).toEqual([
@@ -3746,6 +3819,7 @@ describe('reader-ready also proves the Grafana MCP server refuses a call with no
       ])
       const gate = gateOf(error, 'reader-ready')
       expect(gate).toMatchObject({status: 'fail', kind: 'operator'})
+      expect(gate?.detail).toContain(message)
       expect(gate?.detail).toContain(reason)
       expect(gate?.detail).toContain('Ingest is not affected')
       expect((error as OperatorSurfaceError).ingest).toBe('open')
@@ -3755,6 +3829,17 @@ describe('reader-ready also proves the Grafana MCP server refuses a call with no
     },
   )
 
+  it('a bad token file is kept by a redeploy: the file step does not replace it, and the gate still fails', async () => {
+    const host = await openStack()
+    host.readerFiles.set('mcpCaller', 'two words')
+    host.options.readerGuardCaller = 'caller-token-malformed'
+    const first = await failure(host)
+    const second = await failure(host)
+    expect(gateOf(first, 'reader-ready')).toMatchObject({status: 'fail'})
+    expect(gateOf(second, 'reader-ready')).toMatchObject({status: 'fail'})
+    expect(host.readerFiles.get('mcpCaller')).toBe('two words')
+  })
+
   it('fails reader-ready, and says the check did not answer, when its output cannot be read', async () => {
     const host = await openStack()
     host.options.readerGuard = 'unreadable'
@@ -3762,6 +3847,13 @@ describe('reader-ready also proves the Grafana MCP server refuses a call with no
     expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
     expect(gateOf(error, 'reader-ready')?.detail).toContain('did not answer')
     expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('fails reader-ready when only the caller check cannot be read', async () => {
+    const host = await openStack()
+    host.options.readerGuardCaller = 'unreadable'
+    const error = await failure(host)
+    expect(gateOf(error, 'reader-ready')?.detail).toContain('did not answer')
   })
 
   it('treats a failing exec as no answer', async () => {

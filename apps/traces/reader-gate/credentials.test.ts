@@ -4,6 +4,7 @@ import {Buffer} from 'node:buffer'
 import {describe, expect, test} from 'bun:test'
 import {LANGFUSE_PLACEHOLDER} from './constants'
 import {createCallerTokenStore, createCredentialStore, parseCallerToken, parseLangfuseBasic} from './credentials'
+import {CALLER_TOKEN, OTHER_CALLER_TOKEN} from './testing'
 
 const PAIR = 'pk-lf-1111aaaa:sk-lf-2222bbbb'
 
@@ -112,21 +113,31 @@ describe('credential store', () => {
   })
 })
 
-const CALLER = 'Zk3-_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abc'
+const CALLER = CALLER_TOKEN
 
 describe('parseCallerToken', () => {
-  test('takes the whole trimmed value as the token', () => {
+  test('takes exactly one token, with at most one trailing newline', () => {
     expect(parseCallerToken(CALLER)).toEqual({ok: true, token: CALLER})
     expect(parseCallerToken(`${CALLER}\n`)).toEqual({ok: true, token: CALLER})
   })
 
   test.each([
     ['empty', ''],
+    ['only a newline', '\n'],
     ['whitespace', ' \n\t'],
-    ['inner whitespace', 'abc def'],
+    ['two words', 'abc def'],
+    ['two words that join to a valid token', `${CALLER.slice(0, 20)} ${CALLER.slice(20)}`],
     ['two lines', `${CALLER}\nsecond`],
-    ['control characters', 'abc\u0000def'],
-    ['non-ASCII', 'abc\u00E9def'],
+    ['two trailing newlines', `${CALLER}\n\n`],
+    ['a carriage return', `${CALLER}\r\n`],
+    ['leading whitespace', ` ${CALLER}`],
+    ['trailing whitespace', `${CALLER} `],
+    ['one character short', CALLER.slice(1)],
+    ['one character long', `${CALLER}a`],
+    ['a character outside base64url', `${CALLER.slice(1)}+`],
+    ['padding', `${CALLER.slice(1)}=`],
+    ['control characters', `${CALLER.slice(1)}\u0000`],
+    ['non-ASCII', `${CALLER.slice(1)}\u00E9`],
   ])('refuses %s as malformed', (_name, text) => {
     expect(parseCallerToken(text)).toEqual({ok: false, reason: 'malformed'})
   })
@@ -163,9 +174,9 @@ describe('caller token store', () => {
   test('picks up a rotated token, and drops to unavailable when the file goes bad', async () => {
     const harness = buildCaller(CALLER)
     await harness.store.refresh()
-    harness.set('rotated-token')
+    harness.set(OTHER_CALLER_TOKEN)
     await harness.store.refresh()
-    expect(harness.store.current()).toEqual({ok: true, token: 'rotated-token'})
+    expect(harness.store.current()).toEqual({ok: true, token: OTHER_CALLER_TOKEN})
     harness.set('')
     await harness.store.refresh()
     expect(harness.store.current()).toEqual({ok: false, reason: 'malformed'})

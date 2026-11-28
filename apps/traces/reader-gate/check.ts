@@ -14,6 +14,12 @@
 //       `tools/list` on grafana-mcp holds only read tools, and one read tool call succeeds. grafana-mcp reads its own
 //       service-account token file, so the check sends no Grafana credential. It sends the caller token, from the same file
 //       the gate reads, in the caller header: the server refuses a call without it.
+//   {"kind":"grafana-mcp-caller"}
+//       An MCP `initialize` that carries the caller token from the gate's own file succeeds: 200 and a JSON-RPC result.
+//       `initialize` needs no Grafana service-account token, so it works before `traces reader backend grafana` has run.
+//       A 401 is `caller-token-refused` (the file and the running server disagree), any other failure is
+//       `not-initialised:<status>`, and a file the gate would refuse to send is `caller-token-missing`, `-unreadable` or
+//       `-malformed`, with no request made.
 //   {"kind":"grafana-mcp-unauthenticated"}
 //       The same server, reached by the same address, answers 401 to an MCP request that carries no caller token and no
 //       credential of any kind. That proves the caller policy is active: any other answer, 200 included, is a failure, and
@@ -41,9 +47,15 @@ export interface CheckDeps {
   env: Env
 }
 
-type Kind = 'langfuse' | 'langfuse-refused' | 'grafana-mcp' | 'grafana-mcp-unauthenticated'
+type Kind = 'langfuse' | 'langfuse-refused' | 'grafana-mcp' | 'grafana-mcp-unauthenticated' | 'grafana-mcp-caller'
 
-const KINDS: readonly Kind[] = ['langfuse', 'langfuse-refused', 'grafana-mcp', 'grafana-mcp-unauthenticated']
+const KINDS: readonly Kind[] = [
+  'langfuse',
+  'langfuse-refused',
+  'grafana-mcp',
+  'grafana-mcp-unauthenticated',
+  'grafana-mcp-caller',
+]
 
 class CheckFailure extends Error {
   constructor(readonly reason: string) {
@@ -71,6 +83,9 @@ export async function runCheck(stdin: string, deps: CheckDeps): Promise<string> 
     if (input.kind === 'grafana-mcp') {
       const token = await loadCallerToken(config.grafanaMcpCallerFile, deps)
       await checkGrafana(`${config.grafanaMcpUpstream}/mcp`, {[GRAFANA_MCP_CALLER_HEADER]: token}, deps)
+    } else if (input.kind === 'grafana-mcp-caller') {
+      const token = await loadCallerToken(config.grafanaMcpCallerFile, deps)
+      await checkGrafanaCaller(`${config.grafanaMcpUpstream}/mcp`, {[GRAFANA_MCP_CALLER_HEADER]: token}, deps)
     } else if (input.kind === 'grafana-mcp-unauthenticated') {
       await checkGrafanaUnauthenticated(`${config.grafanaMcpUpstream}/mcp`, deps)
     } else {
@@ -120,7 +135,7 @@ function parseInput(stdin: string): Input | null {
   if (!isRecord(value)) return null
   const kind = asKind(value.kind)
   if (kind === null) return null
-  if (kind === 'grafana-mcp' || kind === 'grafana-mcp-unauthenticated') return {kind}
+  if (kind === 'grafana-mcp' || kind === 'grafana-mcp-unauthenticated' || kind === 'grafana-mcp-caller') return {kind}
   if (typeof value.credentialFile !== 'string') return null
   return {kind, credentialFile: value.credentialFile}
 }
@@ -340,6 +355,30 @@ async function checkGrafana(url: string, caller: Record<string, string>, deps: C
 
   const call = result(await send(deps, url, post(headers, rpc('tools/call', {name: tool.name, arguments: {}}))))
   if (call === null || call.isError === true) throw new CheckFailure('read-call-failed')
+}
+
+/**
+ * An MCP `initialize` with the caller token. The server's caller policy lets it through and answers a JSON-RPC result:
+ * 401 means it does not know this token, and anything else that is not a JSON-RPC result means no session was started.
+ * It needs no Grafana credential, so the reader-ready gate can run it before the service-account token is installed.
+ */
+async function checkGrafanaCaller(url: string, caller: Record<string, string>, deps: CheckDeps): Promise<void> {
+  const reply = await send(
+    deps,
+    url,
+    post(
+      caller,
+      rpc('initialize', {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: {name: 'reader-gate-check', version: '1'},
+      }),
+    ),
+  )
+  if (reply.status === 401) throw new CheckFailure('caller-token-refused')
+  if (result(reply) === null || !isRecord(reply.body) || reply.body.jsonrpc !== '2.0') {
+    throw new CheckFailure(withStatus('not-initialised', reply))
+  }
 }
 
 /**

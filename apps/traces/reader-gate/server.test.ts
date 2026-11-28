@@ -5,13 +5,11 @@ import {describe, expect, test} from 'bun:test'
 import {GRAFANA_MCP_CALLER_HEADER} from './constants'
 import {createLimits} from './limits'
 import {createServer} from './server'
-import {basicHeader, makeToken, tokenLine, voidLine} from './testing'
+import {basicHeader, CALLER_TOKEN, makeToken, tokenLine, voidLine} from './testing'
 import {createTokenStore} from './tokens'
 
 const VIEWER_PAIR = 'pk-lf-viewer:sk-lf-viewer'
 const VIEWER_AUTH = `Basic ${Buffer.from(VIEWER_PAIR).toString('base64')}`
-// Not a real value: the gate sends whatever its file holds, and the Grafana MCP server compares it.
-const CALLER_TOKEN = 'caller-token-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 const alice = makeToken('alice')
 const bob = makeToken('bob')
 const senderToken = makeToken('sender-group-marcusrbrown')

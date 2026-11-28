@@ -518,8 +518,10 @@ services:
   #
   # Caller token: MCP calls without `--server-auth-header` are refused, so only the gate can call it. The server takes the
   # token from argv or `MCP_GRAFANA_SERVER_TOKEN` only (no file variant in v2.4.0), so the entrypoint reads the file into
-  # the server's environment and execs it; a missing or empty file stops the container. It joins the gate's group to read
-  # that one file.
+  # the server's environment and execs it. It accepts only what the gate accepts (`CALLER_TOKEN_ALPHABET` and
+  # `CALLER_TOKEN_LENGTH` in reader-gate/constants.ts, at most one trailing newline), so a bad file stops the container with a
+  # fixed message and no token text, and never starts open or on a token the gate would refuse to send. It joins the gate's
+  # group to read that one file.
   grafana-mcp:
     image: grafana/mcp-grafana:2.4.0@sha256:63d4501d3166c2b9242d8a2b5b7df8892c59c6c477be3a2a61bcf8a252671f31
     restart: unless-stopped
@@ -532,8 +534,13 @@ services:
       - /bin/sh
       - -c
       - >-
-        token=$$(tr -d '[:space:]' < /run/secrets/mcp-caller/token) || exit 1;
-        [ -n "$$token" ] || { echo 'grafana-mcp: the caller token file is empty' >&2; exit 1; };
+        f=/run/secrets/mcp-caller/token;
+        bad() { echo 'grafana-mcp: the caller token file is missing or is not exactly one valid token' >&2; exit 1; };
+        [ -r "$$f" ] || bad;
+        { IFS= read -r token; IFS= read -r extra && extra=more; } < "$$f";
+        [ -z "$$extra" ] || bad;
+        case "$$token" in *[!A-Za-z0-9_-]*) bad;; esac;
+        [ "$${#token}" -eq 43 ] || bad;
         export MCP_GRAFANA_SERVER_TOKEN="$$token"; exec /app/mcp-grafana "$$@"
       - mcp-grafana
     command:

@@ -1453,45 +1453,57 @@ export function parseReaderHealth(stdout: string): ReaderHealth | undefined {
 
 export const READER_GUARD_SENTINEL = 'TRACES_READER_GUARD_CHECKED'
 
-/** The gate's private check kind that asks the Grafana MCP server for an MCP `initialize` with no caller token. */
-const READER_GUARD_KIND = 'grafana-mcp-unauthenticated'
+/**
+ * The gate's two private check kinds on the Grafana MCP server's caller policy: a call with no caller token must be
+ * refused with 401, and a call with the token the gate itself loads must initialise a session. Both are needed. The first
+ * alone passes for a server that refuses everyone, which is what a token file the gate cannot send looks like.
+ */
+const READER_GUARD_KINDS = {unauthenticated: 'grafana-mcp-unauthenticated', caller: 'grafana-mcp-caller'} as const
 
-/** What the unauthenticated-call check said: the server refused with 401 (`ok`), or the reason it did not. */
-export type ReaderGuard = {ok: true} | {ok: false; reason: string}
+type ReaderGuardCheck = keyof typeof READER_GUARD_KINDS
+
+/** What the two checks said: both passed, or the first that did not, with its kind and reason. */
+export type ReaderGuard = {ok: true} | {ok: false; check: ReaderGuardCheck; reason: string}
 
 /**
- * Asks the gate container to run its private check, `docker compose exec -T reader-gate bun /app/check.ts`, for a call
- * to the Grafana MCP server with no caller token. Read only: the one request carries no credential of any kind, the
- * check goes straight to the server (not through the gate's route), and no file is written. A container that is not
- * running makes `exec` fail, and the script still ends in its sentinel with no verdict line, which `parseReaderGuard`
- * reads as no answer.
+ * Asks the gate container to run its two private checks, `docker compose exec -T reader-gate bun /app/check.ts`, one
+ * after the other. Read only: the checks go straight to the server (not through the gate's route), the first sends no
+ * credential of any kind, the second sends the token the gate reads from its own file (which this script never reads,
+ * names or prints), and no file is written. A container that is not running makes `exec` fail, and the script still ends
+ * in its sentinel with no verdict line, which `parseReaderGuard` reads as no answer.
  */
 export function readerGuardScript(): string {
+  const run = (kind: string): string =>
+    `printf '%s' ${shellQuote(JSON.stringify({kind}))} | ${COMPOSE} exec -T reader-gate bun /app/check.ts || true`
   return `set -u
 # traces-step:reader-guard
-printf '%s' ${shellQuote(JSON.stringify({kind: READER_GUARD_KIND}))} | ${COMPOSE} exec -T reader-gate bun /app/check.ts || true
+${run(READER_GUARD_KINDS.unauthenticated)}
+${run(READER_GUARD_KINDS.caller)}
 echo ${READER_GUARD_SENTINEL}`
 }
 
-const READER_GUARD_LINE = new RegExp(
-  String.raw`^READER_CHECK_(OK|FAIL) ${READER_GUARD_KIND}(?: ([a-z-]+(?::\d{3})?))?$`,
-)
-
 /**
- * The verdict from a complete answer (one sentinel line of this check's kind, and the end sentinel). A pass has no
- * reason and a failure has one: a line that does not fit, two verdicts, or no verdict is `undefined`, never a pass.
+ * The verdict from a complete answer (every line of both kinds, and the end sentinel). Each kind must give exactly one
+ * verdict, a pass with no reason and a failure with one: a missing kind, a line that does not fit, or two verdicts of one
+ * kind is `undefined`, never a pass. When both fail, the unauthenticated check is the one reported.
  */
 export function parseReaderGuard(stdout: string): ReaderGuard | undefined {
   const lines = stdout.split('\n').map(line => line.trim())
   if (!lines.includes(READER_GUARD_SENTINEL)) return undefined
-  const verdicts = lines.flatMap(line => {
-    const match = READER_GUARD_LINE.exec(line)
-    return match === null ? [] : [{pass: match[1] === 'OK', reason: match[2]}]
+  const verdicts = (Object.keys(READER_GUARD_KINDS) as ReaderGuardCheck[]).map(check => {
+    const line = new RegExp(String.raw`^READER_CHECK_(OK|FAIL) ${READER_GUARD_KINDS[check]}(?: ([a-z-]+(?::\d{3})?))?$`)
+    const found = lines.flatMap(text => {
+      const match = line.exec(text)
+      return match === null ? [] : [{pass: match[1] === 'OK', reason: match[2]}]
+    })
+    const [only, ...rest] = found
+    if (only === undefined || rest.length > 0) return undefined
+    if (only.pass) return only.reason === undefined ? ({check, ok: true} as const) : undefined
+    return only.reason === undefined ? undefined : ({check, ok: false, reason: only.reason} as const)
   })
-  const [only, ...rest] = verdicts
-  if (only === undefined || rest.length > 0) return undefined
-  if (only.pass) return only.reason === undefined ? {ok: true} : undefined
-  return only.reason === undefined ? undefined : {ok: false, reason: only.reason}
+  if (verdicts.includes(undefined)) return undefined
+  const failed = verdicts.find(verdict => verdict?.ok === false)
+  return failed === undefined || failed.ok ? {ok: true} : {ok: false, check: failed.check, reason: failed.reason}
 }
 
 export const INGEST_PROBE_SENTINEL = 'TRACES_INGEST_PROBED'
@@ -2839,10 +2851,11 @@ async function awaitReaderHealth(exec: RemoteExec, deps: DeployDeps): Promise<vo
 }
 
 /**
- * Runs the unauthenticated-call check once. It runs inside the operator gate `reader-ready`, after the gate has seen both
- * upstreams up, and only reads, so the failure it throws can never reach the route. A server that answers anything but
- * the 401 the caller policy gives, or an answer that cannot be read, or a rejected execution, fails it: the reason names
- * the status the server returned.
+ * Runs the two caller-policy checks once. It runs inside the operator gate `reader-ready`, after the gate has seen both
+ * upstreams up, and only reads, so the failure it throws can never reach the route. A server that answers a call with no
+ * token with anything but the 401 the policy gives, a server that does not take the token the gate holds (or a token file
+ * the gate cannot send), an answer that cannot be read, or a rejected execution, fails it. The reason names the check and
+ * carries the status or the fixed word, never a token.
  */
 async function awaitReaderGuard(exec: RemoteExec): Promise<void> {
   let guard: ReaderGuard | undefined
@@ -2853,7 +2866,12 @@ async function awaitReaderGuard(exec: RemoteExec): Promise<void> {
     guard = undefined
   }
   if (guard === undefined) throw new Error('the Grafana MCP caller check did not answer')
-  if (!guard.ok) throw new Error(`the Grafana MCP server did not refuse a call with no caller token (${guard.reason})`)
+  if (guard.ok) return
+  throw new Error(
+    guard.check === 'unauthenticated'
+      ? `the Grafana MCP server did not refuse a call with no caller token (${guard.reason})`
+      : `the Grafana MCP server did not accept the gate's caller token (${guard.reason})`,
+  )
 }
 
 /**

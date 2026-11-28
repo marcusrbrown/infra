@@ -4,8 +4,9 @@ import {join} from 'node:path'
 
 import {describe, expect, it} from 'bun:test'
 
-import {DEFAULTS, GRAFANA_MCP_CALLER_HEADER} from './reader-gate/constants'
-import {INGEST_SERVICES, INSIGHT_SERVICES, MONITORING_SERVICES} from './src/deploy'
+import {CALLER_TOKEN_ALPHABET, CALLER_TOKEN_LENGTH, DEFAULTS, GRAFANA_MCP_CALLER_HEADER} from './reader-gate/constants'
+import {parseCallerToken} from './reader-gate/credentials'
+import {generateMcpCallerToken, INGEST_SERVICES, INSIGHT_SERVICES, MONITORING_SERVICES} from './src/deploy'
 import {ENDPOINTS, METRIC_NAMES, PATHS, PORTS, THRESHOLDS} from './src/health-report'
 import {
   EMBEDDER_USER_ID,
@@ -1074,6 +1075,7 @@ describe('traces compose: Grafana MCP server', () => {
       expect(entrypoint().slice(0, 2)).toEqual(['/bin/sh', '-c'])
       expect(script()).toContain(`/run/secrets/mcp-caller/token`)
       expect(script()).toContain('export MCP_GRAFANA_SERVER_TOKEN=')
+      expect(script()).toContain('read -r')
       expect(script()).toMatch(/exec \/app\/mcp-grafana "\$@"$/)
       // The image's entrypoint is replaced, so the command carries every flag it used to: transport and address.
       expect(flags().get('t')).toBe('streamable-http')
@@ -1133,31 +1135,76 @@ describe('traces compose: Grafana MCP server', () => {
       }
     }
 
-    it('passes the file content to the server in its environment, trimmed, and its arguments through unchanged', () => {
-      const token = 'abc_DEF-123'
-      for (const content of [token, `${token}\n`, ` ${token} \n\n`]) {
+    const TOKEN = generateMcpCallerToken()
+
+    it('passes a valid token to the server in its environment, and its arguments through unchanged', () => {
+      for (const content of [TOKEN, `${TOKEN}\n`]) {
         const result = runEntrypoint(content)
         expect(result.code).toBe(0)
-        expect(result.out).toBe(`token=${token}\nargs=--flag value\n`)
+        expect(result.out).toBe(`token=${TOKEN}\nargs=--flag value\n`)
       }
     })
 
     it('never puts the token in the server arguments', () => {
-      const result = runEntrypoint('the-secret-value')
-      expect(result.out).toContain('token=the-secret-value')
-      expect(result.out.split('\n').find(line => line.startsWith('args='))).not.toContain('the-secret-value')
+      const result = runEntrypoint(TOKEN)
+      expect(result.out).toContain(`token=${TOKEN}`)
+      expect(result.out.split('\n').find(line => line.startsWith('args='))).not.toContain(TOKEN)
     })
 
-    it.each([
+    // One definition of a valid token, the gate's: exactly CALLER_TOKEN_LENGTH characters of CALLER_TOKEN_ALPHABET, with at
+    // most one trailing newline. The entrypoint and the gate must give every file the same verdict, or the server starts
+    // on a token the gate then refuses to send and every Grafana read is a 502.
+    const FILES: [string, string | undefined][] = [
       ['missing', undefined],
       ['empty', ''],
+      ['only a newline', '\n'],
       ['only whitespace', ' \n\t\n'],
-    ])('does not start the server, and says why, when the token file is %s', (_name, content) => {
-      const result = runEntrypoint(content)
-      expect(result.code).not.toBe(0)
-      // The stand-in prints on start: nothing printed means the server was never run, so it never served open.
-      expect(result.out).toBe('')
-      expect(result.err).not.toBe('')
+      ['two words', 'abc def'],
+      ['two words that join to a valid token', `${TOKEN.slice(0, 20)} ${TOKEN.slice(20)}`],
+      ['two words, one a full token', `${TOKEN} ${TOKEN}`],
+      ['a valid token and a second line', `${TOKEN}\nsecond`],
+      ['a valid token and an empty second line', `${TOKEN}\n\n`],
+      ['a valid token and a carriage return', `${TOKEN}\r\n`],
+      ['a leading space', ` ${TOKEN}`],
+      ['a trailing space', `${TOKEN} `],
+      ['one character short', TOKEN.slice(1)],
+      ['one character long', `${TOKEN}a`],
+      ['a character outside the alphabet', `${TOKEN.slice(1)}+`],
+      ['padding', `${TOKEN.slice(1)}=`],
+      ['a glob character', `${TOKEN.slice(1)}*`],
+    ]
+
+    it.each(FILES)(
+      'does not start the server, and says why without any token text, when the token file is %s',
+      (_name, content) => {
+        const result = runEntrypoint(content)
+        expect(result.code).not.toBe(0)
+        // The stand-in prints on start: nothing printed means the server was never run, so it never served open.
+        expect(result.out).toBe('')
+        expect(result.err).not.toBe('')
+        if (content !== undefined)
+          for (const word of content.split(/\s+/).filter(Boolean)) expect(result.err).not.toContain(word)
+      },
+    )
+
+    it('gives every file the verdict the gate gives it', () => {
+      for (const [name, content] of [
+        ...FILES,
+        ['one valid token', TOKEN],
+        ['one valid token and one newline', `${TOKEN}\n`],
+      ] as const) {
+        if (content === undefined) continue
+        expect({name, entrypoint: runEntrypoint(content).code === 0}).toEqual({
+          name,
+          entrypoint: parseCallerToken(content).ok,
+        })
+      }
+    })
+
+    it('uses the gate alphabet and length, not its own copy', () => {
+      expect(script()).toContain(`*[!${CALLER_TOKEN_ALPHABET}]*`)
+      expect(script()).toContain(`-eq ${CALLER_TOKEN_LENGTH}`)
+      expect(script()).not.toMatch(/\btr\b|\bcat\b|\bsed\b|\bawk\b|\bgrep\b/)
     })
   })
 

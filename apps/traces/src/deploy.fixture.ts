@@ -147,6 +147,11 @@ export interface FakeOptions {
    * `unreadable` (the check printed no verdict line).
    */
   readerGuard?: {status: number} | 'network-error' | 'unreadable'
+  /**
+   * What the gate's authenticated check reports: a pass (default), the reason it failed (`caller-token-refused`,
+   * `caller-token-malformed`, `not-initialised:500`, ...), or `unreadable` (the check printed no verdict line).
+   */
+  readerGuardCaller?: string
 }
 
 export type ReaderHealthAnswer = {langfuse: boolean; grafana: boolean} | 'unreachable'
@@ -425,7 +430,7 @@ export class FakeHost {
       }
       case step === 'reader-guard': {
         const configured = this.options.readerGuard ?? {status: 401}
-        const verdict =
+        const unauthenticated =
           configured === 'unreadable'
             ? ''
             : configured === 'network-error'
@@ -433,7 +438,18 @@ export class FakeHost {
               : configured.status === 401
                 ? 'READER_CHECK_OK grafana-mcp-unauthenticated\n'
                 : `READER_CHECK_FAIL grafana-mcp-unauthenticated not-refused:${configured.status}\n`
-        return ok(`${verdict}TRACES_READER_GUARD_CHECKED\n`)
+        const caller = this.options.readerGuardCaller
+        const authenticated =
+          caller === 'unreadable'
+            ? ''
+            : caller === undefined
+              ? 'READER_CHECK_OK grafana-mcp-caller\n'
+              : `READER_CHECK_FAIL grafana-mcp-caller ${caller}\n`
+        // Each check answers only if the script asked for it, as the gate container would.
+        const asked = (kind: string): boolean => command.includes(`"kind":"${kind}"`)
+        return ok(
+          `${asked('grafana-mcp-unauthenticated') ? unauthenticated : ''}${asked('grafana-mcp-caller') ? authenticated : ''}TRACES_READER_GUARD_CHECKED\n`,
+        )
       }
       case step.startsWith('reader-file:'): {
         const kind = step.slice('reader-file:'.length)

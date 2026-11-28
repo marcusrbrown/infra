@@ -265,9 +265,13 @@ env:
        stranded-or-failed decision, so a failure before a parked gate
        stays visible, and the Details cell notes that a newer deploy is
        waiting at its gate. If none of them settled, the row is `⏸ At
-       gate`. When an app has no `main` deployment at all, the row is
-       `— Skipped` with the Details cell saying no deployment record
-       exists. Read logs and `gh run view <run-id> --json jobs` from the
+       gate`. If a deployments or statuses read fails, or a deployment
+       has no status at all, the outcome is unavailable: the row is
+       `❔ Unknown` with the reason in the Details cell, and no issue is
+       opened. `— Skipped` is reserved for a lookup that succeeded and
+       returned no `main` deployment, with the Details cell saying no
+       deployment record exists. Read logs and `gh run view <run-id>
+       --json jobs` from the
        run in the status URL (`.../actions/runs/<run-id>/job/<job-id>`);
        run listing is only a way to read logs, never to find the last
        deploy. The AT-GATE rules below still apply to a waiting
@@ -496,15 +500,28 @@ env:
          only — no issue.
          Note: `build-collector` is NOT the deploy, and a failed
          `build-collector` leaves no deployment record because the deploy
-         job is skipped. So also list the newest few runs of `deploy.yaml`
+         job is skipped. Find the newest `success` traces deployment with
+         the shared rule (the first `success` status among the listed
+         `main` deployments, newest first, using the run id in its status
+         URL), read that run's `createdAt` with `gh run view <run-id>
+         --json createdAt`, then scan `main` runs of both `deploy.yaml`
          (jobs `deploy-traces / build-collector` and `deploy-traces /
-         deploy-traces`) and of a direct dispatch of `deploy-traces.yaml`
-         (jobs `build-collector` and `deploy-traces`) with `gh run list
-         --workflow <file> -L 5`, and read `gh run view <run-id> --json
-         jobs` for any run newer than the last deployment record. A failed
-         `build-collector` in either workflow, with no later successful
-         deploy job, is an issue (the deploy job is skipped, so it is not
-         at gate).
+         deploy-traces`) and a direct dispatch of `deploy-traces.yaml`
+         (jobs `build-collector` and `deploy-traces`), newest first, back
+         to that run: `gh run list --workflow <file> --branch main -L 100
+         --json databaseId,createdAt,conclusion`, then `gh run view <id>
+         --json jobs` only on runs created after the successful deploy's
+         run. Skip a run where `build-collector` did not run (skipped or
+         absent). A failed `build-collector` in either workflow, newer
+         than the last successful deploy job, is an issue (the deploy job
+         is skipped, so it is not at gate); a newer deployment that is
+         waiting or failed does NOT clear it. If a listing of 100 runs
+         has none created at or before the successful deploy's run, or
+         any read fails, the evidence is incomplete: say so in the
+         Details cell and open no issue. If no `success` traces
+         deployment exists among the listed ones, say so in the Details
+         cell and treat any failed `build-collector` in the scanned
+         window as unresolved.
        - Verify traces.fro.bot is reachable: `curl -sf -o /dev/null -w
          "%{http_code}" https://traces.fro.bot/healthz` should return 200.
          A 5xx, a 503 from the health reporter, a connection error, or a
@@ -939,34 +956,34 @@ env:
     ### Deploy Pipeline Health
     | App | Check | Status | Details |
     | --- | --- | --- | --- |
-    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) | [run link] |
+    | keeweb | Last deploy-keeweb run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / ❔ Unknown | [run link] |
     | keeweb | kw.igg.ms reachable | ✅ 200 / ❌ Error | [HTTP status] |
     | keeweb | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | keeweb | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | cliproxy | Last deploy-cliproxy run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped / ❔ Unknown | [run link] |
     | cliproxy | cliproxy.fro.bot reachable | ✅ 401/200 / ❌ 5xx/timeout | [HTTP status] |
     | cliproxy | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | cliproxy | Host keys | ✅ Current / ⚠️ Stale | [details] |
     | cliproxy | Auth monitor scheduled run | ✅ Healthy / ❌ Auth dead / ⚠️ Unknown / ⚠️ Monitor failing / — Missing | [run link + summary] |
-    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | gateway | Last deploy-gateway run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped / ❔ Unknown | [run link] |
     | gateway | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | gateway | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | umami | Last deploy-umami run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped / ❔ Unknown | [run link] |
     | umami | metrics.fro.bot reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | umami | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | umami | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | dashboard | Last deploy-dashboard run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | dashboard | Last deploy-dashboard run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped / ❔ Unknown | [run link] |
     | dashboard | dashboard.fro.bot/api/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | dashboard | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | dashboard | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | vpn | Last deploy-vpn run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | vpn | Last deploy-vpn run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped / ❔ Unknown | [run link] |
     | vpn | Env secrets | ✅ Set / ⚠️ Missing | [details] |
     | vpn | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | broker | Last deploy-broker run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | broker | Last deploy-broker run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped / ❔ Unknown | [run link] |
     | broker | broker.fro.bot/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | broker | Env secrets/variable | ✅ Set / ⚠️ Missing | [details] |
     | broker | Host keys | ✅ Current / ⚠️ Stale | [details] |
-    | traces | Last deploy-traces run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped | [run link] |
+    | traces | Last deploy-traces run | ✅ Pass / ❌ Fail / ⏸ At gate / ⏸ At gate — not notified (<outcome>) / 🚫 Stranded (cancelled) / — Skipped / ❔ Unknown | [run link] |
     | traces | traces.fro.bot/healthz reachable | ✅ 200 / ❌ 5xx/timeout | [HTTP status] |
     | traces | Ingest route | ✅ As expected / ❌ Unexpected | [HTTP status, TRACES_INGEST_OPEN] |
     | traces | Env secrets | ✅ Set / ⚠️ Missing / ❌ Bootstrap keys present | [details] |

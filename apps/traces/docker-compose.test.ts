@@ -1,7 +1,10 @@
-import {readdirSync} from 'node:fs'
+import {chmodSync, mkdtempSync, readdirSync, rmSync, writeFileSync} from 'node:fs'
+import {tmpdir} from 'node:os'
+import {join} from 'node:path'
 
 import {describe, expect, it} from 'bun:test'
 
+import {DEFAULTS, GRAFANA_MCP_CALLER_HEADER} from './reader-gate/constants'
 import {INGEST_SERVICES, INSIGHT_SERVICES, MONITORING_SERVICES} from './src/deploy'
 import {ENDPOINTS, METRIC_NAMES, PATHS, PORTS, THRESHOLDS} from './src/health-report'
 import {
@@ -921,6 +924,7 @@ describe('traces compose: reader gate', () => {
     expect(volumesOf('reader-gate').sort()).toEqual([
       './reader-gate:/app:ro',
       './readers:/run/readers:ro',
+      './secrets/mcp-caller:/run/secrets/mcp-caller:ro',
       './secrets/reader-gate:/run/secrets/reader-gate:ro',
     ])
   })
@@ -939,6 +943,8 @@ describe('traces compose: reader gate', () => {
     expect(who('./readers:')).toEqual(['reader-gate'])
     expect(who('./secrets/reader-gate:')).toEqual(['reader-gate'])
     expect(who('./secrets/grafana-mcp:')).toEqual(['grafana-mcp'])
+    // The caller token is the one secret the two reader services share, and nothing else mounts it.
+    expect(who('./secrets/mcp-caller:')).toEqual(['grafana-mcp', 'reader-gate'])
     // The collector keeps its own tokens and nothing of the reader store.
     for (const volume of volumesOf('collector')) expect(volume).not.toMatch(/readers|reader-gate|grafana-mcp/)
     expect(volumesOf('collector')).toContain('./tokens:/etc/otelcol/tokens:ro')
@@ -961,6 +967,7 @@ describe('traces compose: reader gate', () => {
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0',
       READER_TOKEN_FILE: '/run/readers/token',
       LANGFUSE_BASIC_FILE: '/run/secrets/reader-gate/langfuse-basic',
+      GRAFANA_MCP_CALLER_FILE: '/run/secrets/mcp-caller/token',
       LANGFUSE_UPSTREAM: 'http://langfuse-web:3000',
       GRAFANA_MCP_UPSTREAM: 'http://grafana-mcp:8000',
     })
@@ -969,7 +976,7 @@ describe('traces compose: reader gate', () => {
   it('reads its files from inside the mounts and reaches its upstreams by name, port and a shared network', () => {
     const env = environment('reader-gate')
     const targets = volumesOf('reader-gate').map(volume => volume.split(':')[1] ?? '')
-    for (const key of ['READER_TOKEN_FILE', 'LANGFUSE_BASIC_FILE']) {
+    for (const key of ['READER_TOKEN_FILE', 'LANGFUSE_BASIC_FILE', 'GRAFANA_MCP_CALLER_FILE']) {
       expect(targets.some(target => String(env[key]).startsWith(`${target}/`))).toBe(true)
     }
     const published: Record<string, number[]> = {'langfuse-web': [3000], 'grafana-mcp': [8000]}
@@ -1044,7 +1051,114 @@ describe('traces compose: Grafana MCP server', () => {
     expect(names).toContain(host)
     expect(port).toBe('3000')
     expect(networksOf(host).filter(network => networksOf('grafana-mcp').includes(network)).length).toBeGreaterThan(0)
-    expect(volumesOf('grafana-mcp')).toEqual(['./secrets/grafana-mcp:/run/secrets/grafana-mcp:ro'])
+    expect(volumesOf('grafana-mcp')).toEqual([
+      './secrets/grafana-mcp:/run/secrets/grafana-mcp:ro',
+      './secrets/mcp-caller:/run/secrets/mcp-caller:ro',
+    ])
+  })
+
+  // The caller token. mcp-grafana reads it from the flag or from `MCP_GRAFANA_SERVER_TOKEN` and has no file variant
+  // (`cmd/mcp-grafana/main.go` `resolveToken`, v2.4.0), so the entrypoint reads the host file into the environment of
+  // the server process only: not into argv, not into the compose file, and not into the container's declared config.
+  describe('requires a caller token it reads from a host file', () => {
+    const entrypoint = (): string[] => strings(mcp().entrypoint, 'grafana-mcp.entrypoint')
+    // Compose turns `$$` into `$` before the shell sees the script.
+    const script = (): string => (entrypoint()[2] ?? '').replaceAll('$$', '$')
+
+    it('names the caller header the gate sends, and a header that is not Authorization', () => {
+      expect(flags().get('server-auth-header')).toBe(GRAFANA_MCP_CALLER_HEADER)
+      expect(String(flags().get('server-auth-header')).toLowerCase()).not.toBe('authorization')
+    })
+
+    it('is a shell that reads the token file and runs the server, keeping the image flags the command supplies', () => {
+      expect(entrypoint().slice(0, 2)).toEqual(['/bin/sh', '-c'])
+      expect(script()).toContain(`/run/secrets/mcp-caller/token`)
+      expect(script()).toContain('export MCP_GRAFANA_SERVER_TOKEN=')
+      expect(script()).toMatch(/exec \/app\/mcp-grafana "\$@"$/)
+      // The image's entrypoint is replaced, so the command carries every flag it used to: transport and address.
+      expect(flags().get('t')).toBe('streamable-http')
+      expect(flags().get('address')).toBe(':8000')
+    })
+
+    it('reads the file from inside the mount, which is the one the gate reads', () => {
+      const target = '/run/secrets/mcp-caller'
+      expect(volumesOf('grafana-mcp')).toContain(`./secrets/mcp-caller:${target}:ro`)
+      expect(volumesOf('reader-gate')).toContain(`./secrets/mcp-caller:${target}:ro`)
+      expect(script()).toContain(`${target}/token`)
+      expect(environment('reader-gate').GRAFANA_MCP_CALLER_FILE).toBe(`${target}/token`)
+      expect(DEFAULTS.grafanaMcpCallerFile).toBe(`${target}/token`)
+    })
+
+    it('holds no token value anywhere in its definition: not in argv, the environment or an env file', () => {
+      expect(flags().has('server-auth-token')).toBe(false)
+      expect(strings(mcp().command, 'command').join(' ')).not.toMatch(/server-auth-token|MCP_GRAFANA_SERVER_TOKEN/)
+      expect(Object.keys(environment('grafana-mcp'))).not.toContain('MCP_GRAFANA_SERVER_TOKEN')
+      expect(mcp().env_file).toBeUndefined()
+    })
+
+    it('joins the gate group so it can read the file, and holds nothing else of the gate', () => {
+      expect(strings(mcp().group_add, 'group_add')).toEqual([String(READER_GATE_USER_ID)])
+      expect(String(mcp().user)).toBe(`${GRAFANA_MCP_USER_ID}:${GRAFANA_MCP_USER_ID}`)
+      // The gate's other mounts (token store, Langfuse pair) are not the server's.
+      for (const volume of volumesOf('grafana-mcp')) expect(volume).not.toMatch(/readers|reader-gate/)
+      // The gate needs no extra group: the file is owned by its own group.
+      expect(service('reader-gate').group_add).toBeUndefined()
+    })
+
+    // The script really runs here, against scratch files and a stand-in for the server that prints what it got.
+    function runEntrypoint(tokenFile: string | undefined, arguments_: string[] = ['--flag', 'value']) {
+      const dir = mkdtempSync(join(tmpdir(), 'mcp-caller-'))
+      try {
+        const server = join(dir, 'mcp-grafana')
+        writeFileSync(
+          server,
+          '#!/bin/sh\nprintf \'token=%s\\n\' "$MCP_GRAFANA_SERVER_TOKEN"\nprintf \'args=%s\\n\' "$*"\n',
+        )
+        chmodSync(server, 0o755)
+        const path = join(dir, 'token')
+        if (tokenFile !== undefined) writeFileSync(path, tokenFile)
+        const result = Bun.spawnSync(
+          [
+            '/bin/sh',
+            '-c',
+            script().replace('/run/secrets/mcp-caller/token', path).replace('/app/mcp-grafana', server),
+            'mcp-grafana',
+            ...arguments_,
+          ],
+          {env: {PATH: process.env.PATH ?? ''}},
+        )
+        return {code: result.exitCode, out: result.stdout.toString(), err: result.stderr.toString()}
+      } finally {
+        rmSync(dir, {recursive: true, force: true})
+      }
+    }
+
+    it('passes the file content to the server in its environment, trimmed, and its arguments through unchanged', () => {
+      const token = 'abc_DEF-123'
+      for (const content of [token, `${token}\n`, ` ${token} \n\n`]) {
+        const result = runEntrypoint(content)
+        expect(result.code).toBe(0)
+        expect(result.out).toBe(`token=${token}\nargs=--flag value\n`)
+      }
+    })
+
+    it('never puts the token in the server arguments', () => {
+      const result = runEntrypoint('the-secret-value')
+      expect(result.out).toContain('token=the-secret-value')
+      expect(result.out.split('\n').find(line => line.startsWith('args='))).not.toContain('the-secret-value')
+    })
+
+    it.each([
+      ['missing', undefined],
+      ['empty', ''],
+      ['only whitespace', ' \n\t\n'],
+    ])('does not start the server, and says why, when the token file is %s', (_name, content) => {
+      const result = runEntrypoint(content)
+      expect(result.code).not.toBe(0)
+      // The stand-in prints on start: nothing printed means the server was never run, so it never served open.
+      expect(result.out).toBe('')
+      expect(result.err).not.toBe('')
+    })
   })
 
   // The image's own user is `mcp-grafana`, uid 1000, primary group 999. Naming 1000:1000 makes the group match the

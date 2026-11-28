@@ -132,7 +132,7 @@ export const PROMETHEUS_USER_ID = 65_534
 export const EMBEDDER_USER_ID = 65_534
 
 /**
- * The uid and gid the reader gate runs as. Deploy owns `readers/token` and `secrets/reader-gate/*` by `root:<this>`, and
+ * The uid and gid the reader gate runs as. Deploy owns `readers/token`, `secrets/reader-gate/*` and `secrets/mcp-caller/*` by `root:<this>`, and
  * the gate's own user is the only one besides root that can read them. Distinct from Tempo's id, so the gate cannot read
  * what the health reporter reads. `docker-compose.test.ts` pins the gate's `user` to it.
  */
@@ -217,6 +217,15 @@ export const TRACES_READER_LANGFUSE_FILE = `${TRACES_APP_DIR}/secrets/reader-gat
 
 /** The Grafana Viewer service-account token, read by the Grafana MCP server. Owned `root:GRAFANA_MCP_USER_ID`, mode 0440. */
 export const TRACES_GRAFANA_MCP_TOKEN_FILE = `${TRACES_APP_DIR}/secrets/grafana-mcp/token`
+
+/**
+ * The caller token the gate sends the Grafana MCP server and the server requires, as one bare line. The deploy generates
+ * it on first deploy and never replaces it, so deleting it and deploying again is the rotation. Owned
+ * `root:READER_GATE_USER_ID`, mode 0440, in a directory of its own (`secrets/mcp-caller`, 0750, same group): the gate
+ * reads it as that group and the server as a supplementary group (`group_add` in the compose file), and neither can
+ * read the other's backend credential through it.
+ */
+export const TRACES_MCP_CALLER_TOKEN_FILE = `${TRACES_APP_DIR}/secrets/mcp-caller/token`
 
 /** Siblings of a credential file: the candidate being checked, and the one it replaced. */
 export const READER_STAGED_SUFFIX = '.staged'

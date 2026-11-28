@@ -483,6 +483,7 @@ services:
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: '0'
       READER_TOKEN_FILE: /run/readers/token
       LANGFUSE_BASIC_FILE: /run/secrets/reader-gate/langfuse-basic
+      GRAFANA_MCP_CALLER_FILE: /run/secrets/mcp-caller/token
       LANGFUSE_UPSTREAM: http://langfuse-web:3000
       GRAFANA_MCP_UPSTREAM: http://grafana-mcp:8000
     tmpfs:
@@ -493,6 +494,8 @@ services:
       - ./readers:/run/readers:ro
       # The Langfuse Viewer key pair as one `<public>:<secret>` line. Placeholder until the operator installs a key.
       - ./secrets/reader-gate:/run/secrets/reader-gate:ro
+      # The Grafana MCP caller token, sent on the Grafana route only. Deploy generates it once.
+      - ./secrets/mcp-caller:/run/secrets/mcp-caller:ro
     networks: [edge, backend]
     # No depends_on: a down upstream is an answer (502), not a reason to stay down.
     healthcheck:
@@ -508,18 +511,31 @@ services:
   # service-account token it reads from a file (re-read on every request). Backend network only; the gate is the one way
   # in. Read tools only: write tools are off, only four tool categories are on, the per-request Grafana address and
   # credential overrides stay off, and usage reporting is off (it would otherwise reach the vendor). The Host header the
-  # gate sends carries the port and the match is exact, so `--allowed-hosts` names it with the port. The image's own
-  # entrypoint sets `--transport sse --address 0.0.0.0:8000`; the flags below come later and win. The image is Debian
-  # slim with no curl or wget, so it has no healthcheck: the gate's /healthz reports whether it answers. Its user is
-  # `mcp-grafana`, uid 1000 and primary group 999; naming 1000:1000 makes the group match the secret directory's
-  # (`GRAFANA_MCP_USER_ID` in src/host.ts, pinned by a test).
+  # gate sends carries the port and the match is exact, so `--allowed-hosts` names it with the port. The image is Debian
+  # slim with no curl or wget, so it has no healthcheck: the gate's /healthz reports whether it answers (that endpoint
+  # stays open; the MCP endpoint does not). Its user is `mcp-grafana`, uid 1000 and primary group 999; naming 1000:1000
+  # makes the group match the secret directory's (`GRAFANA_MCP_USER_ID` in src/host.ts, pinned by a test).
+  #
+  # Caller token: MCP calls without `--server-auth-header` are refused, so only the gate can call it. The server takes the
+  # token from argv or `MCP_GRAFANA_SERVER_TOKEN` only (no file variant in v2.4.0), so the entrypoint reads the file into
+  # the server's environment and execs it; a missing or empty file stops the container. It joins the gate's group to read
+  # that one file.
   grafana-mcp:
     image: grafana/mcp-grafana:2.4.0@sha256:63d4501d3166c2b9242d8a2b5b7df8892c59c6c477be3a2a61bcf8a252671f31
     restart: unless-stopped
     user: '1000:1000'
+    group_add: ['10003']
     read_only: true
     cap_drop: [ALL]
     security_opt: ['no-new-privileges:true']
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        token=$$(tr -d '[:space:]' < /run/secrets/mcp-caller/token) || exit 1;
+        [ -n "$$token" ] || { echo 'grafana-mcp: the caller token file is empty' >&2; exit 1; };
+        export MCP_GRAFANA_SERVER_TOKEN="$$token"; exec /app/mcp-grafana "$$@"
+      - mcp-grafana
     command:
       - -t
       - streamable-http
@@ -531,6 +547,8 @@ services:
       - tempo,prometheus,datasource,search
       - --disable-write
       - --usage-stats=disabled
+      - --server-auth-header
+      - x-reader-gate-token
     environment:
       GRAFANA_URL: http://grafana:3000
       GRAFANA_SERVICE_ACCOUNT_TOKEN_FILE: /run/secrets/grafana-mcp/token
@@ -539,6 +557,8 @@ services:
     volumes:
       # The service-account token as one file. Placeholder until the operator runs `traces reader backend grafana`.
       - ./secrets/grafana-mcp:/run/secrets/grafana-mcp:ro
+      # The caller token, shared with the gate. Read once, at start.
+      - ./secrets/mcp-caller:/run/secrets/mcp-caller:ro
     networks: [backend]
     logging: *logging
 

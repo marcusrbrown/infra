@@ -4,6 +4,8 @@ import {TRACES_VOID_TOKEN_PREFIX} from '../src/host'
 import {
   CONSUMER_PATTERN,
   DEADLINE_MS,
+  DEFAULTS,
+  GRAFANA_MCP_CALLER_HEADER,
   GRAFANA_PLACEHOLDER,
   IDLE_TIMEOUT_S,
   LANGFUSE_PLACEHOLDER,
@@ -47,6 +49,12 @@ describe('constants', () => {
   test('placeholders carry the unset marker the deploy writes', () => {
     expect(LANGFUSE_PLACEHOLDER).toBe('pk-lf-unset:sk-lf-unset')
     expect(GRAFANA_PLACEHOLDER).toBe('glsa_unset')
+  })
+
+  test('the Grafana MCP caller header is a fixed custom name, never Authorization, and the file is in its own directory', () => {
+    expect(GRAFANA_MCP_CALLER_HEADER).toBe('x-reader-gate-token')
+    expect(GRAFANA_MCP_CALLER_HEADER).toBe(GRAFANA_MCP_CALLER_HEADER.toLowerCase())
+    expect(DEFAULTS.grafanaMcpCallerFile).toBe('/run/secrets/mcp-caller/token')
   })
 
   test('consumer names follow the kebab pattern', () => {

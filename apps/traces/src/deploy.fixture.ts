@@ -13,6 +13,7 @@ import {
   ALERT_CONTACT_POINT_UID,
   ALERT_RULE_GROUPS,
   GATED_SERVICES,
+  generateMcpCallerToken,
   generateVoidTokenLine,
   REPORTER_DETAIL_COMMAND,
   SERVICES,
@@ -62,6 +63,7 @@ const READ_ONLY_STEPS: readonly RegExp[] = [
   /^probe-ingest$/,
   /^probe-agent-routes$/,
   /^reader-healthz$/,
+  /^reader-guard$/,
   /^retention-read-/,
   /^raw:reporter-detail$/,
 ]
@@ -139,6 +141,12 @@ export interface FakeOptions {
    * first). Default: both upstreams up. `unreachable` is a gate that does not answer.
    */
   readerHealth?: ReaderHealthAnswer | ((attempt: number) => ReaderHealthAnswer)
+  /**
+   * What the gate's private unauthenticated-call check reports through `docker compose exec`: the status the Grafana MCP
+   * server gave a request with no caller token (default 401, the refusal the policy gives), `network-error`, or
+   * `unreadable` (the check printed no verdict line).
+   */
+  readerGuard?: {status: number} | 'network-error' | 'unreadable'
 }
 
 export type ReaderHealthAnswer = {langfuse: boolean; grafana: boolean} | 'unreachable'
@@ -414,6 +422,18 @@ export class FakeHost {
             ? 'TRACES_READER_HEALTH unreachable'
             : `TRACES_READER_HEALTH langfuse=${answer.langfuse} grafana=${answer.grafana}`
         return ok(`${line}\nTRACES_READER_HEALTH_CHECKED\n`)
+      }
+      case step === 'reader-guard': {
+        const configured = this.options.readerGuard ?? {status: 401}
+        const verdict =
+          configured === 'unreadable'
+            ? ''
+            : configured === 'network-error'
+              ? 'READER_CHECK_FAIL grafana-mcp-unauthenticated network-error\n'
+              : configured.status === 401
+                ? 'READER_CHECK_OK grafana-mcp-unauthenticated\n'
+                : `READER_CHECK_FAIL grafana-mcp-unauthenticated not-refused:${configured.status}\n`
+        return ok(`${verdict}TRACES_READER_GUARD_CHECKED\n`)
       }
       case step.startsWith('reader-file:'): {
         const kind = step.slice('reader-file:'.length)
@@ -855,6 +875,8 @@ export interface TestDeps {
   cleaned: string[]
   /** Every void token line the deploy generated, for "never in argv or logs" checks. */
   voidLines: string[]
+  /** Every Grafana MCP caller token the deploy generated, for the same checks. */
+  callerTokens: string[]
 }
 
 export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): TestDeps {
@@ -862,6 +884,7 @@ export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): T
   const identityPaths: string[] = []
   const cleaned: string[] = []
   const voidLines: string[] = []
+  const callerTokens: string[] = []
   const deps: Partial<DeployDeps> = {
     run: host.run,
     resolve: async () => ['198.51.100.7'],
@@ -876,6 +899,11 @@ export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): T
       const line = generateVoidTokenLine()
       voidLines.push(line)
       return line
+    },
+    callerToken: () => {
+      const token = generateMcpCallerToken()
+      callerTokens.push(token)
+      return token
     },
     makeTempDir: () => ({path: '/scratch/deploy', cleanup: () => cleaned.push('temp')}),
     knownHostsFile: undefined,
@@ -895,7 +923,7 @@ export function testDeps(host: FakeHost, overrides: Partial<DeployDeps> = {}): T
     },
     ...overrides,
   }
-  return {deps, logs, identityPaths, cleaned, voidLines}
+  return {deps, logs, identityPaths, cleaned, voidLines, callerTokens}
 }
 
 export function requiredTableNames(): string[] {

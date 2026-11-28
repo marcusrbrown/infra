@@ -2,7 +2,8 @@
 //
 //   1. token       Bearer or Basic password, looked up in the token store. No token, an unknown one or a bad file: 401.
 //   2. route       canonical path and method against the allowlist: 404 or 405. Neither reaches an upstream.
-//   3. credential  the Langfuse Viewer pair, from the host file. Missing or a placeholder: 502.
+//   3. credential  the Langfuse Viewer pair, or the Grafana MCP caller token, from the host file. Missing, a placeholder
+//                  or malformed: 502, and nothing is sent upstream.
 //   4. limits      per-consumer budget and concurrency, global concurrency: 429 with Retry-After.
 //   5. forward     allowlisted request headers, the host credential, redirects never followed, 60 s to headers: 504.
 //   6. answer      allowlisted response headers. An upstream 3xx or Set-Cookie is a 502, and so is a Langfuse 401 (the
@@ -14,11 +15,12 @@
 // ends within the deadlines. Every collaborator is injected, so the handler runs in tests with no port, clock or
 // network. Logs carry the consumer, route, status and fingerprint, never a token, a credential, a path id or a query.
 
-import type {LangfuseCredential} from './credentials'
+import type {CallerToken, LangfuseCredential} from './credentials'
 import type {Limits} from './limits'
 import type {RouteName, UpstreamName} from './paths'
 import type {ReaderIdentity} from './tokens'
 import {extractToken} from './auth'
+import {GRAFANA_MCP_CALLER_HEADER} from './constants'
 import {filterRequestHeaders, filterResponseHeaders} from './headers'
 import {matchRequest} from './paths'
 
@@ -44,7 +46,7 @@ export interface Deadlines {
 
 export interface ServerDeps {
   store: {lookup: (token: string) => ReaderIdentity | null}
-  credentials: {langfuse: () => LangfuseCredential}
+  credentials: {langfuse: () => LangfuseCredential; grafanaCaller: () => CallerToken}
   limits: Limits
   fetch: (url: string, init: RequestInit) => Promise<Response>
   clock: () => number
@@ -137,6 +139,17 @@ async function handle(req: Request, deps: ServerDeps, ctx: Context): Promise<Res
       return response
     }
     fixed.authorization = credential.authorization
+  } else if (match.upstream === 'grafana') {
+    // The Grafana MCP server refuses a call without this header. It is sent on this route only, under a name the
+    // consumer cannot choose: `fixed` is applied after the allowlist, so a header of that name the consumer sent is
+    // replaced. The consumer's own `Authorization` is never forwarded.
+    const caller = deps.credentials.grafanaCaller()
+    if (!caller.ok) {
+      const response = badGateway(ctx, 'credential-unavailable')
+      ctx.reason = `credential-${caller.reason}`
+      return response
+    }
+    fixed[GRAFANA_MCP_CALLER_HEADER] = caller.token
   }
 
   const lease = deps.limits.acquire(reader.consumer)

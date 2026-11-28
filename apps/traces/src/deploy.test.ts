@@ -50,6 +50,7 @@ import {
   failedSafetyGates,
   GATED_SERVICES,
   generateDeployId,
+  generateMcpCallerToken,
   generateVoidTokenLine,
   grafanaAlertingScript,
   grafanaSignInScript,
@@ -72,6 +73,7 @@ import {
   parseGrafanaProbe,
   parseHostState,
   parseIngestProbe,
+  parseReaderGuard,
   parseReaderHealth,
   parseReporterDetail,
   prepareDirsScript,
@@ -85,11 +87,13 @@ import {
   READER_DIRS_SENTINEL,
   READER_FILE_KINDS,
   READER_FILES,
+  READER_GUARD_SENTINEL,
   READER_HEALTH_SENTINEL,
   READER_SERVICES,
   READER_SOURCE_DIR_SENTINEL,
   readerDirsScript,
   readerFileScript,
+  readerGuardScript,
   readerHealthProgram,
   readerHealthScript,
   readerSourceDirScript,
@@ -2542,7 +2546,7 @@ describe('the Topics embedder starts after the route is decided', () => {
 describe('the reader files', () => {
   const GATE_ID = READER_GATE_USER_ID
 
-  it('names the three files with the owner and mode their reader needs', () => {
+  it('names the four files with the owner and mode their reader needs', () => {
     expect(READER_FILES.token).toMatchObject({path: 'readers/token', owner: `root:${GATE_ID}`, mode: '0640'})
     expect(READER_FILES.langfuse).toMatchObject({
       path: 'secrets/reader-gate/langfuse-basic',
@@ -2554,6 +2558,14 @@ describe('the reader files', () => {
       owner: `root:${GRAFANA_MCP_USER_ID}`,
       mode: '0440',
     })
+    // The caller token is read by the gate (as its owner's group) and by the Grafana MCP server (as a supplementary
+    // group of the same id), and by nothing else: its own directory, the gate's group, 0440.
+    expect(READER_FILES.mcpCaller).toMatchObject({
+      path: 'secrets/mcp-caller/token',
+      owner: `root:${GATE_ID}`,
+      mode: '0440',
+      newline: false,
+    })
     expect(GATE_ID).toBe(10_003)
     expect(GRAFANA_MCP_USER_ID).toBe(1000)
   })
@@ -2561,7 +2573,7 @@ describe('the reader files', () => {
   it('makes the directories to the group that reads them, 0750, in the reader step and not in the ingest-critical one', () => {
     const script = readerDirsScript(ID_A)
     expect(script).toContain(
-      `install -d -o root -g ${GATE_ID} -m 0750 ${TRACES_APP_DIR}/readers ${TRACES_APP_DIR}/secrets/reader-gate`,
+      `install -d -o root -g ${GATE_ID} -m 0750 ${TRACES_APP_DIR}/readers ${TRACES_APP_DIR}/secrets/reader-gate ${TRACES_APP_DIR}/secrets/mcp-caller`,
     )
     expect(script).toContain(
       `install -d -o root -g ${GRAFANA_MCP_USER_ID} -m 0750 ${TRACES_APP_DIR}/secrets/grafana-mcp`,
@@ -2569,7 +2581,7 @@ describe('the reader files', () => {
     expect(script).toContain(READER_DIRS_SENTINEL)
     // The ingest-critical directory step names none of them: a path there that cannot be made would hold ingest.
     const dirs = prepareDirsScript(ID_A)
-    for (const reader of ['readers', 'secrets/reader-gate', 'secrets/grafana-mcp']) {
+    for (const reader of ['readers', 'secrets/reader-gate', 'secrets/grafana-mcp', 'secrets/mcp-caller']) {
       expect({reader, inPrepareDirs: dirs.includes(`${TRACES_APP_DIR}/${reader}`)}).toEqual({
         reader,
         inPrepareDirs: false,
@@ -2585,7 +2597,7 @@ describe('the reader files', () => {
     expect(readerSourceDirScript(ID_A)).toContain(READER_SOURCE_DIR_SENTINEL)
   })
 
-  it('creates a void token file and both placeholders on a host with none, with the owner and mode each reader needs', async () => {
+  it('creates a void token file, both placeholders and a generated caller token on a host with none, with the owner and mode each reader needs', async () => {
     const host = new FakeHost()
     const t = testDeps(host)
     await deploy({env: baseEnv(), deps: t.deps})
@@ -2596,9 +2608,15 @@ describe('the reader files', () => {
     expect(host.readerAttrs.get('token')).toBe(`0:${GATE_ID} 640`)
     expect(host.readerAttrs.get('langfuse')).toBe(`0:${GATE_ID} 440`)
     expect(host.readerAttrs.get('grafana')).toBe(`0:${GRAFANA_MCP_USER_ID} 440`)
+    // A caller token is a real secret from the first deploy: 32 random bytes as 43 base64url characters, bare.
+    expect(host.readerFiles.get('mcpCaller')).toMatch(/^[\w-]{43}$/)
+    expect(host.readerFiles.get('mcpCaller')).toBe(t.callerTokens.at(-1))
+    expect(host.readerAttrs.get('mcpCaller')).toBe(`0:${GATE_ID} 440`)
     // The placeholders are constants and the void line is generated on the deploying machine: all arrive on stdin.
     expect(host.calls.find(call => call.step === 'reader-file:token')?.stdin).toBe(`${t.voidLines.at(-1)}\n`)
+    expect(host.calls.find(call => call.step === 'reader-file:mcpCaller')?.stdin).toBe(`${t.callerTokens.at(-1)}\n`)
     expect(t.logs.filter(line => line.includes('reader file as a placeholder'))).toHaveLength(3)
+    expect(t.logs.filter(line => line.includes('created the mcpCaller reader file'))).toHaveLength(1)
   })
 
   it('never compares or writes them through the managed-file path, so no content drift can reach them', async () => {
@@ -2623,6 +2641,7 @@ describe('the reader files', () => {
     host.readerFiles.set('token', 'real-token-aaaa aaaaaaaaaaaa systematic 2026-11-27T00:00:00.000Z\n')
     host.readerFiles.set('langfuse', 'pk-lf-real:sk-lf-real')
     host.readerFiles.set('grafana', 'glsa_real')
+    host.readerFiles.set('mcpCaller', 'existing-caller-token-0000000000000000000000')
     for (const kind of READER_FILE_KINDS) host.readerAttrs.set(kind, '1234:5678 777')
     const content = JSON.stringify([...host.readerFiles.entries()])
     const start = host.calls.length
@@ -2633,6 +2652,8 @@ describe('the reader files', () => {
     expect(host.readerAttrs.get('token')).toBe(`0:${GATE_ID} 640`)
     expect(host.readerAttrs.get('langfuse')).toBe(`0:${GATE_ID} 440`)
     expect(host.readerAttrs.get('grafana')).toBe(`0:${GRAFANA_MCP_USER_ID} 440`)
+    expect(host.readerAttrs.get('mcpCaller')).toBe(`0:${GATE_ID} 440`)
+    expect(host.readerFiles.get('mcpCaller')).toBe('existing-caller-token-0000000000000000000000')
     for (const kind of READER_FILE_KINDS) {
       expect(host.steps.slice(start)).not.toContain(`write:${READER_FILES[kind].path}`)
       expect(host.steps.slice(start)).not.toContain(`compare:${READER_FILES[kind].path}`)
@@ -2651,6 +2672,36 @@ describe('the reader files', () => {
     expect(host.calls.filter(call => (call.stdin ?? '').includes(secret)).map(call => call.step)).toEqual([
       'reader-file:token',
     ])
+  })
+
+  it('sends the caller token to its own file step only, and never to argv, a command string or a log line', async () => {
+    const host = new FakeHost()
+    const t = testDeps(host)
+    await deploy({env: baseEnv(), deps: t.deps})
+    const secret = t.callerTokens.at(-1) ?? ''
+    expect(secret).toMatch(/^[\w-]{43}$/)
+    expect(host.calls.map(call => call.argv.join('\u0000')).join('\u0000')).not.toContain(secret)
+    expect(host.calls.map(call => call.command).join('\n')).not.toContain(secret)
+    expect(t.logs.join('\n')).not.toContain(secret)
+    expect(host.calls.filter(call => (call.stdin ?? '').includes(secret)).map(call => call.step)).toEqual([
+      'reader-file:mcpCaller',
+    ])
+  })
+
+  it('generates 32 random bytes as base64url, so two tokens differ and neither has padding', () => {
+    const a = generateMcpCallerToken()
+    const b = generateMcpCallerToken()
+    expect(a).toMatch(/^[\w-]{43}$/)
+    expect(a).not.toBe(b)
+    expect(generateMcpCallerToken(size => new Uint8Array(size).fill(255))).toBe(`${'_'.repeat(42)}8`)
+  })
+
+  it('creates the caller token in the reader stage only: after the route is decided, before the services start', async () => {
+    const host = new FakeHost()
+    await run(host)
+    expect(host.indexOf('reader-file:mcpCaller')).toBeGreaterThan(host.indexOf('reader-dirs'))
+    expect(host.indexOf('reader-file:mcpCaller')).toBeLessThan(host.indexOf('up-reader'))
+    expect(host.indexOf('reader-file:mcpCaller')).toBeGreaterThan(host.indexOf('up-public'))
   })
 })
 
@@ -2694,6 +2745,7 @@ describe('the reader file script', () => {
     expect(readerFileScript('token', ID_A)).toContain(String.raw`printf '%s\n' "$line" > "$t"`)
     expect(readerFileScript('langfuse', ID_A)).toContain('printf \'%s\' "$line" > "$t"')
     expect(readerFileScript('grafana', ID_A)).toContain('printf \'%s\' "$line" > "$t"')
+    expect(readerFileScript('mcpCaller', ID_A)).toContain('printf \'%s\' "$line" > "$t"')
   })
 
   it('creates a missing file, keeps every byte of an existing one, repairs owner and mode, and refuses anything else, when it runs for real', () => {
@@ -2703,7 +2755,7 @@ describe('the reader file script', () => {
       writeFileSync(join(shim, 'chown'), `#!/bin/sh\necho "$@" >> ${log}\n`)
       chmodSync(join(shim, 'chown'), 0o755)
       writeFileSync(join(root, '.deploy-in-progress'), `${ID_A} 2023-11-14T22:13:20.000Z\n`)
-      for (const directory of ['readers', 'secrets/reader-gate', 'secrets/grafana-mcp']) {
+      for (const directory of ['readers', 'secrets/reader-gate', 'secrets/grafana-mcp', 'secrets/mcp-caller']) {
         mkdirSync(join(root, directory), {recursive: true})
       }
       const runKind = (kind: (typeof READER_FILE_KINDS)[number], stdin: string): {out: string; code: number} => {
@@ -2729,6 +2781,19 @@ describe('the reader file script', () => {
       expect(readFileSync(at('grafana'), 'utf8')).toBe(READER_GRAFANA_PLACEHOLDER)
       expect(readdirSync(join(root, 'readers'))).toEqual(['token'])
       expect(readdirSync(join(root, 'secrets/reader-gate'))).toEqual(['langfuse-basic'])
+
+      // The caller token: created bare with the gate's group and 0440, and never replaced once it exists, so a
+      // restore or a second deploy cannot rotate what both services already read.
+      const callerToken = generateMcpCallerToken()
+      expect(runKind('mcpCaller', `${callerToken}\n`)).toEqual({out: 'TRACES_READER_FILE_CREATED', code: 0})
+      expect(readFileSync(at('mcpCaller'), 'utf8')).toBe(callerToken)
+      expect(statSync(at('mcpCaller')).mode & 0o777).toBe(0o440)
+      expect(runKind('mcpCaller', `${generateMcpCallerToken()}\n`)).toEqual({
+        out: 'TRACES_READER_FILE_PRESENT',
+        code: 0,
+      })
+      expect(readFileSync(at('mcpCaller'), 'utf8')).toBe(callerToken)
+      expect(readdirSync(join(root, 'secrets/mcp-caller'))).toEqual(['token'])
 
       // A real credential keeps every byte; its mode is set again, and so is its owner.
       const real = Buffer.from('pk-lf-real-public:sk-lf-real-secret')
@@ -2796,7 +2861,7 @@ describe('the reader directories script', () => {
     chmodSync(join(shim, 'install'), 0o755)
   }
 
-  it('creates the three directories when the host owns them, and only then says so', () => {
+  it('creates the four directories when the host owns them, and only then says so', () => {
     const {root, shim, cleanup} = scratchHost()
     try {
       shimInstall(shim)
@@ -2805,7 +2870,7 @@ describe('the reader directories script', () => {
       const result = runDirs(root, shim)
       expect(result.exitCode).toBe(0)
       expect(result.stdout.toString()).toContain(READER_DIRS_SENTINEL)
-      for (const directory of ['readers', 'secrets/reader-gate', 'secrets/grafana-mcp']) {
+      for (const directory of ['readers', 'secrets/reader-gate', 'secrets/grafana-mcp', 'secrets/mcp-caller']) {
         expect(statSync(join(root, directory)).isDirectory()).toBe(true)
       }
     } finally {
@@ -2813,7 +2878,7 @@ describe('the reader directories script', () => {
     }
   })
 
-  it.each(['readers', 'secrets/reader-gate', 'secrets/grafana-mcp'])(
+  it.each(['readers', 'secrets/reader-gate', 'secrets/grafana-mcp', 'secrets/mcp-caller'])(
     'a regular file where %s should be fails it, with no sentinel',
     directory => {
       const {root, shim, cleanup} = scratchHost()
@@ -3609,6 +3674,127 @@ describe('reader-ready also requires the gate to see both upstreams', () => {
     host.options.override = failAt('up-reader')
     await failure(host)
     expect(host.steps.slice(mark)).not.toContain('reader-healthz')
+  })
+})
+
+describe('reader-ready also proves the Grafana MCP server refuses a call with no caller token', () => {
+  const gateOf = (error: Error, id: string) => (error as OperatorSurfaceError).result.gates.find(gate => gate.id === id)
+
+  it('runs the private check in the gate container, read only, with no credential and no token in the script', () => {
+    const script = readerGuardScript()
+    expect(script).toContain('# traces-step:reader-guard')
+    expect(script).toContain(`${deployModule.COMPOSE} exec -T reader-gate bun /app/check.ts`)
+    expect(script).toContain('"kind":"grafana-mcp-unauthenticated"')
+    expect(script.trimEnd().split('\n').at(-1)).toBe(`echo ${READER_GUARD_SENTINEL}`)
+    expect(script).not.toMatch(/\b(?:curl|wget|cat|\.env|secrets)\b/)
+    expect(script).not.toMatch(/Authorization|Bearer|Basic|x-reader-gate-token/i)
+    expect(Bun.spawnSync(['bash', '-n', '-c', script]).exitCode).toBe(0)
+  })
+
+  it('parses the sentinel line of the guard kind, and only with the end sentinel', () => {
+    const done = `${READER_GUARD_SENTINEL}\n`
+    expect(parseReaderGuard(`READER_CHECK_OK grafana-mcp-unauthenticated\n${done}`)).toEqual({ok: true})
+    expect(parseReaderGuard(`READER_CHECK_FAIL grafana-mcp-unauthenticated not-refused:200\n${done}`)).toEqual({
+      ok: false,
+      reason: 'not-refused:200',
+    })
+    expect(parseReaderGuard(`noise\nREADER_CHECK_FAIL grafana-mcp-unauthenticated network-error\n${done}`)).toEqual({
+      ok: false,
+      reason: 'network-error',
+    })
+    for (const bad of [
+      '',
+      done,
+      'READER_CHECK_OK grafana-mcp-unauthenticated\n',
+      // Another kind's verdict is never this proof.
+      `READER_CHECK_OK grafana-mcp\n${done}`,
+      `READER_CHECK_OK langfuse\n${done}`,
+      `READER_CHECK_OK grafana-mcp-unauthenticated extra\n${done}`,
+      `READER_CHECK_MAYBE grafana-mcp-unauthenticated\n${done}`,
+      // Two verdicts are ambiguous, and a pass next to a failure is not a pass.
+      `READER_CHECK_FAIL grafana-mcp-unauthenticated not-refused:200\nREADER_CHECK_OK grafana-mcp-unauthenticated\n${done}`,
+    ]) {
+      expect({bad, parsed: parseReaderGuard(bad)}).toEqual({bad, parsed: undefined})
+    }
+  })
+
+  it('passes when the server refuses: one check, after the health read and before the embedder, with nothing on stdin', async () => {
+    const host = new FakeHost()
+    const {result} = await run(host)
+    expect(result.gates.find(gate => gate.id === 'reader-ready')).toMatchObject({status: 'pass', kind: 'operator'})
+    expect(host.count('reader-guard')).toBe(1)
+    expect(host.indexOf('reader-guard')).toBeGreaterThan(host.indexOf('reader-healthz'))
+    expect(host.indexOf('reader-guard')).toBeLessThan(host.indexOf('up-embedder'))
+    const call = host.calls.find(entry => entry.step === 'reader-guard')
+    expect(call?.stdin).toBeUndefined()
+    expect(call?.command).not.toMatch(/secrets|\.env|token|password/i)
+  })
+
+  it.each([
+    ['answers 200: the policy is not active', {status: 200}, 'not-refused:200'],
+    ['answers 403: not what the policy answers', {status: 403}, 'not-refused:403'],
+    ['cannot be reached', 'network-error', 'network-error'],
+  ] as const)(
+    'fails reader-ready alone when the server %s, names the reason, and leaves an open route open',
+    async (_name, answer, reason) => {
+      const host = await openStack()
+      host.options.readerGuard = answer
+      const error = await failure(host)
+      expect(error).toBeInstanceOf(OperatorSurfaceError)
+      expect(failedOperatorGates((error as OperatorSurfaceError).result.gates).map(gate => gate.id)).toEqual([
+        'reader-ready',
+      ])
+      const gate = gateOf(error, 'reader-ready')
+      expect(gate).toMatchObject({status: 'fail', kind: 'operator'})
+      expect(gate?.detail).toContain(reason)
+      expect(gate?.detail).toContain('Ingest is not affected')
+      expect((error as OperatorSurfaceError).ingest).toBe('open')
+      expect(host.served).toBe('open')
+      expect(host.setStates()).toEqual(['open'])
+      expect(host.marker).toBeUndefined()
+    },
+  )
+
+  it('fails reader-ready, and says the check did not answer, when its output cannot be read', async () => {
+    const host = await openStack()
+    host.options.readerGuard = 'unreadable'
+    const error = await failure(host)
+    expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+    expect(gateOf(error, 'reader-ready')?.detail).toContain('did not answer')
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('treats a failing exec as no answer', async () => {
+    const host = await openStack()
+    host.options.override = failAt('reader-guard')
+    const error = await failure(host)
+    expect(gateOf(error, 'reader-ready')).toMatchObject({status: 'fail', kind: 'operator'})
+    expect(gateOf(error, 'reader-ready')?.detail).toContain('did not answer')
+    expect(host.setStates()).toEqual(['open'])
+  })
+
+  it('is not asked when the gate cannot see its upstreams: the health failure is the one reported', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.readerHealth = {langfuse: true, grafana: false}
+    const error = await failure(host)
+    expect(gateOf(error, 'reader-ready')?.detail).toContain('grafana down')
+    expect(host.steps.slice(mark)).not.toContain('reader-guard')
+  })
+
+  it('is not asked when the services did not start', async () => {
+    const host = await openStack()
+    const mark = host.calls.length
+    host.options.override = failAt('up-reader')
+    await failure(host)
+    expect(host.steps.slice(mark)).not.toContain('reader-guard')
+  })
+
+  it('never runs before the route is decided: it is in the post-route stage only', async () => {
+    const host = new FakeHost()
+    await run(host)
+    expect(host.indexOf('reader-guard')).toBeGreaterThan(host.indexOf('up-public'))
+    expect(host.steps.slice(0, host.indexOf('up-public'))).not.toContain('reader-guard')
   })
 })
 
@@ -6094,6 +6280,7 @@ const READ_ONLY_SCRIPTS: readonly string[] = [
   'probeIngestScript',
   'probeAgentRoutesScript',
   'readerHealthScript',
+  'readerGuardScript',
   'diskScript',
   'runningDigestScript',
   'bootstrapProbeScript',

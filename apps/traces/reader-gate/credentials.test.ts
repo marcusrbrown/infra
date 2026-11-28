@@ -3,7 +3,7 @@ import {Buffer} from 'node:buffer'
 
 import {describe, expect, test} from 'bun:test'
 import {LANGFUSE_PLACEHOLDER} from './constants'
-import {createCredentialStore, parseLangfuseBasic} from './credentials'
+import {createCallerTokenStore, createCredentialStore, parseCallerToken, parseLangfuseBasic} from './credentials'
 
 const PAIR = 'pk-lf-1111aaaa:sk-lf-2222bbbb'
 
@@ -109,5 +109,87 @@ describe('credential store', () => {
       {type: 'reader-gate-credential', name: 'langfuse', state: 'unavailable', reason: 'placeholder'},
     ])
     expect(JSON.stringify(harness.events)).not.toContain('pk-lf')
+  })
+})
+
+const CALLER = 'Zk3-_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abc'
+
+describe('parseCallerToken', () => {
+  test('takes the whole trimmed value as the token', () => {
+    expect(parseCallerToken(CALLER)).toEqual({ok: true, token: CALLER})
+    expect(parseCallerToken(`${CALLER}\n`)).toEqual({ok: true, token: CALLER})
+  })
+
+  test.each([
+    ['empty', ''],
+    ['whitespace', ' \n\t'],
+    ['inner whitespace', 'abc def'],
+    ['two lines', `${CALLER}\nsecond`],
+    ['control characters', 'abc\u0000def'],
+    ['non-ASCII', 'abc\u00E9def'],
+  ])('refuses %s as malformed', (_name, text) => {
+    expect(parseCallerToken(text)).toEqual({ok: false, reason: 'malformed'})
+  })
+})
+
+function buildCaller(initial: string | Error) {
+  let current: string | Error = initial
+  const events: CredentialEvent[] = []
+  const store = createCallerTokenStore({
+    path: '/run/secrets/mcp-caller/token',
+    readText: async () => {
+      if (current instanceof Error) throw current
+      return current
+    },
+    log: event => events.push(event),
+  })
+  return {
+    store,
+    events,
+    set: (value: string | Error) => {
+      current = value
+    },
+  }
+}
+
+describe('caller token store', () => {
+  test('is unavailable until the first read, then serves the token', async () => {
+    const {store} = buildCaller(`${CALLER}\n`)
+    expect(store.current()).toEqual({ok: false, reason: 'missing'})
+    await store.refresh()
+    expect(store.current()).toEqual({ok: true, token: CALLER})
+  })
+
+  test('picks up a rotated token, and drops to unavailable when the file goes bad', async () => {
+    const harness = buildCaller(CALLER)
+    await harness.store.refresh()
+    harness.set('rotated-token')
+    await harness.store.refresh()
+    expect(harness.store.current()).toEqual({ok: true, token: 'rotated-token'})
+    harness.set('')
+    await harness.store.refresh()
+    expect(harness.store.current()).toEqual({ok: false, reason: 'malformed'})
+  })
+
+  test.each([
+    ['missing', errnoError('ENOENT'), 'missing'],
+    ['unreadable', errnoError('EACCES'), 'unreadable'],
+  ] as const)('a %s file is unavailable', async (_name, error, reason) => {
+    const {store} = buildCaller(error)
+    await store.refresh()
+    expect(store.current()).toEqual({ok: false, reason})
+  })
+
+  test('logs state changes under its own name, and never the value', async () => {
+    const harness = buildCaller(CALLER)
+    await harness.store.refresh()
+    await harness.store.refresh()
+    harness.set('')
+    await harness.store.refresh()
+    expect(harness.events).toEqual([
+      {type: 'reader-gate-credential', name: 'grafana-mcp-caller', state: 'installed'},
+      {type: 'reader-gate-credential', name: 'grafana-mcp-caller', state: 'unavailable', reason: 'malformed'},
+    ])
+    expect(JSON.stringify(harness.events)).not.toContain(CALLER)
   })
 })

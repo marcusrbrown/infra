@@ -1,7 +1,8 @@
-import type {LangfuseCredential} from './credentials'
+import type {CallerToken, LangfuseCredential} from './credentials'
 import type {GateEvent} from './server'
 import {Buffer} from 'node:buffer'
 import {describe, expect, test} from 'bun:test'
+import {GRAFANA_MCP_CALLER_HEADER} from './constants'
 import {createLimits} from './limits'
 import {createServer} from './server'
 import {basicHeader, makeToken, tokenLine, voidLine} from './testing'
@@ -9,6 +10,8 @@ import {createTokenStore} from './tokens'
 
 const VIEWER_PAIR = 'pk-lf-viewer:sk-lf-viewer'
 const VIEWER_AUTH = `Basic ${Buffer.from(VIEWER_PAIR).toString('base64')}`
+// Not a real value: the gate sends whatever its file holds, and the Grafana MCP server compares it.
+const CALLER_TOKEN = 'caller-token-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 const alice = makeToken('alice')
 const bob = makeToken('bob')
 const senderToken = makeToken('sender-group-marcusrbrown')
@@ -25,6 +28,7 @@ interface Options {
   file?: string | Error
   upstream?: UpstreamHandler
   credential?: LangfuseCredential
+  grafanaCaller?: CallerToken
   requestsPerWindow?: number
   perConsumerConcurrency?: number
   globalConcurrency?: number
@@ -48,7 +52,9 @@ async function build(options: Options = {}) {
   const timers: FakeTimer[] = []
   let now = 1_000_000
   const credential: LangfuseCredential = options.credential ?? {ok: true, authorization: VIEWER_AUTH}
+  const grafanaCaller: CallerToken = options.grafanaCaller ?? {ok: true, token: CALLER_TOKEN}
   let credentialReads = 0
+  let callerReads = 0
 
   const limits = createLimits({
     clock: () => now,
@@ -64,6 +70,10 @@ async function build(options: Options = {}) {
       langfuse: () => {
         credentialReads += 1
         return credential
+      },
+      grafanaCaller: () => {
+        callerReads += 1
+        return grafanaCaller
       },
     },
     limits,
@@ -95,6 +105,7 @@ async function build(options: Options = {}) {
     events,
     timers,
     credentialReads: () => credentialReads,
+    callerReads: () => callerReads,
     setFile: (value: string | Error) => {
       file = value
     },
@@ -184,7 +195,11 @@ describe('forwarding', () => {
     expect(headerObject(call?.init ?? {}).authorization).toBe(VIEWER_AUTH)
   })
 
-  test('a Grafana MCP request carries no credential and none of the X-Grafana headers', async () => {
+  test('the caller header name is the one the compose file tells the Grafana MCP server to read', () => {
+    expect(GRAFANA_MCP_CALLER_HEADER).toBe('x-reader-gate-token')
+  })
+
+  test('a Grafana MCP request carries the gate caller header, no Authorization, and none of the X-Grafana headers', async () => {
     const h = await build()
     const res = await h.handler(
       request('/agent/grafana/mcp', {
@@ -205,7 +220,62 @@ describe('forwarding', () => {
     expect(Object.keys(forwarded).filter(name => name.startsWith('x-grafana'))).toEqual([])
     expect(forwarded.authorization).toBeUndefined()
     expect(forwarded.cookie).toBeUndefined()
+    expect(forwarded[GRAFANA_MCP_CALLER_HEADER]).toBe(CALLER_TOKEN)
+    // Exactly this one gate-owned credential header, and nothing else that could carry a credential.
+    expect(Object.keys(forwarded).sort()).toEqual([
+      'accept-encoding',
+      'content-type',
+      'host',
+      GRAFANA_MCP_CALLER_HEADER,
+    ])
+    // The reader's own bearer token never reaches the upstream, in any header or value.
+    expect(JSON.stringify(forwarded)).not.toContain(alice)
     expect(h.credentialReads()).toBe(0)
+    expect(h.callerReads()).toBe(1)
+  })
+
+  test('a caller header the consumer sends is replaced by the gate value, never forwarded', async () => {
+    const h = await build()
+    await (
+      await h.handler(
+        request('/agent/grafana/mcp', {
+          method: 'POST',
+          body: '{}',
+          headers: {[GRAFANA_MCP_CALLER_HEADER]: 'consumer-chosen-value'},
+        }),
+      )
+    ).text()
+    const forwarded = headerObject(h.calls[0]?.init ?? {})
+    expect(forwarded[GRAFANA_MCP_CALLER_HEADER]).toBe(CALLER_TOKEN)
+    expect(JSON.stringify(forwarded)).not.toContain('consumer-chosen-value')
+  })
+
+  test('a Langfuse request never carries the Grafana MCP caller header, and never reads its token', async () => {
+    const h = await build()
+    await (
+      await h.handler(
+        request('/agent/langfuse/api/public/projects', {
+          headers: {[GRAFANA_MCP_CALLER_HEADER]: 'consumer-chosen-value'},
+        }),
+      )
+    ).text()
+    await (
+      await h.handler(
+        request('/agent/langfuse/api/public/mcp', {
+          method: 'POST',
+          body: '{}',
+          headers: {[GRAFANA_MCP_CALLER_HEADER]: 'consumer-chosen-value'},
+        }),
+      )
+    ).text()
+    expect(h.calls).toHaveLength(2)
+    for (const call of h.calls) {
+      const forwarded = headerObject(call.init)
+      expect(forwarded[GRAFANA_MCP_CALLER_HEADER]).toBeUndefined()
+      expect(JSON.stringify(forwarded)).not.toContain(CALLER_TOKEN)
+      expect(JSON.stringify(forwarded)).not.toContain('consumer-chosen-value')
+    }
+    expect(h.callerReads()).toBe(0)
   })
 
   test('the forwarded request carries only allowlisted headers', async () => {
@@ -450,6 +520,30 @@ describe('credentials', () => {
   test('a placeholder Langfuse credential does not block the Grafana route', async () => {
     const h = await build({credential: {ok: false, reason: 'placeholder'}})
     const res = await h.handler(request('/agent/grafana/mcp', {method: 'POST', body: '{}'}))
+    expect(res.status).toBe(200)
+    await res.text()
+  })
+
+  test.each([
+    ['missing', {ok: false, reason: 'missing'}],
+    ['unreadable', {ok: false, reason: 'unreadable'}],
+    ['malformed', {ok: false, reason: 'malformed'}],
+  ] as const)(
+    'a %s Grafana MCP caller token gives 502 with a fixed reason and no fetch: the gate never sends an unauthenticated call',
+    async (_name, grafanaCaller) => {
+      const h = await build({grafanaCaller})
+      const res = await h.handler(request('/agent/grafana/mcp', {method: 'POST', body: '{}'}))
+      expect(res.status).toBe(502)
+      expect(await res.json()).toEqual({error: 'bad gateway', reason: 'credential-unavailable'})
+      expect(h.calls).toHaveLength(0)
+      expect(h.limits.stats().active).toBe(0)
+      expect(h.events[0]).toMatchObject({route: 'grafana-mcp', status: 502})
+    },
+  )
+
+  test('an unavailable Grafana MCP caller token does not block the Langfuse routes', async () => {
+    const h = await build({grafanaCaller: {ok: false, reason: 'missing'}})
+    const res = await h.handler(request('/agent/langfuse/api/public/projects'))
     expect(res.status).toBe(200)
     await res.text()
   })
@@ -836,7 +930,16 @@ describe('audit log', () => {
     expect(h.events[2]?.fingerprint).toBe('-')
 
     const text = JSON.stringify(h.events)
-    for (const secret of [alice, bob, senderToken, VIEWER_PAIR, VIEWER_AUTH, basicHeader('reader', alice), 'Bearer ']) {
+    for (const secret of [
+      alice,
+      bob,
+      senderToken,
+      VIEWER_PAIR,
+      VIEWER_AUTH,
+      CALLER_TOKEN,
+      basicHeader('reader', alice),
+      'Bearer ',
+    ]) {
       expect(text).not.toContain(secret)
     }
     expect(text).not.toContain(Buffer.from(`reader:${alice}`).toString('base64'))
@@ -873,6 +976,7 @@ describe('internal faults', () => {
         langfuse: () => {
           throw new Error(`boom ${alice}`)
         },
+        grafanaCaller: () => ({ok: true, token: CALLER_TOKEN}),
       },
       limits: h.limits,
       fetch: async () => new Response('x'),

@@ -82,6 +82,7 @@ import {
   TRACES_GRAFANA_MCP_TOKEN_FILE,
   TRACES_INGEST_LOCK,
   TRACES_LOCK_BUSY_SENTINEL,
+  TRACES_MCP_CALLER_TOKEN_FILE,
   TRACES_PENDING_RESTARTS,
   TRACES_READER_DIR,
   TRACES_READER_LANGFUSE_FILE,
@@ -946,8 +947,8 @@ echo ${READER_SOURCE_DIR_SENTINEL}`,
 export const READER_DIRS_SENTINEL = 'TRACES_READER_DIRS_READY'
 
 /**
- * The directories the reader token file and the two backend credential files live in, made to the group that reads
- * each. Run as the first step of the operator gate `reader-ready`, ahead of the placeholder writes, and not with the
+ * The directories the reader token file, the two backend credential files and the caller token live in, made to the group
+ * that reads each (the caller token's directory is the gate's group, which the Grafana MCP server also joins). Run as the first step of the operator gate `reader-ready`, ahead of the placeholder writes, and not with the
  * ingest-critical directories: a path that cannot be made (a regular file where a directory should be) exits this
  * script non-zero and fails `reader-ready` alone, where it would otherwise hold ingest. `secrets` exists by then
  * (`prepareDirsScript`). Nothing inside a directory is touched. `appDir` exists so a test can run the real script against a
@@ -962,7 +963,7 @@ export function readerDirsScript(id: string, appDir: string = TRACES_APP_DIR): s
   return guardedStep(
     'reader-dirs',
     id,
-    `install -d -o root -g ${READER_GATE_GID} -m ${SECRET_DIR_MODE} ${[READER_DIR, 'secrets/reader-gate'].map(dir).join(' ')}
+    `install -d -o root -g ${READER_GATE_GID} -m ${SECRET_DIR_MODE} ${[READER_DIR, 'secrets/reader-gate', 'secrets/mcp-caller'].map(dir).join(' ')}
 install -d -o root -g ${GRAFANA_MCP_GID} -m ${SECRET_DIR_MODE} ${dir('secrets/grafana-mcp')}
 echo ${READER_DIRS_SENTINEL}`,
     {marker: `${appDir}/${MARKER_FILE}`, lock: `${appDir}/${STEP_LOCK_FILE}`},
@@ -1037,16 +1038,39 @@ export const READER_FILES = {
     mode: '0440',
     newline: false,
   },
+  // The one file the deploy fills in itself. Owned by the gate's group: the gate reads it as its own group, and the Grafana
+  // MCP server joins that group (`group_add`) to read it. It is never compared or written again once it exists, so it is
+  // never rotated by a deploy: deleting it and deploying again is the rotation.
+  mcpCaller: {
+    path: relativeToApp(TRACES_MCP_CALLER_TOKEN_FILE),
+    owner: `root:${READER_GATE_GID}`,
+    mode: '0440',
+    newline: false,
+  },
 } as const
 
 export type ReaderFileKind = keyof typeof READER_FILES
 
-export const READER_FILE_KINDS = ['token', 'langfuse', 'grafana'] as const satisfies readonly ReaderFileKind[]
+export const READER_FILE_KINDS = [
+  'token',
+  'langfuse',
+  'grafana',
+  'mcpCaller',
+] as const satisfies readonly ReaderFileKind[]
 
-/** What a new reader file holds: the void line for the token file, a placeholder for each credential. Not secrets. */
-export function readerFileContent(kind: ReaderFileKind, voidLine: string): string {
-  if (kind === 'token') return voidLine
+/**
+ * What a new reader file holds: the void line for the token file, a placeholder for each backend credential, and the
+ * generated token for the caller token. Only the caller token is a real secret from the start, and it is generated
+ * by the deploy on the machine that runs it, arrives on stdin and is never in a script's text.
+ */
+export function readerFileContent(kind: ReaderFileKind, generated: string): string {
+  if (kind === 'token' || kind === 'mcpCaller') return generated
   return kind === 'langfuse' ? READER_LANGFUSE_PLACEHOLDER : READER_GRAFANA_PLACEHOLDER
+}
+
+/** A Grafana MCP caller token: 32 random bytes as 43 base64url characters, the same strength as a sender token. */
+export function generateMcpCallerToken(random: (size: number) => Uint8Array = size => randomBytes(size)): string {
+  return Buffer.from(random(32)).toString('base64url')
 }
 
 /**
@@ -1425,6 +1449,49 @@ export function parseReaderHealth(stdout: string): ReaderHealth | undefined {
     if (match !== null) return {langfuse: match[1] === 'true', grafana: match[2] === 'true'}
   }
   return undefined
+}
+
+export const READER_GUARD_SENTINEL = 'TRACES_READER_GUARD_CHECKED'
+
+/** The gate's private check kind that asks the Grafana MCP server for an MCP `initialize` with no caller token. */
+const READER_GUARD_KIND = 'grafana-mcp-unauthenticated'
+
+/** What the unauthenticated-call check said: the server refused with 401 (`ok`), or the reason it did not. */
+export type ReaderGuard = {ok: true} | {ok: false; reason: string}
+
+/**
+ * Asks the gate container to run its private check, `docker compose exec -T reader-gate bun /app/check.ts`, for a call
+ * to the Grafana MCP server with no caller token. Read only: the one request carries no credential of any kind, the
+ * check goes straight to the server (not through the gate's route), and no file is written. A container that is not
+ * running makes `exec` fail, and the script still ends in its sentinel with no verdict line, which `parseReaderGuard`
+ * reads as no answer.
+ */
+export function readerGuardScript(): string {
+  return `set -u
+# traces-step:reader-guard
+printf '%s' ${shellQuote(JSON.stringify({kind: READER_GUARD_KIND}))} | ${COMPOSE} exec -T reader-gate bun /app/check.ts || true
+echo ${READER_GUARD_SENTINEL}`
+}
+
+const READER_GUARD_LINE = new RegExp(
+  String.raw`^READER_CHECK_(OK|FAIL) ${READER_GUARD_KIND}(?: ([a-z-]+(?::\d{3})?))?$`,
+)
+
+/**
+ * The verdict from a complete answer (one sentinel line of this check's kind, and the end sentinel). A pass has no
+ * reason and a failure has one: a line that does not fit, two verdicts, or no verdict is `undefined`, never a pass.
+ */
+export function parseReaderGuard(stdout: string): ReaderGuard | undefined {
+  const lines = stdout.split('\n').map(line => line.trim())
+  if (!lines.includes(READER_GUARD_SENTINEL)) return undefined
+  const verdicts = lines.flatMap(line => {
+    const match = READER_GUARD_LINE.exec(line)
+    return match === null ? [] : [{pass: match[1] === 'OK', reason: match[2]}]
+  })
+  const [only, ...rest] = verdicts
+  if (only === undefined || rest.length > 0) return undefined
+  if (only.pass) return only.reason === undefined ? {ok: true} : undefined
+  return only.reason === undefined ? undefined : {ok: false, reason: only.reason}
 }
 
 export const INGEST_PROBE_SENTINEL = 'TRACES_INGEST_PROBED'
@@ -2486,6 +2553,8 @@ export interface DeployDeps {
   limits: Limits
   /** A fresh void token line for each token file created. Never logged or kept. */
   voidTokenLine: () => string
+  /** A fresh Grafana MCP caller token, offered to the host for a file that does not exist. Never logged or kept. */
+  callerToken: () => string
   /** This deploy's id, written into the marker: 16 or more random bytes as hex. Injectable so a test can fix it. */
   deployId: () => string
 }
@@ -2519,6 +2588,7 @@ export function defaultDeps(env: EnvLike): DeployDeps {
     log: message => console.warn(message),
     limits: DEFAULT_LIMITS,
     voidTokenLine: () => generateVoidTokenLine(),
+    callerToken: () => generateMcpCallerToken(),
     deployId: () => generateDeployId(),
   }
 }
@@ -2766,6 +2836,24 @@ async function awaitReaderHealth(exec: RemoteExec, deps: DeployDeps): Promise<vo
   }
   const down = (['langfuse', 'grafana'] as const).filter(upstream => !last?.[upstream])
   throw new Error(`the reader gate's own health check reports ${down.join(' and ')} down`)
+}
+
+/**
+ * Runs the unauthenticated-call check once. It runs inside the operator gate `reader-ready`, after the gate has seen both
+ * upstreams up, and only reads, so the failure it throws can never reach the route. A server that answers anything but
+ * the 401 the caller policy gives, or an answer that cannot be read, or a rejected execution, fails it: the reason names
+ * the status the server returned.
+ */
+async function awaitReaderGuard(exec: RemoteExec): Promise<void> {
+  let guard: ReaderGuard | undefined
+  try {
+    const result = await exec(bashCommand(readerGuardScript()))
+    guard = result.exitCode === 0 ? parseReaderGuard(result.stdout) : undefined
+  } catch {
+    guard = undefined
+  }
+  if (guard === undefined) throw new Error('the Grafana MCP caller check did not answer')
+  if (!guard.ok) throw new Error(`the Grafana MCP server did not refuse a call with no caller token (${guard.reason})`)
 }
 
 /**
@@ -3051,13 +3139,20 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
           await sh(`Write ${file.path}`, writeFileScript(deployId, file), [FILE_WRITTEN_SENTINEL], file.content)
         }
         for (const kind of READER_FILE_KINDS) {
+          const generated = kind === 'token' ? deps.voidTokenLine() : kind === 'mcpCaller' ? deps.callerToken() : ''
           const {sentinel} = await sh(
             `Reader file ${kind}`,
             readerFileScript(kind, deployId),
             READER_FILE_SENTINELS,
-            `${readerFileContent(kind, kind === 'token' ? deps.voidTokenLine() : '')}\n`,
+            `${readerFileContent(kind, generated)}\n`,
           )
-          if (sentinel === 'TRACES_READER_FILE_CREATED') log(`  created the ${kind} reader file as a placeholder`)
+          if (sentinel === 'TRACES_READER_FILE_CREATED') {
+            log(
+              kind === 'mcpCaller'
+                ? `  created the ${kind} reader file with a generated token`
+                : `  created the ${kind} reader file as a placeholder`,
+            )
+          }
         }
         await sh('Pull the reader images', pullScript(deployId, 'pull-reader', READER_SERVICES), [
           STEP_SENTINEL('pull-reader'),
@@ -3068,6 +3163,9 @@ async function runDeploy(inputs: DeployInputs, rawExec: RemoteExec, deps: Deploy
         // Up and healthy as a container is not enough: the gate must also see Langfuse and Grafana, and the Grafana MCP
         // server can answer later than the gate does. Read only, and an operator gate like the rest of this one.
         await awaitReaderHealth(exec, deps)
+        // And the Grafana MCP server must refuse a call that carries no caller token: proof, from inside the gate
+        // container, that the policy is active and that no other service on the backend network can call it open.
+        await awaitReaderGuard(exec)
       },
     )
     const embedder = await startPostRouteService('embedder-ready', 'The Topics embedder', async () => {

@@ -19,6 +19,7 @@ import {
   TRACES_GRAFANA_MCP_TOKEN_FILE,
   TRACES_INGEST_LOCK,
   TRACES_LOCK_BUSY_SENTINEL,
+  TRACES_MCP_CALLER_TOKEN_FILE,
   TRACES_PENDING_RESTARTS,
   TRACES_READER_DIR,
   TRACES_READER_LANGFUSE_FILE,
@@ -151,6 +152,9 @@ describe('reader files and users', () => {
     expect(TRACES_READER_LOCK).toBe('/mnt/traces/app/readers/.lock')
     expect(TRACES_READER_LANGFUSE_FILE).toBe('/mnt/traces/app/secrets/reader-gate/langfuse-basic')
     expect(TRACES_GRAFANA_MCP_TOKEN_FILE).toBe('/mnt/traces/app/secrets/grafana-mcp/token')
+    // The caller token the gate sends and the Grafana MCP server requires: its own directory, so neither service can
+    // read the other's backend credential through it.
+    expect(TRACES_MCP_CALLER_TOKEN_FILE).toBe('/mnt/traces/app/secrets/mcp-caller/token')
     expect(READER_STAGED_SUFFIX).toBe('.staged')
     expect(READER_PREVIOUS_SUFFIX).toBe('.previous')
   })

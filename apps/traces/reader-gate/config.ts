@@ -1,4 +1,4 @@
-// Gate configuration: four environment variables with the contract's defaults. The limits and deadlines are code
+// Gate configuration: five environment variables with the contract's defaults. The limits and deadlines are code
 // constants (`constants.ts`), not environment variables.
 
 import {DEFAULTS} from './constants'
@@ -6,6 +6,7 @@ import {DEFAULTS} from './constants'
 export interface GateConfig {
   tokenFile: string
   langfuseBasicFile: string
+  grafanaMcpCallerFile: string
   langfuseUpstream: string
   grafanaMcpUpstream: string
 }
@@ -32,6 +33,7 @@ export function loadConfig(env: Env): GateConfig {
   return {
     tokenFile: env.READER_TOKEN_FILE ?? DEFAULTS.tokenFile,
     langfuseBasicFile: env.LANGFUSE_BASIC_FILE ?? DEFAULTS.langfuseBasicFile,
+    grafanaMcpCallerFile: env.GRAFANA_MCP_CALLER_FILE ?? DEFAULTS.grafanaMcpCallerFile,
     langfuseUpstream: parseUpstream('LANGFUSE_UPSTREAM', env.LANGFUSE_UPSTREAM ?? DEFAULTS.langfuseUpstream),
     grafanaMcpUpstream: parseUpstream('GRAFANA_MCP_UPSTREAM', env.GRAFANA_MCP_UPSTREAM ?? DEFAULTS.grafanaMcpUpstream),
   }

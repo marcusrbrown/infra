@@ -12,7 +12,7 @@ import type {CredentialEvent} from './credentials'
 import type {StoreEvent} from './tokens'
 import {loadConfig} from './config'
 import {DEADLINE_MS, HEALTH, IDLE_TIMEOUT_S, LIMITS, PORTS, RESPONSE_DEADLINE_MS} from './constants'
-import {createCredentialStore} from './credentials'
+import {createCallerTokenStore, createCredentialStore} from './credentials'
 import {createHealthHandler} from './health'
 import {readTextFile} from './io'
 import {createLimits} from './limits'
@@ -49,17 +49,23 @@ export async function start(env: Record<string, string | undefined> = process.en
     readText: readTextFile,
     log: (event: CredentialEvent) => log(event),
   })
+  const callerTokens = createCallerTokenStore({
+    path: config.grafanaMcpCallerFile,
+    readText: readTextFile,
+    log: (event: CredentialEvent) => log(event),
+  })
   const timers = {
     setInterval: (fn: () => void, ms: number) => setInterval(fn, ms),
     clearInterval: (handle: unknown) => clearInterval(handle as Timer),
   }
   startReloading(store, timers)
   startReloading(credentials, timers)
-  await Promise.all([store.refresh(), credentials.refresh()])
+  startReloading(callerTokens, timers)
+  await Promise.all([store.refresh(), credentials.refresh(), callerTokens.refresh()])
 
   const handler = createServer({
     store,
-    credentials: {langfuse: credentials.current},
+    credentials: {langfuse: credentials.current, grafanaCaller: callerTokens.current},
     limits: createLimits({
       clock: () => Date.now(),
       requestsPerWindow: LIMITS.requestsPerWindow,

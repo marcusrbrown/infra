@@ -7,22 +7,25 @@ describe('loadConfig', () => {
     expect(loadConfig({})).toEqual({
       tokenFile: '/run/readers/token',
       langfuseBasicFile: '/run/secrets/reader-gate/langfuse-basic',
+      grafanaMcpCallerFile: '/run/secrets/mcp-caller/token',
       langfuseUpstream: 'http://langfuse-web:3000',
       grafanaMcpUpstream: 'http://grafana-mcp:8000',
     })
   })
 
-  test('reads the four environment variables', () => {
+  test('reads the five environment variables', () => {
     expect(
       loadConfig({
         READER_TOKEN_FILE: '/x/token',
         LANGFUSE_BASIC_FILE: '/x/basic',
+        GRAFANA_MCP_CALLER_FILE: '/x/caller',
         LANGFUSE_UPSTREAM: 'http://lf:1',
         GRAFANA_MCP_UPSTREAM: 'https://gm.example:2/',
       }),
     ).toEqual({
       tokenFile: '/x/token',
       langfuseBasicFile: '/x/basic',
+      grafanaMcpCallerFile: '/x/caller',
       langfuseUpstream: 'http://lf:1',
       grafanaMcpUpstream: 'https://gm.example:2',
     })

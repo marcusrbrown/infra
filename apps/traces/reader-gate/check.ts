@@ -12,7 +12,19 @@
 //       Langfuse answers 401 to the pair in that file (the old key is revoked).
 //   {"kind":"grafana-mcp"}
 //       `tools/list` on grafana-mcp holds only read tools, and one read tool call succeeds. grafana-mcp reads its own
-//       service-account token file, so the check sends no credential.
+//       service-account token file, so the check sends no Grafana credential. It sends the caller token, from the same file
+//       the gate reads, in the caller header: the server refuses a call without it.
+//   {"kind":"grafana-mcp-caller"}
+//       An MCP `initialize` that carries the caller token from the gate's own file succeeds: 200 and a JSON-RPC result.
+//       `initialize` needs no Grafana service-account token, so it works before `traces reader backend grafana` has run.
+//       A 401 is `caller-token-refused` (the file and the running server disagree), any other failure is
+//       `not-initialised:<status>`, and a file the gate would refuse to send is `caller-token-missing`, `-unreadable` or
+//       `-malformed`, with no request made.
+//   {"kind":"grafana-mcp-unauthenticated"}
+//       The same server, reached by the same address, answers 401 to an MCP request that carries no caller token and no
+//       credential of any kind. That proves the caller policy is active: any other answer, 200 included, is a failure, and
+//       its status is part of the reason (`not-refused:200`). It reads no file and sends nothing a caller could be
+//       recognised by.
 //
 //   READER_CHECK_OK <kind>
 //   READER_CHECK_FAIL <kind> <reason>        <reason> is one of a fixed set of words; a reason for an unexpected
@@ -25,8 +37,8 @@
 
 import type {Env} from './config'
 import {loadConfig} from './config'
-import {CHECK_TIMEOUT_MS} from './constants'
-import {parseLangfuseBasic} from './credentials'
+import {CHECK_TIMEOUT_MS, GRAFANA_MCP_CALLER_HEADER} from './constants'
+import {parseCallerToken, parseLangfuseBasic} from './credentials'
 import {errorCode, readTextFile} from './io'
 
 export interface CheckDeps {
@@ -35,9 +47,15 @@ export interface CheckDeps {
   env: Env
 }
 
-type Kind = 'langfuse' | 'langfuse-refused' | 'grafana-mcp'
+type Kind = 'langfuse' | 'langfuse-refused' | 'grafana-mcp' | 'grafana-mcp-unauthenticated' | 'grafana-mcp-caller'
 
-const KINDS: readonly Kind[] = ['langfuse', 'langfuse-refused', 'grafana-mcp']
+const KINDS: readonly Kind[] = [
+  'langfuse',
+  'langfuse-refused',
+  'grafana-mcp',
+  'grafana-mcp-unauthenticated',
+  'grafana-mcp-caller',
+]
 
 class CheckFailure extends Error {
   constructor(readonly reason: string) {
@@ -62,8 +80,15 @@ export async function runCheck(stdin: string, deps: CheckDeps): Promise<string> 
   if (input === null) return `READER_CHECK_FAIL ${kindOf(stdin)} invalid-input`
   try {
     const config = loadConfig(deps.env)
-    if (input.kind === 'grafana-mcp') await checkGrafana(`${config.grafanaMcpUpstream}/mcp`, deps)
-    else {
+    if (input.kind === 'grafana-mcp') {
+      const token = await loadCallerToken(config.grafanaMcpCallerFile, deps)
+      await checkGrafana(`${config.grafanaMcpUpstream}/mcp`, {[GRAFANA_MCP_CALLER_HEADER]: token}, deps)
+    } else if (input.kind === 'grafana-mcp-caller') {
+      const token = await loadCallerToken(config.grafanaMcpCallerFile, deps)
+      await checkGrafanaCaller(`${config.grafanaMcpUpstream}/mcp`, {[GRAFANA_MCP_CALLER_HEADER]: token}, deps)
+    } else if (input.kind === 'grafana-mcp-unauthenticated') {
+      await checkGrafanaUnauthenticated(`${config.grafanaMcpUpstream}/mcp`, deps)
+    } else {
       const path = input.credentialFile ?? ''
       if (!isCredentialPath(path, config.langfuseBasicFile)) throw new CheckFailure('invalid-input')
       const authorization = await loadAuthorization(path, deps)
@@ -110,7 +135,7 @@ function parseInput(stdin: string): Input | null {
   if (!isRecord(value)) return null
   const kind = asKind(value.kind)
   if (kind === null) return null
-  if (kind === 'grafana-mcp') return {kind}
+  if (kind === 'grafana-mcp' || kind === 'grafana-mcp-unauthenticated' || kind === 'grafana-mcp-caller') return {kind}
   if (typeof value.credentialFile !== 'string') return null
   return {kind, credentialFile: value.credentialFile}
 }
@@ -133,6 +158,18 @@ async function loadAuthorization(path: string, deps: CheckDeps): Promise<string>
   const credential = parseLangfuseBasic(text)
   if (!credential.ok) throw new CheckFailure(`credential-${credential.reason}`)
   return credential.authorization
+}
+
+async function loadCallerToken(path: string, deps: CheckDeps): Promise<string> {
+  let text: string
+  try {
+    text = await deps.readText(path)
+  } catch (error) {
+    throw new CheckFailure(errorCode(error) === 'ENOENT' ? 'caller-token-missing' : 'caller-token-unreadable')
+  }
+  const caller = parseCallerToken(text)
+  if (!caller.ok) throw new CheckFailure(`caller-token-${caller.reason}`)
+  return caller.token
 }
 
 // ─── Requests ─────────────────────────────────────────────────────────────────
@@ -284,12 +321,12 @@ function needsNoArguments(tool: Tool): boolean {
   return !Array.isArray(required) || required.length === 0
 }
 
-async function checkGrafana(url: string, deps: CheckDeps): Promise<void> {
+async function checkGrafana(url: string, caller: Record<string, string>, deps: CheckDeps): Promise<void> {
   const initialize = await send(
     deps,
     url,
     post(
-      {},
+      caller,
       rpc('initialize', {
         protocolVersion: '2025-06-18',
         capabilities: {},
@@ -297,9 +334,11 @@ async function checkGrafana(url: string, deps: CheckDeps): Promise<void> {
       }),
     ),
   )
+  // The server answers 401 to a caller token it does not know: the file and the running server disagree.
+  if (initialize.status === 401) throw new CheckFailure('caller-token-refused')
   if (result(initialize) === null) throw new CheckFailure('mcp-handshake-failed')
   const session = initialize.headers.get('mcp-session-id')
-  const headers: Record<string, string> = session === null ? {} : {'mcp-session-id': session}
+  const headers: Record<string, string> = session === null ? caller : {...caller, 'mcp-session-id': session}
 
   const initialized = await send(deps, url, post(headers, notification('notifications/initialized')))
   if (initialized.status < 200 || initialized.status >= 300) throw new CheckFailure('mcp-handshake-failed')
@@ -316,6 +355,51 @@ async function checkGrafana(url: string, deps: CheckDeps): Promise<void> {
 
   const call = result(await send(deps, url, post(headers, rpc('tools/call', {name: tool.name, arguments: {}}))))
   if (call === null || call.isError === true) throw new CheckFailure('read-call-failed')
+}
+
+/**
+ * An MCP `initialize` with the caller token. The server's caller policy lets it through and answers a JSON-RPC result:
+ * 401 means it does not know this token, and anything else that is not a JSON-RPC result means no session was started.
+ * It needs no Grafana credential, so the reader-ready gate can run it before the service-account token is installed.
+ */
+async function checkGrafanaCaller(url: string, caller: Record<string, string>, deps: CheckDeps): Promise<void> {
+  const reply = await send(
+    deps,
+    url,
+    post(
+      caller,
+      rpc('initialize', {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: {name: 'reader-gate-check', version: '1'},
+      }),
+    ),
+  )
+  if (reply.status === 401) throw new CheckFailure('caller-token-refused')
+  if (result(reply) === null || !isRecord(reply.body) || reply.body.jsonrpc !== '2.0') {
+    throw new CheckFailure(withStatus('not-initialised', reply))
+  }
+}
+
+/**
+ * An MCP `initialize` with no caller header, no `Authorization` and nothing else a caller could be recognised by. The
+ * server's caller policy answers it 401 before it reads the body. A server without the policy would answer 200 and
+ * start a stateless session, which changes nothing.
+ */
+async function checkGrafanaUnauthenticated(url: string, deps: CheckDeps): Promise<void> {
+  const reply = await send(
+    deps,
+    url,
+    post(
+      {},
+      rpc('initialize', {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: {name: 'reader-gate-check', version: '1'},
+      }),
+    ),
+  )
+  if (reply.status !== 401) throw new CheckFailure(withStatus('not-refused', reply))
 }
 
 // ─── Entrypoint ───────────────────────────────────────────────────────────────

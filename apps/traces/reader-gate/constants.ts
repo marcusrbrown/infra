@@ -11,9 +11,26 @@ export const VOID_TOKEN_PREFIX = 'trc_void_'
 export const LANGFUSE_PLACEHOLDER = 'pk-lf-unset:sk-lf-unset'
 export const GRAFANA_PLACEHOLDER = 'glsa_unset'
 
+/**
+ * The header the gate sends the Grafana MCP server to prove it is the gate. A custom name and not `Authorization`: the gate
+ * drops the consumer's own `Authorization`, and the server accepts a raw token in any header but that one. The compose
+ * file names it in `--server-auth-header`, and a test pins the two to each other. Sent on the Grafana route only.
+ */
+export const GRAFANA_MCP_CALLER_HEADER = 'x-reader-gate-token'
+
+/**
+ * What a Grafana MCP caller token is: exactly this many characters of this alphabet (a character class body), with at most
+ * one trailing newline in its file. Both sides apply it: the gate's `parseCallerToken` and the Grafana MCP entrypoint in
+ * the compose file, which writes the same class and length into a shell `case`. Neither may be looser than the other, or
+ * the server starts on a token the gate refuses to send. The deploy generates 32 random bytes as base64url, which is this
+ * shape; `constants.test.ts` and `docker-compose.test.ts` pin the generator and the entrypoint to these two values.
+ */
+export const CALLER_TOKEN_ALPHABET = 'A-Za-z0-9_-'
+export const CALLER_TOKEN_LENGTH = 43
+
 export const CONSUMER_PATTERN = /^[a-z][a-z0-9-]{0,30}$/
 
-/** How often the token file and the credential file are read again. A revoked token is refused within about this long. */
+/** How often the token file and the credential files are read again. A revoked token is refused within about this long. */
 export const RELOAD_INTERVAL_MS = 1000
 
 /** Time the upstream has to send response headers. After it the gate answers 504. Caddy's timeouts must exceed it. */
@@ -54,6 +71,7 @@ export const CHECK_TIMEOUT_MS = 15_000
 export const DEFAULTS = {
   tokenFile: '/run/readers/token',
   langfuseBasicFile: '/run/secrets/reader-gate/langfuse-basic',
+  grafanaMcpCallerFile: '/run/secrets/mcp-caller/token',
   langfuseUpstream: 'http://langfuse-web:3000',
   grafanaMcpUpstream: 'http://grafana-mcp:8000',
 } as const

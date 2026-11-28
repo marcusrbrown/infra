@@ -28,3 +28,9 @@ export function voidLine(seed = 'void'): string {
 export function basicHeader(user: string, secret: string): string {
   return `Basic ${Buffer.from(`${user}:${secret}`).toString('base64')}`
 }
+
+/** A valid Grafana MCP caller token: 43 base64url characters, the shape the deploy generates. */
+export const CALLER_TOKEN = 'Zk3-_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789ab'
+
+/** Another valid one, for a server that knows a different token than the file. */
+export const OTHER_CALLER_TOKEN = 'Qw9-_zYxWvUtSrQpOnMlKjIhGgFfEeDdCcBbAa87654'

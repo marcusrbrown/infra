@@ -5,7 +5,6 @@ import {join} from 'node:path'
 import {describe, expect, it} from 'bun:test'
 
 import {
-  advanceCounter,
   assembleVerdict,
   blockEndMs,
   buildCanary,
@@ -19,7 +18,6 @@ import {
   CLICKHOUSE_READER_USER,
   combineLangfuse,
   createReporter,
-  emptyCounterState,
   ENDPOINTS,
   evaluateAge,
   evaluateCollectorMetrics,
@@ -28,7 +26,6 @@ import {
   evaluateLangfuseRaw,
   evaluateLangfuseRow,
   evaluateQueues,
-  evaluateTempoMetrics,
   evaluateTempoReadback,
   evaluateVolume,
   EXPECTED_EXPORTERS,
@@ -139,10 +136,6 @@ function canaryRequests(status: string, count: number): string {
   return `http_server_request_duration_count{http_request_method="POST",http_response_status_code="${status}",http_route="/canary/v1/traces",network_protocol_name="http",network_protocol_version="1.1",server_address="10.0.0.4",server_port="4414",url_scheme="http"} ${count}`
 }
 
-function tempoPage(extra = ''): string {
-  return `tempo_build_info{version="3.1.1"} 1\n${extra}\n`
-}
-
 function check(detail: string, id: string): CheckResult {
   const parsed = record(JSON.parse(detail), 'detail')
   const found = (parsed.checks as CheckResult[]).find(entry => entry.id === id)
@@ -154,7 +147,6 @@ interface Behaviour {
   collectorHealth: number | 'throw' | 'garbage'
   collectorMetrics: string | number | 'throw'
   tempoReady: number | 'throw'
-  tempoMetrics: string | number | 'throw'
   langfuseWeb: number | 'throw'
   langfuseWorker: number | 'throw'
   grafana: number | 'throw'
@@ -189,7 +181,6 @@ function defaults(): Behaviour {
     collectorHealth: 200,
     collectorMetrics: collectorPage(),
     tempoReady: 200,
-    tempoMetrics: tempoPage(),
     langfuseWeb: 200,
     langfuseWorker: 200,
     grafana: 200,
@@ -281,11 +272,6 @@ function harness(overrides: Partial<Behaviour> = {}) {
         String(behaviour.collectorMetrics),
       )
     if (url === ENDPOINTS.tempoReady) return reply(behaviour.tempoReady, 'ready')
-    if (url === ENDPOINTS.tempoMetrics)
-      return reply(
-        typeof behaviour.tempoMetrics === 'string' ? 200 : behaviour.tempoMetrics,
-        String(behaviour.tempoMetrics),
-      )
     if (url === ENDPOINTS.langfuseWeb) return reply(behaviour.langfuseWeb, '{"status":"OK"}')
     if (url === ENDPOINTS.langfuseWorker) return reply(behaviour.langfuseWorker, '{"status":"ok"}')
     if (url === ENDPOINTS.grafanaHealth) return reply(behaviour.grafana, '{"database":"ok"}')
@@ -447,24 +433,6 @@ describe('parsePrometheus', () => {
   })
 })
 
-// ─── Counters ─────────────────────────────────────────────────────────────────
-
-describe('advanceCounter', () => {
-  it('sets a baseline on the first reading and counts growth after it', () => {
-    const first = advanceCounter(emptyCounterState(), 'k', 12, 1000)
-    expect(first.growth).toBe(0)
-    const second = advanceCounter(first.state, 'k', 15, 2000)
-    expect(second.growth).toBe(3)
-    expect(second.state.lastRise.k).toBe(2000)
-  })
-
-  it('treats a lower value as a restarted process and counts the whole new value', () => {
-    const base = advanceCounter(emptyCounterState(), 'k', 50, 1000).state
-    expect(advanceCounter(base, 'k', 4, 2000).growth).toBe(4)
-    expect(advanceCounter(base, 'k', 0, 2000).growth).toBe(0)
-  })
-})
-
 // ─── Collector metrics ────────────────────────────────────────────────────────
 
 describe('evaluateQueues', () => {
@@ -494,148 +462,38 @@ describe('evaluateQueues', () => {
 })
 
 describe('evaluateCollectorMetrics', () => {
-  const growth = (
-    n: number,
-    exporter = 'otlp_http/langfuse-fro-bot',
-    metric = 'otelcol_exporter_enqueue_failed_spans',
-  ) => collectorPage(`${metric}{exporter="${exporter}"} ${n}`)
-
-  it('passes with zero failures when the counters are absent, which is how an unused counter looks', () => {
-    const out = evaluateCollectorMetrics(collectorPage(), emptyCounterState(), NOW)
-    expect(out.results.map(entry => [entry.id, entry.status])).toEqual([
-      ['collector-queues', 'pass'],
-      ['collector-failures', 'pass'],
-      ['collector-refused', 'pass'],
-    ])
+  it('returns the queue check alone: loss detection belongs to the Grafana rules, not the reporter', () => {
+    const out = evaluateCollectorMetrics(collectorPage())
+    expect(out.results.map(entry => [entry.id, entry.status])).toEqual([['collector-queues', 'pass']])
   })
 
-  it('is unknown for everything when the page is not the collector (no uptime sentinel)', () => {
+  it('is unknown when the page is not the collector (no uptime sentinel)', () => {
     for (const text of ['', '<html></html>', 'otelcol_exporter_queue_size{exporter="otlp_http/tempo"} 0\n']) {
-      const out = evaluateCollectorMetrics(text, emptyCounterState(), NOW)
-      expect(out.results.map(entry => entry.status)).toEqual(['unknown', 'unknown', 'unknown'])
+      const out = evaluateCollectorMetrics(text)
+      expect(out.results.map(entry => [entry.id, entry.status])).toEqual([['collector-queues', 'unknown']])
+      expect(out.ingest).toBeNull()
     }
   })
 
-  it('fails when an enqueue-failure counter rose since the last run, naming the exporter', () => {
-    const first = evaluateCollectorMetrics(growth(0), emptyCounterState(), NOW)
-    const second = evaluateCollectorMetrics(growth(12), first.state, NOW + 1000)
-    const failures = second.results.find(entry => entry.id === 'collector-failures')
-    expect(failures?.status).toBe('fail')
-    expect(failures?.detail).toContain('otlp_http/langfuse-fro-bot enqueue failed')
-  })
-
-  it('fails on a send-failure counter, with and without the _total suffix', () => {
-    for (const metric of ['otelcol_exporter_send_failed_spans', 'otelcol_exporter_send_failed_spans_total']) {
-      const first = evaluateCollectorMetrics(growth(0, 'otlp_http/tempo', metric), emptyCounterState(), NOW)
-      const second = evaluateCollectorMetrics(growth(3, 'otlp_http/tempo', metric), first.state, NOW + 1000)
-      expect(second.results.find(entry => entry.id === 'collector-failures')?.status).toBe('fail')
-    }
-  })
-
-  const refusedOf = (out: {results: CheckResult[]}) => out.results.find(entry => entry.id === 'collector-refused')
-
-  it('does not fail on a 429: the byte limiter answering 429 is the limiter working', () => {
-    const page = (refused: number, tooMany: number) =>
-      collectorPage(
-        [
-          `otelcol_receiver_refused_spans{receiver="otlp/workstation",transport="http"} ${refused}`,
-          authRequests('200', 40),
-          authRequests('429', tooMany),
-        ].join('\n'),
-      )
-    const first = evaluateCollectorMetrics(page(0, 0), emptyCounterState(), NOW)
-    const second = evaluateCollectorMetrics(page(5000, 7), first.state, NOW + 1000)
-    expect(refusedOf(second)?.status).toBe('pass')
-    expect(refusedOf(second)?.detail).not.toContain('workstation')
-  })
-
-  it('fails on a 503 on the authenticated receivers', () => {
-    const first = evaluateCollectorMetrics(collectorPage(authRequests('503', 0)), emptyCounterState(), NOW)
-    const second = evaluateCollectorMetrics(collectorPage(authRequests('503', 2)), first.state, NOW + 1000)
-    expect(refusedOf(second)?.status).toBe('fail')
-    expect(refusedOf(second)?.detail).toContain('503')
-  })
-
-  it('latches a 503 for the window after the counter stops rising, then clears', () => {
-    const page = collectorPage(authRequests('503', 3))
-    const first = evaluateCollectorMetrics(collectorPage(authRequests('503', 0)), emptyCounterState(), NOW)
-    const risen = evaluateCollectorMetrics(page, first.state, NOW + 1000)
-    const latched = evaluateCollectorMetrics(page, risen.state, NOW + 1000 + THRESHOLDS.lossLatchMs - 1)
-    expect(refusedOf(latched)?.status).toBe('fail')
-    const cleared = evaluateCollectorMetrics(page, latched.state, NOW + 2000 + THRESHOLDS.lossLatchMs)
-    expect(refusedOf(cleared)?.status).toBe('pass')
-  })
-
-  it('ignores a 503 on the canary route', () => {
-    const page = (n: number) => collectorPage([authRequests('200', 5), canaryRequests('503', n)].join('\n'))
-    const first = evaluateCollectorMetrics(page(0), emptyCounterState(), NOW)
-    const second = evaluateCollectorMetrics(page(9), first.state, NOW + 1000)
-    expect(refusedOf(second)?.status).toBe('pass')
-  })
-
-  it('sums every label combination of the 503 count', () => {
-    const page = (a: number, b: number) =>
-      collectorPage([authRequests('503', a, '10.0.0.4'), authRequests('503', b, '10.0.0.5')].join('\n'))
-    const first = evaluateCollectorMetrics(page(1, 1), emptyCounterState(), NOW)
-    const second = evaluateCollectorMetrics(page(1, 2), first.state, NOW + 1000)
-    expect(refusedOf(second)?.status).toBe('fail')
-  })
-
-  it('does not count a 503 total that was already above zero on the first reading', () => {
-    const out = evaluateCollectorMetrics(collectorPage(authRequests('503', 40)), emptyCounterState(), NOW)
-    expect(refusedOf(out)?.status).toBe('pass')
-  })
-
-  it('reads an absent 503 series as zero while other statuses show the request metric is exported', () => {
-    const out = evaluateCollectorMetrics(collectorPage(authRequests('200', 13)), emptyCounterState(), NOW)
-    expect(refusedOf(out)?.status).toBe('pass')
-  })
-
-  it('is unknown when spans were served but the request metric is not exported at all', () => {
-    const served = 'otelcol_receiver_accepted_spans{receiver="otlp/fro-bot",transport="http"} 12'
-    const out = evaluateCollectorMetrics(collectorPage(served), emptyCounterState(), NOW)
-    expect(refusedOf(out)?.status).toBe('unknown')
-    expect(refusedOf(out)?.detail).toContain('http_server_request_duration_count')
-    // The other collector checks are unaffected.
-    expect(out.results.find(entry => entry.id === 'collector-failures')?.status).toBe('pass')
+  it('does not read the loss counters: failures, refusals and 503s leave the result as it was', () => {
+    const lossy = collectorPage(
+      [
+        'otelcol_exporter_enqueue_failed_spans{exporter="otlp_http/langfuse-fro-bot"} 12',
+        'otelcol_exporter_send_failed_spans_total{exporter="otlp_http/tempo"} 3',
+        'otelcol_exporter_send_failed_spans{exporter="otlp_http/tempo"} not-a-number',
+        receiverCounters('workstation', 10, 5000),
+        authRequests('503', 40),
+      ].join('\n'),
+    )
+    expect(evaluateCollectorMetrics(lossy).results).toEqual(evaluateCollectorMetrics(collectorPage()).results)
   })
 
   it('passes a collector that has served only the private canary, and shows no authenticated requests', () => {
-    // After a restart with ingest held or off, the canary is the only traffic. Its request series proves the
-    // metric is exported, so this must not read as a missing metric.
     const canaryOnly = collectorPage([receiverCounters('canary', 1, 0), canaryRequests('200', 1)].join('\n'))
-    const out = evaluateCollectorMetrics(canaryOnly, emptyCounterState(), NOW)
-    expect(refusedOf(out)?.status).toBe('pass')
+    const out = evaluateCollectorMetrics(canaryOnly)
+    expect(out.results.map(entry => entry.status)).toEqual(['pass'])
     expect(out.ingest?.requests).toEqual({})
     expect(out.ingest?.groups.workstation).toEqual({acceptedSpans: 0, refusedSpans: 0})
-  })
-
-  it('treats a collector that has served nothing as having no 503s', () => {
-    const idle = 'otelcol_receiver_accepted_spans{receiver="otlp/fro-bot",transport="http"} 0'
-    expect(refusedOf(evaluateCollectorMetrics(collectorPage(idle), emptyCounterState(), NOW))?.status).toBe('pass')
-  })
-
-  it('keeps failing for the latch window after the counter stops rising, then clears', () => {
-    const first = evaluateCollectorMetrics(growth(0), emptyCounterState(), NOW)
-    const risen = evaluateCollectorMetrics(growth(4), first.state, NOW + 1000)
-    const stillLatched = evaluateCollectorMetrics(growth(4), risen.state, NOW + 1000 + THRESHOLDS.lossLatchMs - 1)
-    expect(stillLatched.results.find(entry => entry.id === 'collector-failures')?.status).toBe('fail')
-    const cleared = evaluateCollectorMetrics(growth(4), stillLatched.state, NOW + 2000 + THRESHOLDS.lossLatchMs)
-    expect(cleared.results.find(entry => entry.id === 'collector-failures')?.status).toBe('pass')
-  })
-
-  it('does not count a counter that was already above zero on the first reading', () => {
-    const out = evaluateCollectorMetrics(growth(99), emptyCounterState(), NOW)
-    expect(out.results.find(entry => entry.id === 'collector-failures')?.status).toBe('pass')
-  })
-
-  it('is unknown for a counter that is not a number', () => {
-    const out = evaluateCollectorMetrics(growth(-1), emptyCounterState(), NOW)
-    expect(out.results.find(entry => entry.id === 'collector-failures')?.status).toBe('unknown')
-    for (const bad of ['abc', '-1']) {
-      const page = collectorPage(authRequests('503', bad))
-      expect(refusedOf(evaluateCollectorMetrics(page, emptyCounterState(), NOW))?.status).toBe('unknown')
-    }
   })
 })
 
@@ -701,44 +559,8 @@ describe('evaluateIngestCounts', () => {
   })
 
   it('comes with the evaluation, and is null when the page is not the collector', () => {
-    expect(evaluateCollectorMetrics(collectorPage(page), emptyCounterState(), NOW).ingest?.requests['401']).toBe(35)
-    expect(evaluateCollectorMetrics('<html></html>', emptyCounterState(), NOW).ingest).toBeNull()
-  })
-})
-
-// ─── Tempo metrics ────────────────────────────────────────────────────────────
-
-describe('evaluateTempoMetrics', () => {
-  const discard = (n: number, reason = 'trace_too_large') =>
-    tempoPage(`tempo_discarded_spans_total{reason="${reason}"} ${n}`)
-
-  it('passes when the counters are absent', () => {
-    const out = evaluateTempoMetrics(tempoPage(), emptyCounterState(), NOW)
-    expect(out.results.map(entry => entry.status)).toEqual(['pass', 'pass'])
-  })
-
-  it('is unknown when the page holds no Tempo metric at all', () => {
-    for (const text of ['# nothing\n', '<html></html>', 'go_goroutines 12\n']) {
-      const out = evaluateTempoMetrics(text, emptyCounterState(), NOW)
-      expect(out.results.map(entry => entry.status)).toEqual(['unknown', 'unknown'])
-    }
-  })
-
-  it('fails when spans were discarded since the last run, naming the reason', () => {
-    const first = evaluateTempoMetrics(discard(0), emptyCounterState(), NOW)
-    const second = evaluateTempoMetrics(discard(24), first.state, NOW + 1000)
-    const discards = second.results.find(entry => entry.id === 'tempo-discards')
-    expect(discards?.status).toBe('fail')
-    expect(discards?.detail).toContain('trace_too_large')
-  })
-
-  it('warns, and does not fail, when attributes were truncated', () => {
-    const page = (n: number) =>
-      tempoPage(`tempo_distributor_attributes_truncated_total{scope="span",tenant="single-tenant"} ${n}`)
-    const first = evaluateTempoMetrics(page(0), emptyCounterState(), NOW)
-    const second = evaluateTempoMetrics(page(9), first.state, NOW + 1000)
-    expect(second.results.find(entry => entry.id === 'tempo-truncation')?.status).toBe('warn')
-    expect(second.results.find(entry => entry.id === 'tempo-discards')?.status).toBe('pass')
+    expect(evaluateCollectorMetrics(collectorPage(page)).ingest?.requests['401']).toBe(35)
+    expect(evaluateCollectorMetrics('<html></html>').ingest).toBeNull()
   })
 })
 
@@ -1533,9 +1355,6 @@ describe('every probe fails closed', () => {
     ['collector metrics without a queue', {collectorMetrics: 'otelcol_process_uptime_seconds_total 5\n'}],
     ['tempo not ready', {tempoReady: 503}],
     ['tempo unreachable', {tempoReady: 'throw'}],
-    ['tempo metrics unreachable', {tempoMetrics: 'throw'}],
-    ['tempo metrics 500', {tempoMetrics: 500}],
-    ['tempo metrics unparsable', {tempoMetrics: 'garbage'}],
     ['langfuse web down', {langfuseWeb: 'throw'}],
     ['langfuse worker 500', {langfuseWorker: 500}],
     ['clickhouse 500', {clickhouseStatus: 500}],
@@ -1571,6 +1390,79 @@ describe('every probe fails closed', () => {
     expect(assembleVerdict(results, NOW).ok).toBe(true)
     expect(assembleVerdict(results.slice(1), NOW).ok).toBe(false)
     expect(assembleVerdict([], NOW).ok).toBe(false)
+  })
+})
+
+// ─── Point-in-time checks only ────────────────────────────────────────────────
+
+// Ongoing loss detection (failed exports, 503s, Tempo discards and truncation) belongs to the Grafana rules in
+// `config/grafana/alerting/rules.yaml`. The reporter keeps only what is true of the stack right now.
+describe('the reporter judges current state only', () => {
+  const REMOVED = ['collector-failures', 'collector-refused', 'tempo-discards', 'tempo-truncation'] as const
+
+  it('requires exactly the point-in-time ingest checks', () => {
+    expect([...REQUIRED_CHECKS]).toEqual([
+      'collector-health',
+      'collector-queues',
+      'tempo-ready',
+      'langfuse-web',
+      'langfuse-worker',
+      'volume-space',
+      'root-space',
+      'data-age-clickhouse',
+      'data-age-object-store',
+      'data-age-tempo',
+    ])
+  })
+
+  it('a run carries none of the four loss checks, and does not read the Tempo metrics page', async () => {
+    const out = await runOnce()
+    const ids = (record(JSON.parse(out.detail), 'detail').checks as CheckResult[]).map(entry => entry.id)
+    for (const id of REMOVED) expect(ids).not.toContain(id)
+    expect(ids.sort()).toEqual([...REQUIRED_CHECKS, ...MONITORING_CHECKS].sort())
+    expect(out.requests.some(entry => entry.url === 'http://tempo:3200/metrics')).toBe(false)
+  })
+
+  it('loss counters that rise between two runs leave the verdict passing', async () => {
+    let n = 0
+    const world = harness()
+    const reporter = createReporter({
+      ...world.deps,
+      fetch: async (url, init) =>
+        url === ENDPOINTS.collectorMetrics
+          ? new Response(
+              collectorPage(
+                [
+                  `otelcol_exporter_enqueue_failed_spans{exporter="otlp_http/langfuse-fro-bot"} ${n}`,
+                  `otelcol_exporter_send_failed_spans{exporter="otlp_http/tempo"} ${n}`,
+                  authRequests('503', n),
+                ].join('\n'),
+              ),
+              {status: 200},
+            )
+          : world.deps.fetch(url, init),
+    })
+    await reporter.runOnce()
+    n = 40
+    world.state.now += THRESHOLDS.intervalMs
+    await reporter.runOnce()
+    expect(record(JSON.parse(reporter.detail()), 'detail').ok).toBe(true)
+    expect(reporter.health().status).toBe(200)
+  })
+
+  it('an id nobody classified still fails closed, a removed loss id included', () => {
+    const passing: CheckResult[] = [...REQUIRED_CHECKS, ...MONITORING_CHECKS].map(id => ({
+      id,
+      status: 'pass',
+      detail: 'ok',
+    }))
+    expect(assembleVerdict(passing, NOW).ok).toBe(true)
+    for (const id of [...REMOVED, 'a-check-nobody-classified']) {
+      expect(checkScope(id)).toBe('ingest')
+      const verdict = assembleVerdict([...passing, {id, status: 'unknown', detail: 'stray'}], NOW)
+      expect(verdict.ok).toBe(false)
+      expect(verdict.checks.map(entry => entry.id)).toContain(id)
+    }
   })
 })
 
@@ -1722,91 +1614,6 @@ describe('a run has an overall deadline', () => {
   })
 })
 
-// ─── Counters across runs ─────────────────────────────────────────────────────
-
-/** A reporter whose collector metrics page is whatever `current()` returns. */
-function withMetrics(current: () => string) {
-  const world = harness()
-  const deps: ReporterDeps = {
-    ...world.deps,
-    fetch: async (url, init) =>
-      url === ENDPOINTS.collectorMetrics ? new Response(current(), {status: 200}) : world.deps.fetch(url, init),
-  }
-  return {world, reporter: createReporter(deps)}
-}
-
-describe('counters across runs', () => {
-  it('a counter that rose between two runs fails the second verdict', async () => {
-    let metrics = collectorPage('otelcol_exporter_enqueue_failed_spans{exporter="otlp_http/langfuse-fro-bot"} 0')
-    const world = harness()
-    const deps: ReporterDeps = {
-      ...world.deps,
-      fetch: async (url, init) =>
-        url === ENDPOINTS.collectorMetrics ? new Response(metrics, {status: 200}) : world.deps.fetch(url, init),
-    }
-    const reporter = createReporter(deps)
-    await reporter.runOnce()
-    expect(reporter.health().status).toBe(200)
-
-    metrics = collectorPage('otelcol_exporter_enqueue_failed_spans{exporter="otlp_http/langfuse-fro-bot"} 12')
-    world.state.now += THRESHOLDS.intervalMs
-    await reporter.runOnce()
-    expect(check(reporter.detail(), 'collector-failures')).toMatchObject({status: 'fail'})
-    expect(reporter.health().status).toBe(503)
-  })
-
-  it('a 429 increase between two runs leaves the verdict passing', async () => {
-    let tooMany = 0
-    const {world, reporter} = withMetrics(() =>
-      collectorPage(
-        [receiverCounters('workstation', 10, tooMany * 100), authRequests('200', 5), authRequests('429', tooMany)].join(
-          '\n',
-        ),
-      ),
-    )
-    await reporter.runOnce()
-    tooMany = 25
-    world.state.now += THRESHOLDS.intervalMs
-    await reporter.runOnce()
-    expect(check(reporter.detail(), 'collector-refused')).toMatchObject({status: 'pass'})
-    expect(reporter.health().status).toBe(200)
-  })
-
-  it('a 503 increase between two runs fails the verdict, and /healthz stays free of counts', async () => {
-    let unavailable = 0
-    const {world, reporter} = withMetrics(() =>
-      collectorPage([receiverCounters('workstation', 10, unavailable), authRequests('503', unavailable)].join('\n')),
-    )
-    await reporter.runOnce()
-    unavailable = 4
-    world.state.now += THRESHOLDS.intervalMs
-    await reporter.runOnce()
-    expect(check(reporter.detail(), 'collector-refused')).toMatchObject({status: 'fail'})
-    const answer = reporter.health()
-    expect(answer.status).toBe(503)
-    expect(Object.keys(record(JSON.parse(answer.body), 'body')).sort()).toEqual(['at', 'ok'])
-    expect(answer.body).not.toContain('ingest')
-    expect(answer.body).not.toContain('Spans')
-  })
-
-  it('a Tempo discard between two runs fails the second verdict', async () => {
-    let metrics = tempoPage('tempo_discarded_spans_total{reason="trace_too_large"} 0')
-    const world = harness()
-    const deps: ReporterDeps = {
-      ...world.deps,
-      fetch: async (url, init) =>
-        url === ENDPOINTS.tempoMetrics ? new Response(metrics, {status: 200}) : world.deps.fetch(url, init),
-    }
-    const reporter = createReporter(deps)
-    await reporter.runOnce()
-    metrics = tempoPage('tempo_discarded_spans_total{reason="trace_too_large"} 3')
-    world.state.now += THRESHOLDS.intervalMs
-    await reporter.runOnce()
-    expect(check(reporter.detail(), 'tempo-discards').status).toBe('fail')
-    expect(reporter.health().status).toBe(503)
-  })
-})
-
 // ─── The public answer ────────────────────────────────────────────────────────
 
 describe('/healthz', () => {
@@ -1920,7 +1727,7 @@ describe('the ingest block in the detail', () => {
     for (const collectorMetrics of ['throw', 500, '<html>nope</html>'] as const) {
       const out = await runOnce({collectorMetrics})
       expect(record(JSON.parse(out.detail), 'detail').ingest).toBeNull()
-      expect(check(out.detail, 'collector-refused').status).toBe('unknown')
+      expect(check(out.detail, 'collector-queues').status).toBe('unknown')
       expect(out.reporter.health().status).toBe(503)
     }
   })

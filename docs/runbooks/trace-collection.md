@@ -59,12 +59,12 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
 
    Success: every service `running` (and `healthy` where it has a check), `Health verdict: PASSING`, and `Status: OK` with exit code 0. On failure it prints `Status: DEGRADED`, exits 1 and lists each check that keeps the verdict from passing as `not passing: <check>: <detail>`. `Health verdict: UNKNOWN` means the reporter could not be reached or answered something unreadable. `--json` prints one object, `{ok, services, health}`.
 
-   Below the check table it prints two `Ingest` lines when the reporter sent counts: spans accepted and refused per group, then requests per HTTP status code. They are totals since the collector started, not rates (they reset when the collector restarts), and they hold no sender, token or trace content. `--json` carries the same block as `health.ingest`; `null` or missing means the reporter could not read the collector's metrics (the `collector-refused` check says so).
+   Below the check table it prints two `Ingest` lines when the reporter sent counts: spans accepted and refused per group, then requests per HTTP status code. They are totals since the collector started, not rates (they reset when the collector restarts), and they hold no sender, token or trace content. `--json` carries the same block as `health.ingest`; `null` or missing means the reporter could not read the collector's metrics (the `collector-queues` check says so).
 
-   Reading the counts and `collector-refused`:
+   Reading the counts:
 
-   - **429** is the byte limiter working: a sender spent its 1 GiB allowance and is refilling at 32 KiB/s. It shows in `requests` (`429=<n>`) and in `refusedSpans`, and it does **not** fail the verdict, so it does not file `traces-unhealthy` or block `ingest open`.
-   - **503** fails `collector-refused` for 30 minutes after the count last rose. It means an exporter queue is full and the collector is shedding data: read `collector-queues`, then `traces logs collector`. The 503 count covers the three authenticated receivers together; it cannot say which group.
+   - **429** is the byte limiter working: a sender spent its 1 GiB allowance and is refilling at 32 KiB/s. It shows in `requests` (`429=<n>`) and in `refusedSpans`, and it does **not** fail the verdict or alert, so it does not file `traces-unhealthy` or block `ingest open`.
+   - **503** means an exporter queue is full and the collector is shedding data. The verdict does not fail on it: the `IngestRefused503` Grafana alert fires, and it is the only signal for when the count rose. Read `collector-queues`, then `traces logs collector`. The 503 count covers the three authenticated receivers together; it cannot say which group.
    - **401** includes the public monitor's deliberate unauthenticated `POST` to `/workstation/v1/traces` every 15 minutes (about 96 a day) and deploy-gate probes, so the 401 count cannot diagnose a sender. To diagnose a revoked sender token, check the sender's `undelivered` or `dropped` log lines and its latest trace in Langfuse.
    - `refusedSpans` counts spans answered 429 or 503, so it can be above zero on a healthy stack, and a 401 does not increment it: the counter is cumulative per group, so a sender refused with 401 changes nothing there.
 
@@ -74,7 +74,7 @@ The host rate-limits new SSH connections: six within 30 seconds from one source 
    curl -fsS https://traces.fro.bot/healthz
    ```
 
-   Success: HTTP 200 and `{"ok": true, "at": "<timestamp>"}`. The answer covers ingest and monitoring (Grafana and Prometheus); `traces status` shows the two verdicts apart. The reporter recomputes every five minutes, so `at` is recent. It sends no trace: the verdict rests on the containers and ready endpoints (Grafana's included), the collector's send and enqueue failures and queue fill, 503s on ingest, Tempo's discards, disk space and data age. Delivery to both backends is proven by the deploy's canary, not by `/healthz`.
+   Success: HTTP 200 and `{"ok": true, "at": "<timestamp>"}`. The answer covers ingest and monitoring (Grafana and Prometheus); `traces status` shows the two verdicts apart. The reporter recomputes every five minutes, so `at` is recent. It sends no trace: the verdict rests on the containers and ready endpoints (Grafana's included), the collector's queue fill, disk space and data age. It judges the stack as it is now; loss over time (failed exports, 503s on ingest, Tempo discards and truncation) is the Grafana alerts' job. Delivery to both backends is proven by the deploy's canary, not by `/healthz`.
 
 3. Compare the route's configured state with what the outside world sees:
 
@@ -134,7 +134,7 @@ The alert text carries nothing the endpoint said. The exact reason is in the pro
    - Dispatch it directly: `bunx @marcusrbrown/infra traces deploy` runs `gh workflow run "Deploy Traces"`. `--dry-run` prints the plan.
    - Dispatching the `Deploy` router itself runs every app's deploy. Use the command above instead.
 
-2. Wait for the run to reach the `traces` Environment gate. The `build-collector` job (`main` only) pushes the collector image to GHCR first, and the `notify` job posts one Discord message when the deploy reaches the gate (`DEPLOY_GATE_DISCORD_WEBHOOK`, see [Deploy-Gate Notifications](deploy-gate-notifications.md)). Approve the gate. A dispatch from another branch builds no image and runs no deploy.
+2. Wait for the run to reach the `traces` Environment gate. The `build-collector` job (`main` only) pushes the collector image to GHCR first, and the `notify` job posts one Discord message when the deploy reaches the gate (`DEPLOY_GATE_DISCORD_WEBHOOK`, see [Deploy-Gate Notifications](deploy-gate-notifications.md)). Before approving a deploy that bumps the collector or Tempo image, confirm that every metric name the loss alert rules use (`otelcol_exporter_send_failed_spans`, `otelcol_exporter_enqueue_failed_spans`, `http_server_request_duration_count`, `tempo_discarded_spans`, `tempo_distributor_attributes_truncated`) still exists in the new collector's and Tempo's `/metrics` (a counter that has never risen is not exported, so check the release notes or source for it); the rules use `noDataState: OK`, so a renamed metric silences them without any alert. Approve the gate. A dispatch from another branch builds no image and runs no deploy.
 
 3. Read the end of the deploy log. It prints one line per gate, `✓` passed, `✗` failed, `-` skipped, then the outcome.
 
@@ -273,7 +273,7 @@ So a hold lasts only if no deploy can reach its final step. In an emergency, in 
 
 A firewall block also takes `/healthz` down, so the probe fails with a no-answer reason and the monitor opens `traces-unhealthy` after two runs. It closes itself on the first healthy run after step 5. To reopen ingest afterwards, set `TRACES_INGEST_OPEN` back to `true` and deploy, or run `traces ingest open` as described below.
 
-**Open.** Refuses unless the health reporter's latest verdict is fresh and passing, and no deploy is running or unfinished.
+**Open.** Refuses unless the health reporter's latest verdict is fresh and passing, and no deploy is running or unfinished. The verdict judges current state only, so a loss that has already recovered (a failed export, a 503, a Tempo discard) no longer blocks it; the loss alerts are where that shows.
 
 ```bash
 bunx @marcusrbrown/infra traces ingest open

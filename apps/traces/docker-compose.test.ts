@@ -1559,19 +1559,48 @@ describe('Grafana alerting provisioning', async () => {
     expect(rule('ReporterStale').expr).toBe(`time() - ${METRIC_NAMES.lastRun}`)
   })
 
-  it('uses only metric names the reporter reads or exports', () => {
+  // The reporter no longer judges loss: these four rules are the only place it is detected. Their names are listed
+  // here, not read from the reporter source, so a rename in the collector or Tempo has to change this list on purpose.
+  // The rules use `noDataState: OK` (an absent counter means no loss), so a renamed counter silences them: review the
+  // collector and Tempo `/metrics` against this list whenever either image is bumped.
+  const LOSS_RULE_METRICS: Record<string, readonly string[]> = {
+    CollectorExportFailures: ['otelcol_exporter_send_failed_spans', 'otelcol_exporter_enqueue_failed_spans'],
+    IngestRefused503: ['http_server_request_duration_count'],
+    TempoDiscards: ['tempo_discarded_spans'],
+    TempoAttributeTruncation: ['tempo_distributor_attributes_truncated'],
+  }
+  // What the reporter still reads from the collector's page, so its own source must name them.
+  const REPORTER_READ_METRICS = ['otelcol_exporter_queue_size', 'otelcol_exporter_queue_capacity'] as const
+
+  it('uses only metric names the reporter exports or reads, or the explicit loss list', () => {
     const exported = new Set<string>(Object.values(METRIC_NAMES))
+    const lossNames = new Set(Object.values(LOSS_RULE_METRICS).flat())
+    const readByReporter = new Set<string>(REPORTER_READ_METRICS)
     for (const candidate of rules) {
       const used =
         candidate.expr.match(/\b(?:otelcol|tempo|traces)_[a-z_]+|\bhttp_server_request_duration_count\b|\bup\b/g) ?? []
       expect({title: candidate.title, used: used.length > 0}).toEqual({title: candidate.title, used: true})
       for (const name of used) {
-        const known = exported.has(name) || name === 'up' || reporterSource.includes(name)
+        const known = exported.has(name) || name === 'up' || readByReporter.has(name) || lossNames.has(name)
         expect({title: candidate.title, name, known}).toEqual({title: candidate.title, name, known: true})
       }
     }
-    for (const name of ['otelcol_exporter_send_failed_spans', 'otelcol_exporter_enqueue_failed_spans']) {
-      expect(reporterSource).toContain(name)
+    for (const name of REPORTER_READ_METRICS) expect(reporterSource).toContain(name)
+  })
+
+  it('pins each loss rule to its metric names, in the Grafana rule and in the promtool mirror', async () => {
+    const mirror = await read('config/prometheus/loss-rules.yml')
+    expect(Object.keys(LOSS_RULE_METRICS).sort()).toEqual(
+      rules
+        .filter(candidate => candidate.for === '0s')
+        .map(candidate => candidate.title)
+        .sort(),
+    )
+    for (const [title, names] of Object.entries(LOSS_RULE_METRICS)) {
+      for (const name of names) {
+        expect({title, name, grafana: rule(title).expr.includes(name)}).toEqual({title, name, grafana: true})
+        expect({title, name, mirror: mirror.includes(name)}).toEqual({title, name, mirror: true})
+      }
     }
   })
 

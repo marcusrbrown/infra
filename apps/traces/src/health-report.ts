@@ -1,8 +1,10 @@
 // ─── Health reporter ──────────────────────────────────────────────────────────
 //
 // One verdict for the whole trace stack, produced on the host. A timer runs every check, then publishes
-// the result. The verdict sends no trace: it rests on the ready endpoints, the collector and Tempo metrics, disk
-// space and data age. Three listeners serve it:
+// the result. The verdict sends no trace: it rests on the ready endpoints, the collector's exporter queues, disk
+// space and data age. Every check is a reading of the stack as it is now. Ongoing loss (failed exports, 503 answers,
+// Tempo discards and truncation) is not judged here: the Grafana rules in `config/grafana/alerting/rules.yaml` read
+// those counters over time. Three listeners serve it:
 //
 //   0.0.0.0:8080   GET /healthz   200 or 503, and a body of `{ok, at}`: one boolean and one timestamp.
 //                                 Caddy routes this path publicly, so nothing else may ever be in it.
@@ -63,8 +65,6 @@ export const THRESHOLDS = {
   rootFailPercent: 85,
   /** Oldest data in any store, in days. Retention is 30; older than this fails the verdict. */
   maxDataAgeDays: 31,
-  /** A loss counter that rose keeps the verdict failing this long, so a half-hourly monitor cannot miss it. */
-  lossLatchMs: 30 * 60_000,
   /** How long the canary may take to appear in both backends. */
   canaryDeadlineMs: 60_000,
   canaryPollMs: 3000,
@@ -120,7 +120,6 @@ export const ENDPOINTS = {
   collectorMetrics: 'http://collector:8888/metrics',
   canaryReceiver: 'http://collector:4414/canary/v1/traces',
   tempoReady: 'http://tempo:3200/ready',
-  tempoMetrics: 'http://tempo:3200/metrics',
   tempoTraceBase: 'http://tempo:3200/api/traces/',
   langfuseWeb: 'http://langfuse-web:3000/api/public/health',
   langfuseWorker: 'http://langfuse-worker:3030/api/health',
@@ -171,11 +170,7 @@ export type CheckScope = 'ingest' | 'monitoring'
 export const REQUIRED_CHECKS = [
   'collector-health',
   'collector-queues',
-  'collector-failures',
-  'collector-refused',
   'tempo-ready',
-  'tempo-discards',
-  'tempo-truncation',
   'langfuse-web',
   'langfuse-worker',
   'volume-space',
@@ -240,16 +235,6 @@ export interface Sample {
   name: string
   labels: Record<string, string>
   value: number
-}
-
-/** Counter values from the previous run, and when each last rose. */
-export interface CounterState {
-  values: Record<string, number>
-  lastRise: Record<string, number>
-}
-
-export function emptyCounterState(): CounterState {
-  return {values: {}, lastRise: {}}
 }
 
 // ─── Small helpers ────────────────────────────────────────────────────────────
@@ -365,74 +350,6 @@ function matching(samples: readonly Sample[], base: string, labels: Record<strin
   )
 }
 
-// ─── Counters ─────────────────────────────────────────────────────────────────
-
-/**
- * Advance one counter. The growth since the last run is the difference; a value below the last one means the
- * process restarted, so the growth is the whole new value. The first reading of a counter has nothing to
- * compare with and only sets its baseline. That is deliberate: the reporter restarts on every deploy, and a
- * collector or Tempo that outlived it carries old counts that are not new losses.
- */
-export function advanceCounter(
-  state: CounterState,
-  key: string,
-  current: number,
-  nowMs: number,
-): {growth: number; state: CounterState} {
-  const previous = state.values[key]
-  const growth = previous === undefined ? 0 : current >= previous ? current - previous : current
-  return {
-    growth,
-    state: {
-      values: {...state.values, [key]: current},
-      lastRise: growth > 0 ? {...state.lastRise, [key]: nowMs} : state.lastRise,
-    },
-  }
-}
-
-/** The counters whose growth keeps a check failing: anything that rose inside the latch window. */
-function recentlyRisen(state: CounterState, prefix: string, nowMs: number): string[] {
-  return Object.entries(state.lastRise)
-    .filter(([key, at]) => key.startsWith(prefix) && nowMs - at <= THRESHOLDS.lossLatchMs)
-    .map(([key]) => key.slice(prefix.length))
-    .sort()
-}
-
-interface CounterSpec {
-  /** Check id, which is also the key prefix. */
-  id: string
-  /** Metric base name. */
-  metric: string
-  /** The label that names what the counter counts per. */
-  label: string
-  /** The values of that label to read. */
-  values: readonly string[]
-}
-
-/**
- * Read a set of counters and report which rose recently. A counter that has never been incremented is not
- * exported by the OpenTelemetry SDK or by Tempo, so an absent series is zero. That is only believed when
- * `present` shows the page really came from the service (its always-present sentinel metric), which the
- * caller checks first.
- */
-function readCounters(
-  samples: readonly Sample[],
-  spec: CounterSpec,
-  state: CounterState,
-  nowMs: number,
-): {state: CounterState; invalid: string | undefined} {
-  let next = state
-  for (const value of spec.values) {
-    const found = matching(samples, spec.metric, {[spec.label]: value})
-    if (found.some(sample => !Number.isFinite(sample.value) || sample.value < 0)) {
-      return {state: next, invalid: `${spec.metric} ${value} is not a count`}
-    }
-    const current = found.reduce((sum, sample) => sum + sample.value, 0)
-    next = advanceCounter(next, `${spec.id}:${value}`, current, nowMs).state
-  }
-  return {state: next, invalid: undefined}
-}
-
 // ─── Collector metrics ────────────────────────────────────────────────────────
 
 const HTTP_REQUESTS = 'http_server_request_duration_count'
@@ -496,53 +413,6 @@ export function evaluateIngestCounts(samples: readonly Sample[]): IngestCounts |
   return {groups, requests, note: INGEST_NOTE}
 }
 
-/** True when any OTLP receiver has accepted or refused a span, so the collector has served requests. */
-function hasServedSpans(samples: readonly Sample[]): boolean {
-  return ['otelcol_receiver_accepted_spans', 'otelcol_receiver_refused_spans'].some(metric =>
-    matching(samples, metric).some(sample => sample.labels.receiver?.startsWith('otlp/') === true && sample.value > 0),
-  )
-}
-
-/**
- * Only a 503 fails: it means a queue is full and the collector is shedding data. A 429 is the byte limiter doing
- * its job and passes. The receivers' own `refused_spans` counter rises for both, so it cannot tell them apart;
- * the HTTP request count by status code can.
- *
- * A counter that was never incremented is not exported, so an absent 503 series is zero. That is believed only
- * while the request metric is exported at all: spans served and no request series anywhere (the canary's own
- * included) means a renamed or switched-off metric, and the check is `unknown` rather than a pass. A collector that has served nothing has
- * nothing to report, so it passes.
- */
-function evaluateUnavailable(
-  samples: readonly Sample[],
-  state: CounterState,
-  nowMs: number,
-): {state: CounterState; result: CheckResult} {
-  const requests = ingestRequests(samples)
-  if (!requests.every(sample => isCount(sample.value))) {
-    return {state, result: result('collector-refused', 'unknown', `${HTTP_REQUESTS} is not a count`)}
-  }
-  // Presence is tested on the whole family, the canary's series included: they prove the metric is exported even
-  // when the canary is the only traffic (after a restart with ingest held or off). Only the 503 total and the
-  // displayed counts leave the canary out.
-  const exported = samples.some(sample => sample.name === HTTP_REQUESTS)
-  if (!exported && hasServedSpans(samples)) {
-    return {
-      state,
-      result: result('collector-refused', 'unknown', `spans were served but ${HTTP_REQUESTS} is not exported`),
-    }
-  }
-  const unavailable = total(requests.filter(sample => sample.labels.http_response_status_code === '503'))
-  const next = advanceCounter(state, 'http503:all', unavailable, nowMs).state
-  return {
-    state: next,
-    result:
-      recentlyRisen(next, 'http503:', nowMs).length > 0
-        ? result('collector-refused', 'fail', 'ingest answered 503 recently: an exporter queue was full')
-        : result('collector-refused', 'pass', 'no 503 answers on ingest'),
-  }
-}
-
 const COLLECTOR_SENTINEL = 'otelcol_process_uptime'
 
 function isCollectorPage(samples: readonly Sample[]): boolean {
@@ -587,131 +457,16 @@ export function evaluateQueues(samples: readonly Sample[]): CheckResult {
 }
 
 /**
- * Evaluate everything the collector's metrics say. Returns the results, the counter state for the next run and the
- * ingest counts for the detail. A page that is not the collector's, or that lacks its sentinel, makes every metric
- * check `unknown` and carries no counts.
+ * Evaluate what the collector's metrics say right now: the exporter queues, and the ingest counts for the detail. A
+ * page that is not the collector's, or that lacks its sentinel, makes the queue check `unknown` and carries no counts.
+ * Ongoing loss (failed exports, 503 answers) is not judged here: the Grafana rules read those counters over time.
  */
-export function evaluateCollectorMetrics(
-  text: string,
-  state: CounterState,
-  nowMs: number,
-): {results: CheckResult[]; state: CounterState; ingest: IngestCounts | null} {
+export function evaluateCollectorMetrics(text: string): {results: CheckResult[]; ingest: IngestCounts | null} {
   const samples = parsePrometheus(text)
   if (!isCollectorPage(samples)) {
-    const why = 'collector metrics unreadable'
-    return {
-      results: [
-        result('collector-queues', 'unknown', why),
-        result('collector-failures', 'unknown', why),
-        result('collector-refused', 'unknown', why),
-      ],
-      state,
-      ingest: null,
-    }
+    return {results: [result('collector-queues', 'unknown', 'collector metrics unreadable')], ingest: null}
   }
-
-  const queues = evaluateQueues(samples)
-  let next = state
-
-  const failureSpecs: CounterSpec[] = [
-    {id: 'enqueue', metric: 'otelcol_exporter_enqueue_failed_spans', label: 'exporter', values: EXPECTED_EXPORTERS},
-    {id: 'send', metric: 'otelcol_exporter_send_failed_spans', label: 'exporter', values: EXPECTED_EXPORTERS},
-  ]
-
-  const invalid: string[] = []
-  for (const spec of failureSpecs) {
-    const read = readCounters(samples, spec, next, nowMs)
-    next = read.state
-    if (read.invalid !== undefined) invalid.push(read.invalid)
-  }
-
-  const failed = [
-    ...recentlyRisen(next, 'enqueue:', nowMs).map(name => `${name} enqueue failed`),
-    ...recentlyRisen(next, 'send:', nowMs).map(name => `${name} send failed`),
-  ]
-
-  const unavailable = evaluateUnavailable(samples, next, nowMs)
-  next = unavailable.state
-
-  return {
-    results: [
-      queues,
-      invalid.length > 0
-        ? result('collector-failures', 'unknown', invalid.join('; '))
-        : failed.length > 0
-          ? result('collector-failures', 'fail', `spans lost recently: ${failed.join(', ')}`)
-          : result('collector-failures', 'pass', 'no enqueue or send failures'),
-      unavailable.result,
-    ],
-    state: next,
-    ingest: evaluateIngestCounts(samples),
-  }
-}
-
-// ─── Tempo metrics ────────────────────────────────────────────────────────────
-
-/** Any metric in Tempo's own namespace proves the page is Tempo's registry (a page of HTML yields no samples at all). */
-const TEMPO_NAMESPACE = 'tempo_'
-
-/**
- * Tempo answers 200 to a trace it has cut down, so the only evidence is in its counters: spans discarded
- * (a trace over the size limit, a rate limit) and attributes truncated at 2,048 bytes. Both series are absent
- * until first used.
- *
- * Discarded spans are lost data and fail. Truncation is the documented effect of Tempo's default attribute
- * limit on long free-text fields (an error message can be long), and it warns rather than fails.
- */
-export function evaluateTempoMetrics(
-  text: string,
-  state: CounterState,
-  nowMs: number,
-): {results: CheckResult[]; state: CounterState} {
-  const samples = parsePrometheus(text)
-  if (!samples.some(sample => sample.name.startsWith(TEMPO_NAMESPACE))) {
-    const why = 'tempo metrics unreadable'
-    return {results: [result('tempo-discards', 'unknown', why), result('tempo-truncation', 'unknown', why)], state}
-  }
-
-  // Discards are keyed by reason, which Tempo labels itself.
-  const reasons = [
-    ...new Set(matching(samples, 'tempo_discarded_spans').map(sample => sample.labels.reason ?? 'unlabelled')),
-  ]
-  let next = state
-  let invalid: string | undefined
-  const discards = readCounters(
-    samples,
-    {id: 'discard', metric: 'tempo_discarded_spans', label: 'reason', values: reasons},
-    next,
-    nowMs,
-  )
-  next = discards.state
-  invalid ??= discards.invalid
-
-  const truncated = matching(samples, 'tempo_distributor_attributes_truncated')
-  if (truncated.some(sample => !Number.isFinite(sample.value) || sample.value < 0)) {
-    invalid ??= 'tempo_distributor_attributes_truncated is not a count'
-  }
-  const truncatedTotal = truncated.reduce((sum, sample) => sum + sample.value, 0)
-  next = advanceCounter(next, 'truncate:all', truncatedTotal, nowMs).state
-
-  const discarded = recentlyRisen(next, 'discard:', nowMs)
-  const truncatedRecently = recentlyRisen(next, 'truncate:', nowMs).length > 0
-
-  return {
-    results: [
-      invalid === undefined
-        ? discarded.length > 0
-          ? result('tempo-discards', 'fail', `spans discarded recently: ${discarded.join(', ')}`)
-          : result('tempo-discards', 'pass', 'no spans discarded')
-        : result('tempo-discards', 'unknown', invalid),
-      invalid === undefined
-        ? truncatedRecently
-          ? result('tempo-truncation', 'warn', 'attributes were truncated at the default limit')
-          : result('tempo-truncation', 'pass', 'no attributes truncated')
-        : result('tempo-truncation', 'unknown', invalid),
-    ],
-    state: next,
-  }
+  return {results: [evaluateQueues(samples)], ingest: evaluateIngestCounts(samples)}
 }
 
 // ─── Disk ─────────────────────────────────────────────────────────────────────
@@ -1549,7 +1304,6 @@ export async function canaryOnceOutput(deps: ReporterDeps): Promise<string> {
 
 export interface RunOutcome {
   verdict: Verdict
-  counters: CounterState
   /** The ingest counts from this run's scrape, or null when the scrape failed or could not be read. */
   ingest: IngestCounts | null
   gauges: Gauges
@@ -1573,29 +1327,6 @@ export function assembleVerdict(results: readonly CheckResult[], at: number): Ve
   return {ok: ingest.every(passes), monitoringOk: monitoring.every(passes), at, checks: [...ingest, ...monitoring]}
 }
 
-const COLLECTOR_COUNTER_PREFIXES = ['enqueue:', 'send:', 'http503:'] as const
-const TEMPO_COUNTER_PREFIXES = ['discard:', 'truncate:'] as const
-
-function pick<T>(record: Record<string, T>, prefixes: readonly string[]): Record<string, T> {
-  return Object.fromEntries(Object.entries(record).filter(([key]) => prefixes.some(prefix => key.startsWith(prefix))))
-}
-
-/** The collector and Tempo checks run at the same time, so each advances only its own counters. */
-function mergeCounters(base: CounterState, collector: CounterState, tempo: CounterState): CounterState {
-  return {
-    values: {
-      ...base.values,
-      ...pick(collector.values, COLLECTOR_COUNTER_PREFIXES),
-      ...pick(tempo.values, TEMPO_COUNTER_PREFIXES),
-    },
-    lastRise: {
-      ...base.lastRise,
-      ...pick(collector.lastRise, COLLECTOR_COUNTER_PREFIXES),
-      ...pick(tempo.lastRise, TEMPO_COUNTER_PREFIXES),
-    },
-  }
-}
-
 async function probeFs(deps: ReporterDeps, path: string): Promise<Probe<FsStats>> {
   try {
     return {ok: true, value: await bounded(() => deps.statfs(path), probeLimit(deps))}
@@ -1604,44 +1335,25 @@ async function probeFs(deps: ReporterDeps, path: string): Promise<Probe<FsStats>
   }
 }
 
-export async function runChecks(deps: ReporterDeps, counters: CounterState): Promise<RunOutcome> {
-  const startedAt = deps.now()
-  let collectorState = counters
-  let tempoState = counters
+export async function runChecks(deps: ReporterDeps): Promise<RunOutcome> {
   let ingest: IngestCounts | null = null
   const disks: Gauges['disk'] = {}
   const stores: Gauges['ages'] = {}
 
   const [collector, tempo, langfuse, monitoring, disk, ages] = await Promise.all([
-    guarded(['collector-health', 'collector-queues', 'collector-failures', 'collector-refused'], async () => {
+    guarded(['collector-health', 'collector-queues'], async () => {
       const [health, metrics] = await Promise.all([
         checkCollectorHealth(deps),
         probeText(deps, ENDPOINTS.collectorMetrics),
       ])
       if (!metrics.ok) {
-        const why = `collector metrics unreadable (${metrics.reason})`
-        return [
-          health,
-          result('collector-queues', 'unknown', why),
-          result('collector-failures', 'unknown', why),
-          result('collector-refused', 'unknown', why),
-        ]
+        return [health, result('collector-queues', 'unknown', `collector metrics unreadable (${metrics.reason})`)]
       }
-      const evaluated = evaluateCollectorMetrics(metrics.value.text, counters, startedAt)
-      collectorState = evaluated.state
+      const evaluated = evaluateCollectorMetrics(metrics.value.text)
       ingest = evaluated.ingest
       return [health, ...evaluated.results]
     }),
-    guarded(['tempo-ready', 'tempo-discards', 'tempo-truncation'], async () => {
-      const [ready, metrics] = await Promise.all([checkTempoReady(deps), probeText(deps, ENDPOINTS.tempoMetrics)])
-      if (!metrics.ok) {
-        const why = `tempo metrics unreadable (${metrics.reason})`
-        return [ready, result('tempo-discards', 'unknown', why), result('tempo-truncation', 'unknown', why)]
-      }
-      const evaluated = evaluateTempoMetrics(metrics.value.text, counters, startedAt)
-      tempoState = evaluated.state
-      return [ready, ...evaluated.results]
-    }),
+    guarded(['tempo-ready'], async () => [await checkTempoReady(deps)]),
     guarded(['langfuse-web', 'langfuse-worker'], () => checkLangfuse(deps)),
     guarded(MONITORING_CHECKS, async () => {
       const [grafana, prometheus, embedder, reader] = await Promise.all([
@@ -1704,7 +1416,6 @@ export async function runChecks(deps: ReporterDeps, counters: CounterState): Pro
 
   return {
     verdict: assembleVerdict(results, finishedAt),
-    counters: mergeCounters(counters, collectorState, tempoState),
     ingest,
     gauges: {probes, disk: disks, ages: stores, lastRun: finishedAt / 1000},
   }
@@ -1741,7 +1452,6 @@ export function createReporter(deps: ReporterDeps): Reporter {
   let verdict: Verdict | undefined
   let ingest: IngestCounts | null = null
   let gauges: Gauges | undefined
-  let counters = emptyCounterState()
   let running: Promise<void> | undefined
 
   const isFresh = (): boolean =>
@@ -1750,8 +1460,7 @@ export function createReporter(deps: ReporterDeps): Reporter {
   const runOnce = (): Promise<void> => {
     running ??= (async () => {
       try {
-        const outcome = await bounded(() => runChecks(deps, counters), runLimit(deps))
-        counters = outcome.counters
+        const outcome = await bounded(() => runChecks(deps), runLimit(deps))
         verdict = outcome.verdict
         ingest = outcome.ingest
         gauges = outcome.gauges

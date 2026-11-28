@@ -699,11 +699,7 @@ export class FakeHost {
     const required = [
       'collector-health',
       'collector-queues',
-      'collector-failures',
-      'collector-refused',
       'tempo-ready',
-      'tempo-discards',
-      'tempo-truncation',
       'langfuse-web',
       'langfuse-worker',
       'volume-space',

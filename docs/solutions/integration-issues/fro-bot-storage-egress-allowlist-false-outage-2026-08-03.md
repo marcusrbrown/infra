@@ -1,6 +1,7 @@
 ---
 title: Egress allowlist on the credential-bearing autoheal job blocked its own health checks
 date: 2026-08-03
+last_updated: 2026-11-27
 category: integration-issues
 module: fro-bot
 problem_type: integration_issue
@@ -38,7 +39,7 @@ A content/storage job split (PR #1013) moved the daily-autoheal prompt into the 
 
 - `curl --connect-timeout 10 https://kw.igg.ms` (and `metrics.fro.bot`, `dashboard.fro.bot`, `broker.fro.bot`) returned `000` / "Failed to connect ... port 443".
 - `npx agent-browser open "https://kw.igg.ms"` → `net::ERR_CONNECTION_REFUSED`.
-- `getent hosts` resolved every host correctly — DNS worked; only the TLS connect was blocked.
+- In this incident `getent hosts` resolved every host correctly — DNS worked; only the TLS connect was blocked. Not every blocked name behaves this way: see [the 2026-11-27 update](#update-2026-11-27-a-blocked-name-can-resolve-to-a-sinkhole-address).
 - The autoheal filed **#1026** "Public endpoints unreachable from scheduled autoheal" even though all endpoints were healthy.
 
 ## What Didn't Work
@@ -72,7 +73,7 @@ allowed-endpoints: >-
 
 ## Why This Works
 
-A fail-closed allowlist blocks the TLS connect *after* DNS resolves, so a missing host looks like a connection refusal rather than a policy block. Enumerating every host the agent legitimately reaches makes the allowlist match the job's real network behavior — the report-only checks succeed — while every other destination stays blocked, preserving the exfiltration bound around a credential-bearing, prompt-injectable job.
+In this incident the fail-closed allowlist blocked the TLS connect _after_ DNS resolved, so a missing host looked like a connection refusal rather than a policy block. Enumerating every host the agent legitimately reaches makes the allowlist match the job's real network behavior — the report-only checks succeed — while every other destination stays blocked, preserving the exfiltration bound around a credential-bearing, prompt-injectable job.
 
 ## Prevention
 
@@ -83,9 +84,16 @@ A fail-closed allowlist blocks the TLS connect *after* DNS resolves, so a missin
 
 The honest limit: `api.github.com` is allowlisted and the PAT posts issues, so GitHub itself is an app-layer exfil channel — harden-runner is defense-in-depth, not DLP. It still blocks arbitrary-destination exfiltration, which is why widening beats removing.
 
+## Update 2026-11-27: a blocked name can resolve to a sinkhole address
+
+In a job under `egress-policy: block`, harden-runner can answer a blocked name with its own fixed sinkhole address instead of the real one. A runner-side DNS answer is therefore not evidence of what the name resolves to. The daily report resolved `gateway.fro.bot` on the runner, got an address that matched no pin in `.github/known_hosts`, and opened issue #2079 for a host-key mismatch. It was a false alarm: `gateway.fro.bot` is not in the job's `allowed-endpoints` (`.github/workflows/fro-bot.yaml:1127-1135`), and the harden-runner log showed `domain not allowed: gateway.fro.bot.` Its follow-up `dig` queries to public resolvers were dropped too. From an unrestricted network, every resolver returned the address pinned in `known_hosts`.
+
+- **Read pins statically.** Check `.github/known_hosts` as a file. Do not resolve a hostname from this job, and do not open an issue on a runner-side DNS answer. PR #2127 puts that rule in the report prompt.
+- **Recognise the signature.** `domain not allowed: <name>` in the harden-runner log, with an address that matches nothing you know, means the name was blocked. The allowlist-parse variant of the same signature is in fro-bot/agent's `docs/solutions/workflow-issues/harden-runner-allowed-endpoints-literal-scalar-drops-endpoints-2026-07-07.md`.
+
 ## Related Issues
 
 - [`gateway-mention-loop-stalls-2026-06-03.md`](gateway-mention-loop-stalls-2026-06-03.md) — the fail-closed egress-allowlist precedent (one missing host silently breaks a downstream tool), plus the adjacent "looks like an egress block, verify actual output" lesson; verify against ground truth.
 - [`../best-practices/dedicated-hermetic-aws-child-env-for-cli-subprocess-2026-08-03.md`](../best-practices/dedicated-hermetic-aws-child-env-for-cli-subprocess-2026-08-03.md) — sibling credential-boundary lesson from the same rollout (env scrubbing is not process isolation).
 - [`agent-s3-iam-layout-drift-from-action-2026-08-03.md`](agent-s3-iam-layout-drift-from-action-2026-08-03.md) — same durable-storage rollout.
-- Issues/PRs: #1026 (false outage), #1013 (the content/storage split), #1029 (fix).
+- Issues/PRs: #1026 (false outage), #1013 (the content/storage split), #1029 (fix); #2079 and #2127 (sinkhole DNS false alarm and its prompt fix).
